@@ -2691,7 +2691,13 @@ c
 c***********************************************************************
 c
 c     sequential build real and integer work array sizes
-      isum = ftot_seq+need
+c	  for some fortran compiler if sequential isum exceeds INT32, the code will raise error eventhough it is parallel mode for isum comes from a int + double
+      if (ftot_seq+dble(need) .gt. dble(huge(isum)) then
+        write(*,*) 'WARNING: sequential workspace exceeds INT32'
+        isum = huge(isum)
+      else
+        isum = int(ftot_seq+dble(need))
+      endif
       isumi = max(needi,1)
 c     parallel build real and integer work array sizes (per compute node)
       isum_n = tot_nod
