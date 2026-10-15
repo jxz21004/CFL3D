@@ -1,6 +1,7 @@
 """Usage: python examples/python/run_cgns.py mesh.cgns --model sst --iterations 500"""
 import argparse
 from cfl3d import CFL3D, SolverOptions
+from numerical_options import add_numerical_options, numerical_options
 
 
 def main():
@@ -14,14 +15,15 @@ def main():
     p.add_argument("--temperature", type=float, default=288.15)
     p.add_argument("--cfl", type=float, default=2.)
     p.add_argument("--iterations", type=int, default=100)
-    p.add_argument("--multigrid-levels", type=int, default=1)
+    add_numerical_options(p)
     p.add_argument("--output-directory", default="cfl3d-output")
     a = p.parse_args()
     result = CFL3D(a.mesh, SolverOptions(mach=a.mach, alpha=a.alpha, beta=a.beta,
                    reynolds=a.reynolds, temperature=a.temperature, turbulence=a.model,
-                   cfl=a.cfl, iterations=a.iterations, multigrid_levels=a.multigrid_levels)).solve(
+                   cfl=a.cfl, iterations=a.iterations, **numerical_options(p, a))).solve(
                    output_directory=a.output_directory)
     print(result.coefficients)
+    print(f"Final alpha: {result.final_alpha:.10g} degrees")
     print(f"Saved fields and convergence history to {result.output_directory / 'solution.npz'}")
 
 

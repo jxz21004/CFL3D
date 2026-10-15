@@ -699,7 +699,11 @@ c
       open(unit=23,file=subres,form='formatted',status='unknown')
       open(unit=24,file=subtur,form='formatted',status='unknown')
       open(unit=25,file=grdmov,form='formatted',status='unknown')
+#ifdef PYTHON_API
+      open(unit=27,file=alphahist,form='formatted',status='replace')
+#else
       open(unit=27,file=alphahist,form='formatted',status='unknown')
+#endif
       open(unit=33,file=aeinp,form='formatted',status='unknown')
       open(unit=34,file=aeout,form='formatted',status='unknown')
 #   ifdef CMPLX

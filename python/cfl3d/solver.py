@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import os
 from pathlib import Path
 import threading
+from numbers import Real
 import numpy as np
 from .cgns import CGNSMesh
 
@@ -12,6 +13,53 @@ _MODELS = {"euler": 0, "laminar": 1, "sa": 5, "sst": 7, "komega": 6}
 _BC_TYPES = {"BCFarfield": (1003, ()), "BCSymmetryPlane": (1001, ()),
              "BCWallInviscid": (1005, ()), "BCOutflowSupersonic": (1002, ()),
              "BCWallViscous": (2004, (0., 0.)), "BCWallViscousHeatFlux": (2004, (0., 0.))}
+
+
+def _integer(value, name, minimum=0, maximum=None):
+    if isinstance(value, bool) or not isinstance(value, int) or value < minimum \
+            or (maximum is not None and value > maximum):
+        raise ValueError(f"{name} must be an integer in [{minimum}, {maximum if maximum is not None else 'unbounded'}]")
+
+
+def _finite(value, name):
+    if isinstance(value, bool) or not isinstance(value, Real) or not np.isfinite(value):
+        raise ValueError(f"{name} must be a finite real number")
+
+
+def _directions(value, name, choices=None):
+    values = value if isinstance(value, tuple) else (value,) * 3
+    if len(values) != 3:
+        raise ValueError(f"{name} must be a scalar or an (i,j,k) tuple")
+    for item in values:
+        if choices is None:
+            _finite(item, name)
+        elif isinstance(item, bool) or not isinstance(item, int) or item not in choices:
+            raise ValueError(f"{name} entries must be integers in {choices}")
+    return values
+
+
+def _smoothing(values, levels, name):
+    if not isinstance(values, tuple) or len(values) != levels:
+        raise ValueError(f"{name} must be a tuple with {levels} entries, coarsest to finest")
+    for value in values:
+        # 旧内核的每层更新次数工作数组最多容纳 20 次。
+        _integer(value, name, 1, 20)
+
+
+@dataclass(frozen=True)
+class MultigridStage:
+    """一次网格序列阶段；levels 为活跃层数，smoothing_steps 按粗到细对应 MIT。"""
+    iterations: int
+    levels: int
+    first_order_iterations: int = 0
+    smoothing_steps: tuple[int, ...] | None = None
+
+    def validate(self, available_levels):
+        _integer(self.iterations, "stage.iterations", 1)
+        _integer(self.levels, "stage.levels", 1, available_levels)
+        _integer(self.first_order_iterations, "stage.first_order_iterations", 0, self.iterations)
+        if self.smoothing_steps is not None:
+            _smoothing(self.smoothing_steps, self.levels, "stage.smoothing_steps")
 
 
 @dataclass(frozen=True)
@@ -37,20 +85,28 @@ class SolverOptions:
     full_navier_stokes: bool = True
     turbulence_subiterations: int = 1
     turbulence_cfl: float = 5.0
-    eddy_viscosity_limit: float = 1e5
+    eddy_viscosity_limit: float = 1e5  # 按用户要求保留较保守的 Python 默认值。
     gamma: float = 1.4
-    limiter: int = 0
-    flux: int = 1
-    kappa: float = 1.0 / 3.0
+    limiter: int | tuple[int, int, int] = 0
+    flux: int | tuple[int, int, int] = 1
+    kappa: float | tuple[float, float, float] = 1.0 / 3.0
     y_up: bool = False
     sref: float = 1.0
     cref: float = 1.0
     bref: float = 1.0
     moment_center: tuple[float, float, float] = (0., 0., 0.)
+    target_cl: float | None = None
+    alpha_relaxation: float = 1.0
+    alpha_step_limit: float = 0.2  # degrees per native alpha update
+    alpha_update_interval: int = 1
+    multigrid_up_iterations: int = 0  # MTT
+    multigrid_smoothing: tuple[int, ...] | None = None  # MIT, coarsest to finest
+    multigrid_stages: tuple[MultigridStage, ...] | None = None
+    inversion: int | tuple[int, int, int] = 1  # IDIAG, scalar or (i,j,k)
 
     def validate(self):
         ints = ("iterations", "multigrid_levels", "coarse_iterations", "multigrid_cycle",
-                "turbulence_subiterations", "limiter", "flux", "cfl_ramp_steps",
+                "turbulence_subiterations", "cfl_ramp_steps",
                 "first_order_iterations", "coarse_first_order_iterations")
         for name in ints:
             value = getattr(self, name)
@@ -70,10 +126,10 @@ class SolverOptions:
         if self.turbulence.lower() not in _MODELS:
             raise ValueError(f"Supported models: {', '.join(_MODELS)}")
         for name in ("mach", "alpha", "beta", "reynolds", "temperature", "cfl", "turbulence_cfl",
-                     "eddy_viscosity_limit", "gamma", "kappa", "sref", "cref", "bref", "cfl_ramp_factor"):
+                     "eddy_viscosity_limit", "gamma", "sref", "cref", "bref", "cfl_ramp_factor",
+                     "alpha_relaxation", "alpha_step_limit"):
             value = getattr(self, name)
-            if isinstance(value, bool) or not np.isscalar(value) or not np.isfinite(value):
-                raise ValueError(f"{name} must be finite")
+            _finite(value, name)
         if self.mach <= 0 or self.temperature <= 0 or self.cfl <= 0 or self.gamma <= 1:
             raise ValueError("Require positive Mach, temperature, CFL and gamma > 1")
         if self.cfl_ramp_factor < 1:
@@ -87,8 +143,48 @@ class SolverOptions:
             raise ValueError("Viscous models require positive Reynolds number")
         if len(self.moment_center) != 3 or not np.isfinite(self.moment_center).all():
             raise ValueError("moment_center must contain three finite coordinates")
-        if self.limiter not in (0, 1, 2, 3, 4) or self.flux not in (0, 1):
-            raise ValueError("Supported limiter values 0..4 and flux values 0,1")
+        _directions(self.limiter, "limiter", (0, 1, 2, 3, 4))
+        _directions(self.flux, "flux", (0, 1))
+        _directions(self.inversion, "inversion", (0, 1))
+        _directions(self.kappa, "kappa")
+        _integer(self.alpha_update_interval, "alpha_update_interval", 1)
+        if min(self.alpha_relaxation, self.alpha_step_limit) <= 0:
+            raise ValueError("Alpha relaxation and step limit must be positive")
+        if self.target_cl is not None:
+            _finite(self.target_cl, "target_cl")
+            if self.target_cl == 99999.0:
+                raise ValueError("99999 is the native disabled-CL sentinel; use target_cl=None")
+        _integer(self.multigrid_up_iterations, "multigrid_up_iterations", 0, 19)
+        if self.multigrid_smoothing is not None:
+            _smoothing(self.multigrid_smoothing, self.multigrid_levels, "multigrid_smoothing")
+        schedule = self.stage_schedule()
+        if not 1 <= len(schedule) <= self.multigrid_levels:
+            raise ValueError("Use between one and multigrid_levels mesh-sequence stages")
+        for index, stage in enumerate(schedule):
+            if not isinstance(stage, MultigridStage):
+                raise ValueError("multigrid_stages must contain MultigridStage objects")
+            # 原生序列每阶段细化一次；阶段数决定从哪一级网格开始。
+            available = self.multigrid_levels - len(schedule) + index + 1
+            stage.validate(available)
+            if max(self.stage_smoothing(stage, available)) + self.multigrid_up_iterations > 20:
+                raise ValueError("MIT + MTT must not exceed the native limit of 20")
+
+    def stage_schedule(self):
+        if self.multigrid_stages is not None:
+            if not isinstance(self.multigrid_stages, tuple):
+                raise ValueError("multigrid_stages must be an immutable tuple")
+            return self.multigrid_stages
+        if self.mesh_sequence:
+            return tuple(MultigridStage(self.coarse_iterations, level,
+                                       self.coarse_first_order_iterations)
+                         for level in range(1, self.multigrid_levels)) + (
+                MultigridStage(self.iterations, self.multigrid_levels, self.first_order_iterations),)
+        return (MultigridStage(self.iterations, self.multigrid_levels, self.first_order_iterations),)
+
+    def stage_smoothing(self, stage, available_levels):
+        # 默认 MIT 按全局粗到细编号；只取本阶段实际参与循环的网格层。
+        template = self.multigrid_smoothing or (1,) * self.multigrid_levels
+        return stage.smoothing_steps or template[available_levels-stage.levels:available_levels]
 
 
 def _face(point_range, dims):
@@ -111,6 +207,7 @@ class SolverResult:
     fields: dict[str, np.ndarray]  # zone -> (ni-1,nj-1,nk-1,5): rho,u,v,w,p
     history: np.ndarray  # residual,CL,CD,CX,CY,CMX,CMY,CMZ
     output_directory: Path
+    final_alpha: float  # actual final angle in degrees, including native CL control
 
     @property
     def coefficients(self):
@@ -119,7 +216,7 @@ class SolverResult:
         return dict(zip(("CL", "CD", "CX", "CY", "CMX", "CMY", "CMZ"), self.history[-1, 1:]))
 
     def save(self, filename):
-        values = {"history": self.history}
+        values = {"history": self.history, "final_alpha": np.asarray(self.final_alpha)}
         values.update({f"zone_{name}": field for name, field in self.fields.items()})
         np.savez_compressed(filename, **values)
 
@@ -295,18 +392,14 @@ class CFL3D:
         blocks[4:] = model
         if i2d:
             blocks[4] = 0
-        mseq = o.multigrid_levels if o.mesh_sequence else 1
+        schedule = o.stage_schedule()
+        mseq = len(schedule)
         stages = np.zeros((4, mseq), dtype=np.int32, order="F")
-        if o.mesh_sequence:
-            stages[0] = o.coarse_iterations
-            stages[0, -1] = o.iterations
-            stages[1] = np.arange(1, mseq+1)
-        else:
-            stages[0, 0] = o.iterations
-            stages[1, 0] = o.multigrid_levels
-        # 网格序列从粗到细；最后一列是最终细网格阶段，其 NITFO 单独设置。
-        stages[3] = o.coarse_first_order_iterations
-        stages[3, -1] = o.first_order_iterations
+        smoothing = np.ones((5, 5), dtype=np.int32, order="F")
+        for column, stage in enumerate(schedule):
+            stages[:, column] = stage.iterations, stage.levels, 0, stage.first_order_iterations
+            available = o.multigrid_levels - mseq + column + 1
+            smoothing[:stage.levels, column] = o.stage_smoothing(stage, available)
         xyz = np.asfortranarray(np.concatenate([z.coordinates.reshape(-1, 3, order="F") for z in zones]))
         conn = np.asarray(connections, dtype=np.int32).transpose(2, 1, 0).copy(order="F") if connections else np.zeros((10, 2, 0), dtype=np.int32, order="F")
         # 原生 REUE 使用百万 Reynolds 数、温度使用 Rankine；负 DT 表示按 CFL 选步长。
@@ -316,11 +409,16 @@ class CFL3D:
                     reference=np.array([o.sref, o.cref, o.bref, *o.moment_center]),
                     time_control=np.array([-o.cfl, 0., o.cfl_ramp_steps, o.cfl_ramp_factor, 0., 10.]),
                     run_control=np.array([-len(zones), 0, 0, o.restart_interval or max(1, int(stages[0].sum())), 0, i2d, 1, 1], dtype=np.int32),
-                    mg=np.array([mseq, int(o.multigrid_levels > 1), 0, 0, o.multigrid_cycle], dtype=np.int32),
+                    mg=np.array([mseq, int(o.multigrid_levels > 1), 0, o.multigrid_up_iterations, o.multigrid_cycle], dtype=np.int32),
+                    smoothing=smoothing,
                     stages=stages, keywords=np.array([int(o.full_navier_stokes and model != 0), o.turbulence_subiterations,
-                                                     o.turbulence_cfl, o.eddy_viscosity_limit, o.gamma]),
-                    scheme=np.array([1, 1, 1, o.limiter, o.limiter, o.limiter], dtype=np.int32),
-                    flux=np.array([o.flux]*3, dtype=np.int32), rkap=np.array([o.kappa]*3),
+                        o.turbulence_cfl, o.eddy_viscosity_limit, o.gamma,
+                        99999.0 if o.target_cl is None else o.target_cl,
+                        o.alpha_relaxation, o.alpha_step_limit, o.alpha_update_interval]),
+                    scheme=np.array([*_directions(o.inversion, "inversion"),
+                                     *_directions(o.limiter, "limiter")], dtype=np.int32),
+                    flux=np.array(_directions(o.flux, "flux"), dtype=np.int32),
+                    rkap=np.array(_directions(o.kappa, "kappa")),
                     npoints=len(xyz), ncells=int(np.prod(dims-1, axis=0).sum())), xyz
 
     def solve(self, *, output_directory="cfl3d-output"):
@@ -335,6 +433,9 @@ class CFL3D:
                                    + (" --mpi" if self.comm is not None else "")) from exc
             if bool(module.py_build_info()) != (self.comm is not None):
                 raise RuntimeError("Native extension MPI mode does not match the solver")
+            if getattr(module, "py_api_version", lambda: 0)() != 2:
+                raise RuntimeError("Native interface changed; rebuild with python tools/build_python.py"
+                                   + (" --mpi" if self.comm is not None else "") + " and restart Python")
             return module
         _native = self._checked(native_module)
         rank = self.comm.Get_rank() if self.comm is not None else 0
@@ -372,6 +473,7 @@ class CFL3D:
                 raise RuntimeError(f"CFL3D failed with status {status}; inspect {output_directory / error_file}")
             q = _native.py_get_solution(arrays["ncells"])
             history = _native.py_get_history(nrows)
+            final_alpha = float(_native.py_get_final_alpha())
         finally:
             os.chdir(old_directory)
             if native_comm is not None:
@@ -388,8 +490,8 @@ class CFL3D:
                 fields[z.name][..., 2] = fields[z.name][..., 3]
                 fields[z.name][..., 3] = -internal_v
             offset += count
-        if not np.isfinite(q).all() or not np.isfinite(history).all():
+        if not np.isfinite(q).all() or not np.isfinite(history).all() or not np.isfinite(final_alpha):
             raise RuntimeError("CFL3D returned nonfinite solution/history")
-        result = SolverResult(fields, history, output_directory)
+        result = SolverResult(fields, history, output_directory, final_alpha)
         self._checked(lambda: result.save(output_directory / "solution.npz") if rank == 0 else None)
         return result

@@ -1034,6 +1034,14 @@ c
       cflturb = py_keywords(3)
       edvislim = py_keywords(4)
       gamma = py_keywords(5)
+c     Native CL matching adjusts alpha during the solve, not between runs.
+      cltarg = py_keywords(6)
+      ialphit = 0
+      if (cltarg.ne.99999.0) ialphit = 1
+      rlxalph = py_keywords(7)
+      dalim = py_keywords(8)
+      icycupdt = int(py_keywords(9))
+      dalpha = 0.0
       gm1 = gamma-1.
       gp1 = gamma+1.
       gm1g = gm1/gamma

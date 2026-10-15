@@ -6,6 +6,7 @@ Use no more workers than zones. Input files are read only by rank 0.
 import argparse
 from mpi4py import MPI
 from cfl3d import CFL3D, SolverOptions
+from numerical_options import add_numerical_options, numerical_options
 
 
 def main():
@@ -17,14 +18,16 @@ def main():
     parser.add_argument("--alpha", type=float, default=0.)
     parser.add_argument("--iterations", type=int, default=100)
     parser.add_argument("--cfl", type=float, default=2.)
+    add_numerical_options(parser)
     args = parser.parse_args()
     comm = MPI.COMM_WORLD
     options = SolverOptions(mach=args.mach, alpha=args.alpha, turbulence=args.model,
-                            iterations=args.iterations, cfl=args.cfl)
+                            iterations=args.iterations, cfl=args.cfl, **numerical_options(parser, args))
     solver = CFL3D(args.mesh if comm.rank == 0 else None, options, comm=comm)
     result = solver.solve(output_directory=args.output)
     if comm.rank == 0:
         print(result.coefficients)
+        print(f"Final alpha: {result.final_alpha:.10g} degrees")
 
 
 if __name__ == "__main__":

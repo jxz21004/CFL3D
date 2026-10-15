@@ -22,9 +22,13 @@ cat "$validation_root/logs/subcommunicators.log"
 if command -v valgrind >/dev/null; then
     # MPI maps a large shared region; scanning it for leaks at exit can stall.
     # Keep invalid-access/undefined-value checks; this is not a leak test.
+    memory_case=box
+    if [[ " $* " == *" --controls "* ]]; then
+        memory_case=controls  # Exercise MIT > 1 and the block matrix inversion.
+    fi
     timeout -k 5s 90s mpirun -np 3 valgrind --leak-check=no --error-exitcode=97 \
         --log-file="$PWD/$validation_root/logs/valgrind-%p.log" \
-        "$mpi_python" tests/python/validate_mpi.py --only box --directory "$validation_root" "$@" \
+        "$mpi_python" tests/python/validate_mpi.py --only "$memory_case" --directory "$validation_root" "$@" \
         > "$validation_root/logs/memory-check.log" 2>&1
     cat "$validation_root/logs/memory-check.log"
 fi

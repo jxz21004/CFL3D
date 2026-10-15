@@ -1,4 +1,4 @@
-# CFL3D Python/MPI 第三轮检查点（CGNS/ADF）— 2026-10-15
+# CFL3D Python/MPI 第四轮检查点（计算控制）— 2026-10-15
 
 本轮在 `CFL3D/` 修改；旧的 `CFL3D-f2py-CGNS-source/` 保留作为参考。
 MPI 已通过下述内存网格验收；本轮又补齐 CGNS/ADF 文件入口的串行和 MPI 验收。
@@ -150,3 +150,46 @@ FamilySpecified 仍需显式边界覆盖，未增加 family 到边界类型的�
 
 维护备注：MPI 生命周期、错误同步、独立输出目录、CGNS 索引宽度及数组顺序、
 mit 固定通信布局和 nkey 初始化原因已在对应代码处解释。编译产物和验证输出不纳入提交。
+
+
+## 第四轮：定升、分方向格式和多重网格计算控制
+
+本轮补齐上一轮列出的参数缺口，eddy_viscosity_limit 默认继续保留为用户指定的 1e5。
+
+- 定升：target_cl、alpha_relaxation、alpha_step_limit、alpha_update_interval 映射到
+  原生 CLTARG/RLXALPH/DALIM/ICYCUPDT，直接使用原生攻角反馈和 MPI 广播。
+- 分方向：limiter、flux、inversion、kappa 接受标量或 i/j/k 三元组。
+- 多重网格：新增 multigrid_up_iterations（MTT）、全局 multigrid_smoothing（MIT）和
+  不可变 MultigridStage 阶段表，每阶段独立设置 NCYC/MGLEVG/NITFO/MIT。
+  阶段细化顺序遵循原生规则；不支持任意跳级、embedded 网格或逐 zone 的不同格式设置。
+- 输出：SolverResult.final_alpha 与 NPZ 记录实际最终攻角；修复 unit 27 的日志刷新和重用。
+- 原生 ABI 升到版本 2；Python 会拒绝旧扩展，并明确提示重建和重启解释器。
+
+验证使用 GNU debug 串行/MPI 扩展与现有 Intel MPI，没有安装新依赖。
+
+- 保留原有 Euler/SA/SST 真实 ADF 回归。
+- 无承力壁面的均匀流测试：初始 alpha=1 度、target_cl=0.1、每两步更新、限幅 0.02 度，
+  六步后实际攻角为 1.06 度；随后关闭定升并复用目录，确认状态和日志重置。
+- SST 平板定升：target_cl=0.01，200 步后 CL=0.0104563329803824、alpha=0.0689091483339882 度。
+  这证明反馈链路有效；不构成充分收敛或普适 CL 容差保证。
+- 2/3 进程及两个独立的二进程子通信器：所有比较项与串行基准差异为 0，最终攻角一致。
+- 自定义阶段采用两阶段、不同 MIT、MTT=1 和不同方向的 IFLIM/IFDS/IDIAG/RKAP；
+  三进程 Valgrind 各 rank 零错误，未检查泄漏。原生负体积退出仍无超时。
+- 单元测试共 21 项：18 项通过，3 项可选 HDF5 测试跳过。
+- 单元回归还覆盖参数非法值、标量/三元组等价、V/W 循环和全局 MIT 与显式活跃层设置等价。
+- 串行 CLI 验证新开关后返回 final_alpha=1.06 度。
+
+复现：
+
+```bash
+source /home/mdolabuser/.bashrc_mdolab
+export PYTHONPATH="$PWD/python:$PWD/tests/python"
+python tools/build_python.py --debug --jobs 8
+python tools/build_python.py --mpi --debug --jobs 8
+python -m unittest discover -s tests/python -v
+CFL3D_VALIDATION_DIRECTORY=build/mpi-controls-validation bash tools/validate_mpi.sh --adf --controls
+```
+
+新增报告位于 build/mpi-controls-validation/ 下的 serial-adf/report.json、mpi-2/report.json、
+mpi-3/report.json、mpi-2-group-*/report.json；logs/ 保存 MPI、Valgrind 和错误退出记录。
+本轮尚未切换 Intel Fortran 编译器重复新参数验收；现有 MPI 库仍为 Intel MPI。

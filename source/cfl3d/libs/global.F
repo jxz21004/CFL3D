@@ -3975,7 +3975,9 @@ c     Native initialization has no text headings.
   783 format(6x,4hmit1,6x,4hmit2,6x,4hmit3,6x,4hmit4,6x,9hmit5  ...)
       do 121 m=1,mseq
 #ifdef PYTHON_API
-      mit(1:mglevg(m)+nemgl(m),m) = 1
+c     MIT entries run from coarsest to finest within this stage.
+      mit(1:mglevg(m)+nemgl(m),m) =
+     .     py_smoothing(1:mglevg(m)+nemgl(m),m)
 #else
       read(iunit5,*)  (mit(i,m),i=1,(mglevg(m)+nemgl(m)))
 #endif

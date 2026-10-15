@@ -168,6 +168,8 @@ c
 c
 #ifdef PYTHON_API
 c     Return to Python after cleanup; it still needs a live MPI runtime.
+c     The standalone STOP flushes this log; Python returns must close it.
+      close(27)
       if (ierrflg.ne.0) call py_abort(ierrflg)
       return
 #endif

@@ -138,6 +138,87 @@ Euler 自动关闭 full_navier_stokes。湍流 CFL 统一设置核心的七个 C
 `restart_interval` 只控制原生 restart 文件写出频率，不提供 restart 读入接续接口。
 一阶迭代数不得超过相应阶段迭代数；CFL 渐增步数须非负，倍数须至少为 1。
 
+## 定升计算与最终攻角
+
+`target_cl=None` 使用固定攻角；设为数值后启用原生 CFL3D 的 CL 反馈控制。
+不需要在 Python 外层反复重新启动求解。参数对应关系为：
+
+| Python 参数 | 默认值 | 原生变量 |
+| --- | --- | --- |
+| `target_cl` | None | CLTARG；None 使用原生关闭标记 |
+| `alpha_relaxation` | 1.0 | RLXALPH |
+| `alpha_step_limit` | 0.2 度 | DALIM；每次攻角更新的限幅 |
+| `alpha_update_interval` | 1 | ICYCUPDT；每隔多少次细网格循环更新攻角 |
+
+```python
+options = SolverOptions(
+    turbulence="sst", alpha=0.0, target_cl=0.5,
+    alpha_relaxation=0.5, alpha_step_limit=0.1,
+    alpha_update_interval=5, iterations=1000,
+)
+result = CFL3D("wing.cgns", options).solve(output_directory="lift-results")
+print(result.coefficients["CL"], result.final_alpha)
+```
+
+`result.final_alpha` 为实际最终攻角（度），并写入 `solution.npz`。
+`cfl3d.alpha` 保存迭代号、log(res)、CL、更新后的攻角和攻角增量，返回 Python 前已关闭刷新。
+同目录再次求解会重置该日志，关闭定升后也不会残留旧记录。
+`options.alpha` 保持初始值不变。原生控制在力计算后更新攻角，因此最后一行 CL 来自最后一次
+力计算，而 final_alpha 包含随后的攻角更新；下一次迭代才会重新评价该攻角下的力。
+定升仍执行指定迭代次数，不保证自动满足 CL 容差，也没有新增提前停止判据。
+
+## 分方向格式与显式多重网格阶段
+
+`limiter`、`flux`、`inversion` 和 `kappa` 接受标量或 `(i,j,k)` 三元组。
+标量保持原有行为，三元组分别控制三个网格索引方向；目前所有 zone 使用同一套方向设置。
+`limiter` 对应 IFLIM（0..4），`flux` 对应 IFDS（0/1），`inversion` 对应 IDIAG（0/1），
+`kappa` 对应 RKAP。IDIAG=0 为块三对角逆，=1 为标量三对角逆。
+`eddy_viscosity_limit` 默认继续使用用户选定的 `1e5`，传入 EDVISLIM。
+
+```python
+from cfl3d import MultigridStage, SolverOptions
+
+options = SolverOptions(
+    turbulence="sst", limiter=(0, 2, 4), flux=(1, 0, 1),
+    inversion=(1, 0, 1), kappa=(0.0, 1/3, 1/3),
+    multigrid_levels=3, multigrid_cycle=2,
+    multigrid_up_iterations=1,  # MTT：多重网格上行的附加更新次数
+    multigrid_stages=(
+        MultigridStage(iterations=100, levels=2, first_order_iterations=10,
+                       smoothing_steps=(1, 2)),
+        MultigridStage(iterations=1000, levels=2, first_order_iterations=20,
+                       smoothing_steps=(2, 1)),
+    ),
+)
+```
+
+`multigrid_levels` 决定总网格层数，`MultigridStage.levels` 决定该阶段参与循环的活跃层数
+（MGLEVG）。原生网格序列每阶段细化一次，最后阶段总在最细网格；例如总共三层、两个阶段，
+先计算第二细网格，再计算最细网格。阶段数不得超过总层数；第一阶段可用两层、第二阶段可用三层。
+阶段 levels 可以小于可用层数，只使用该阶段较细的若干层。
+
+`smoothing_steps` 对应每阶段 MIT，按该阶段活跃层的粗到细顺序给出。
+也可以设置 `multigrid_smoothing=(1,2,1)`，按所有全局网格层的粗到细顺序提供默认 MIT；
+各阶段自动取实际活跃网格层的对应项。阶段显式 smoothing_steps 优先于全局默认，未设置时为 1。
+MIT 须为 1..20 的整数，MTT 非负，接口检查 MIT+MTT 不超过原生工作数组上限 20。
+
+显式 `multigrid_stages` 优先于 `mesh_sequence/coarse_iterations/iterations` 自动生成的阶段表，
+每阶段的 iterations、levels、first_order_iterations 对应 NCYC、MGLEVG、NITFO。
+因此实际总迭代数为显式阶段 iterations 之和。未提供阶段表时，现有简化参数的用法保持有效。
+各阶段 iterations 须为正整数，first_order_iterations 不得超过本阶段 iterations。
+阶段表及 MIT 使用不可变 tuple，可通过 dataclasses.replace 创建修改后的配置。
+embedded 网格尚未接入，NEMGL/ICONSF 仍没有可用的 embedded 计算接口。
+
+本版原生接口版本为 2，新增参数后必须重建串行和 MPI 扩展并重启 Python：
+
+```bash
+python tools/build_python.py --debug --jobs 8
+python tools/build_python.py --mpi --debug --jobs 8
+```
+
+串行和 MPI 示例都支持 `--target-cl`、`--limiter 0 2 4`、`--flux 1 0 1`、
+`--multigrid-smoothing 1 2 1` 等常用开关；显式阶段表通过上述 Python 对象设置。
+
 ## 实验性 MPI 接口
 
 先构建 `--mpi` 扩展，再在所有 rank 上调用构造函数和 `solve()`：
@@ -234,7 +315,7 @@ residual, CL, CD, CX, CY, CMX, CMY, CMZ
 ```
 
 `result.coefficients` 返回最后一次迭代的系数字典。输出目录还保存 `solution.npz`，
-包括 history 和以 `zone_<name>` 命名的流场数组，以及原生 CFL3D 日志与 restart 文件。
+包括 history、final_alpha 和以 `zone_<name>` 命名的流场数组，以及原生 CFL3D 日志与 restart 文件。
 输出文件不代表已收敛；迭代次数由配置决定，本版不实现 Python 收敛停止判据。
 
 同一进程可以连续求解多个工况，每次重新传入配置和网格、从自由来流初始化。
@@ -257,6 +338,15 @@ MPI/f2py communicator 为实验性实现，验证状态见上文。
 BCDataSet 的数值数组会读出并传给现有边界检查；不支持的类型或非零热流不会被忽略。
 
 ## 本地验证和 CI
+
+新增计算控制的回归（包括真实 ADF 文件读入）：
+
+```bash
+CFL3D_VALIDATION_DIRECTORY=build/mpi-controls-validation bash tools/validate_mpi.sh --adf --controls
+```
+
+该测试增加攻角限幅/间隔、自定义阶段与 MIT/MTT、分方向格式，以及 200 次迭代的 SST 定升平板。
+Valgrind 检查的是自定义 MIT 和块矩阵求逆算例，不进行泄漏扫描。
 
 当前 ADF 文件回归：
 

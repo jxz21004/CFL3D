@@ -5,9 +5,9 @@ module cfl3d_python_state
   integer, allocatable :: py_blocks(:,:), py_stages(:,:), py_connections(:,:,:)
   real(8), allocatable :: py_bcdata(:,:), py_xyz(:,:), py_q(:,:), py_history(:,:)
   integer, allocatable :: py_offsets(:), py_qoffsets(:)
-  real(8) :: py_flow(7), py_reference(6), py_time(6), py_keywords(5)
-  integer :: py_run(8), py_mg(5), py_scheme(6), py_flux(3)
-  real(8) :: py_rkap(3)
+  real(8) :: py_flow(7), py_reference(6), py_time(6), py_keywords(9)
+  integer :: py_run(8), py_mg(5), py_scheme(6), py_flux(3), py_smoothing(5,5)
+  real(8) :: py_rkap(3), py_final_alpha=0.0d0
   integer :: py_ngrid=0, py_nbc=0, py_nconn=0, py_nhistory=0
   integer :: py_status=0, py_used=0
   integer :: py_comm=-1
@@ -63,6 +63,19 @@ contains
     end do
   end subroutine
 end module
+
+subroutine py_api_version(version)
+  implicit none
+  integer, intent(out) :: version
+  version=2
+end subroutine
+
+subroutine py_get_final_alpha(alpha_degrees)
+  use cfl3d_python_state, only: py_final_alpha
+  implicit none
+  real(8), intent(out) :: alpha_degrees
+  alpha_degrees=py_final_alpha
+end subroutine
 
 subroutine py_build_info(mpi_enabled)
   implicit none
@@ -131,15 +144,15 @@ subroutine py_abort(status)
 end subroutine
 
 subroutine py_configure(dims,counts,bcs,bcdata,blocks,connections,flow,reference,&
-                        time_control,run_control,mg,stages,keywords,scheme,flux,rkap,&
+                        time_control,run_control,mg,smoothing,stages,keywords,scheme,flux,rkap,&
                         ngrid,nbc,nconn,mseq,npoints,ncells,status)
   use cfl3d_python_state
   implicit none
   integer, intent(in) :: ngrid,nbc,nconn,mseq,npoints,ncells
   integer, intent(in) :: dims(3,ngrid),counts(6,ngrid),bcs(8,nbc),blocks(7,ngrid)
   integer, intent(in) :: connections(10,2,nconn),run_control(8),mg(5),stages(4,mseq)
-  integer, intent(in) :: scheme(6),flux(3)
-  real(8), intent(in) :: bcdata(12,nbc),flow(7),reference(6),time_control(6),keywords(5),rkap(3)
+  integer, intent(in) :: scheme(6),flux(3),smoothing(5,5)
+  real(8), intent(in) :: bcdata(12,nbc),flow(7),reference(6),time_control(6),keywords(9),rkap(3)
   integer, intent(out) :: status
   integer :: g,p,c
   status=0
@@ -157,6 +170,7 @@ subroutine py_configure(dims,counts,bcs,bcdata,blocks,connections,flow,reference
   py_blocks=blocks; py_connections=connections; py_stages=stages
   py_flow=flow; py_reference=reference; py_time=time_control
   py_run=run_control; py_mg=mg; py_keywords=keywords
+  py_smoothing=smoothing; py_final_alpha=flow(2)
   py_scheme=scheme; py_flux=flux; py_rkap=rkap
   allocate(py_xyz(npoints,3),py_q(ncells,5),py_offsets(ngrid),py_qoffsets(ngrid))
   py_xyz=0; py_q=0

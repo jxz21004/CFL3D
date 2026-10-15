@@ -21,6 +21,9 @@ c  under the License.
 c  ---------------------------------------------------------------------------
 c
       subroutine newalpha(ncycmax,rms,clw,myid,myhost,mycomm)
+#ifdef PYTHON_API
+      use cfl3d_python_state, only: py_final_alpha
+#endif
 c
 c     $Id$
 c
@@ -97,6 +100,10 @@ c
 #if defined DIST_MPI
       call mpi_Bcast(alpha,1,MY_MPI_REAL,myhost,mycomm,ierr)
       call mpi_Bcast(dalpha,1,MY_MPI_REAL,myhost,mycomm,ierr)
+#endif
+#ifdef PYTHON_API
+c     Return the actual angle on every rank; Python input stays immutable.
+      py_final_alpha = real(alpha)*real(radtodeg)
 #endif
 c     reset freestream for new alpha
       call init_mast

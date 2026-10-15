@@ -11,7 +11,7 @@ import json
 from pathlib import Path
 
 import numpy as np
-from cfl3d import Boundary, CFL3D, CGNSMesh, Connection, SolverOptions, Zone
+from cfl3d import Boundary, CFL3D, CGNSMesh, Connection, MultigridStage, SolverOptions, Zone
 from fixtures import box_mesh, flatplate_mesh
 
 
@@ -39,7 +39,7 @@ def split_plate():
     return CGNSMesh(zones)
 
 
-def cases():
+def cases(controls=False):
     yield "box", box_mesh(True), SolverOptions(mach=.3, turbulence="euler", iterations=5,
                                                multigrid_levels=2)
     options = SolverOptions(mach=.2, reynolds=6e6, temperature=460/1.8, cfl=3,
@@ -49,6 +49,18 @@ def cases():
                             cfl_ramp_factor=2, restart_interval=2)
     for model in ("sa", "sst"):
         yield model, split_plate(), replace(options, turbulence=model)
+    if controls:
+        yield "lift", box_mesh(True), SolverOptions(turbulence="euler", alpha=1., iterations=6,
+            target_cl=.1, alpha_relaxation=3., alpha_step_limit=.02, alpha_update_interval=2)
+        yield "controls", split_plate(), SolverOptions(turbulence="sst", cfl=.5,
+            mach=.2, reynolds=6e6, temperature=460/1.8, multigrid_levels=3,
+            limiter=(0, 2, 4), flux=(1, 0, 1), inversion=(1, 0, 1), kappa=(0., 1/3, 1/3),
+            multigrid_up_iterations=1,
+            multigrid_stages=(MultigridStage(3, 2, 1, (1, 2)), MultigridStage(5, 2, 2, (2, 1))))
+        yield "lift_plate", split_plate(), SolverOptions(turbulence="sst", cfl=3.,
+            mach=.2, reynolds=6e6, temperature=460/1.8, multigrid_levels=2,
+            iterations=200, limiter=2, target_cl=.01, alpha_relaxation=.5,
+            alpha_step_limit=.1, alpha_update_interval=5)
 
 
 def compare_reference(result, filename, name):
@@ -59,16 +71,18 @@ def compare_reference(result, filename, name):
             np.testing.assert_allclose(values, expected, rtol=2e-11, atol=2e-13)
             differences[zone] = float(np.max(np.abs(values-expected)))
         # Uniform-flow residual normalization is sensitive to roundoff.
-        columns = slice(1, None) if name == "box" else slice(None)
+        uniform = name in ("box", "lift")
+        columns = slice(1, None) if uniform else slice(None)
         np.testing.assert_allclose(result.history[:, columns], reference["history"][:, columns],
                                    rtol=2e-10, atol=2e-13)
         history_difference = float(np.max(np.abs(
             result.history[:, columns]-reference["history"][:, columns])))
+        np.testing.assert_allclose(result.final_alpha, reference["final_alpha"], rtol=0, atol=2e-12)
     assert np.isfinite(result.history).all()
     return {"max_field_difference": max(differences.values()),
             "max_history_difference": history_difference,
-            "history_columns_compared": "coefficients" if name == "box" else "all",
-            "history_rows": len(result.history)}
+            "history_columns_compared": "coefficients" if uniform else "all",
+            "history_rows": len(result.history), "final_alpha": result.final_alpha}
 
 
 def main():
@@ -77,20 +91,25 @@ def main():
     parser.add_argument("--split", action="store_true", help="Run independent two-rank subcommunicators")
     parser.add_argument("--native-error", action="store_true", help="Trigger a native negative-volume MPI abort")
     parser.add_argument("--adf", action="store_true", help="Read actual CGNS/ADF files instead of memory meshes")
-    parser.add_argument("--only", choices=("box", "sa", "sst"))
+    parser.add_argument("--controls", action="store_true", help="Also check CL matching and custom numerical controls")
+    parser.add_argument("--only", choices=("box", "sa", "sst", "lift", "controls", "lift_plate"))
     parser.add_argument("--directory", type=Path, required=True)
     args = parser.parse_args()
     root = args.directory.resolve()
     if args.prepare:
         adf_report = {}
-        for name, mesh, options in cases():
+        for name, mesh, options in cases(args.controls):
             result = CFL3D(mesh, options).solve(output_directory=root / "serial" / name)
-            expected_rows = options.iterations + (options.multigrid_levels-1) * options.coarse_iterations \
-                if options.mesh_sequence else options.iterations
+            expected_rows = sum(stage.iterations for stage in options.stage_schedule())
             assert result.history.shape == (expected_rows, 8)
-            if name != "box":
+            if name not in ("box", "lift"):
                 assert result.coefficients["CD"] > 0
-                assert max(np.ptp(q[..., 1]) for q in result.fields.values()) > .01
+                assert max(np.ptp(q[..., 1]) for q in result.fields.values()) > (1e-3 if name == "controls" else .01)
+            if name == "lift":
+                np.testing.assert_allclose(result.final_alpha, 1.06, rtol=0, atol=2e-12)
+            if name == "lift_plate":
+                assert abs(result.coefficients["CL"]-options.target_cl) < 1e-3
+                assert result.final_alpha > 0
             if args.adf:
                 from cgns_fixtures import write_adf
                 (root / "meshes").mkdir(parents=True, exist_ok=True)
@@ -138,7 +157,7 @@ def main():
         else:
             raise AssertionError("Expected collective CGNS file-read failure")
         comm.Barrier()
-    for name, mesh, options in cases():
+    for name, mesh, options in cases(args.controls):
         if args.only and name != args.only:
             continue
         source = root / "meshes" / f"{name}.cgns" if args.adf else mesh
