@@ -1,7 +1,11 @@
-"""Shared numerical flags for the serial and MPI example scripts."""
+"""Shared numerical and output flags for the serial and MPI example scripts."""
+import argparse
 
 
 def add_numerical_options(parser):
+    parser.add_argument("--write-volume", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--write-surface", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--write-flow", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--freestream-pressure", type=float, help="Static pressure in Pa; enables SI loads")
     parser.add_argument("--group", help="CGNS force group; default: all integrated surfaces")
     parser.add_argument("--sref", type=float, default=1., help="Reference area in m^2")
@@ -36,6 +40,9 @@ def numerical_options(parser, args):
         "multigrid_levels", "multigrid_cycle", "mesh_sequence", "coarse_iterations",
         "first_order_iterations", "coarse_first_order_iterations", "multigrid_up_iterations",
         "eddy_viscosity_limit")}
+    result.update(writevolumesolution=args.write_volume,
+                  writeTecplotSurfaceSolution=args.write_surface,
+                  writeflowsolution=args.write_flow)
     for name in ("limiter", "flux", "inversion", "kappa"):
         values = getattr(args, name)
         if len(values) not in (1, 3):

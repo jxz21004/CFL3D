@@ -72,6 +72,9 @@ c
      .                 idfrmseg,iaesurf,maxsegdg,nmaster,aehist,
      .                 timekeep,xorgae0,yorgae0,zorgae0,icouple,
      .                 iprnsurf,nblelst,iskmax,jskmax,kskmax,ue,nummem)
+#ifdef PYTHON_API
+      use cfl3d_python_state, only: py_write_restart
+#endif
 c
 c     $Id$
 c
@@ -2454,7 +2457,12 @@ c
 c
 c     write restart file if non time-accurate
 c
+#ifdef PYTHON_API
+c     All ranks skip the same restart collectives when volume I/O is disabled.
+      if (real(dt).lt.0.0 .and. py_write_restart) then
+#else
       if (real(dt).lt.0.0) then
+#endif
          if (level.eq.levt) then
             if (icyc.ge.ncyc .or. icyc/nwrest*nwrest.eq.icyc) then
                if (myid .eq. myhost) then

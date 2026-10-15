@@ -4,6 +4,8 @@ module cfl3d_python_state
   integer, allocatable :: py_dims(:,:), py_counts(:,:), py_bc(:,:)
   integer, allocatable :: py_blocks(:,:), py_stages(:,:), py_connections(:,:,:)
   real(8), allocatable :: py_bcdata(:,:), py_xyz(:,:), py_q(:,:), py_history(:,:), py_surface(:,:)
+  real(8), allocatable :: py_wall(:,:)
+  integer, allocatable :: py_walloffset(:)
   integer, allocatable :: py_offsets(:), py_qoffsets(:)
   real(8) :: py_flow(7), py_reference(6), py_time(6), py_keywords(9)
   integer :: py_run(8), py_mg(5), py_scheme(6), py_flux(3), py_smoothing(5,5)
@@ -11,6 +13,7 @@ module cfl3d_python_state
   integer :: py_ngrid=0, py_nbc=0, py_nconn=0, py_nhistory=0
   integer :: py_status=0, py_used=0
   integer :: py_comm=-1, py_force_zone=0
+  logical :: py_write_restart=.true.
 contains
   integer function py_bcindex(grid,face,seg) result(idx)
     integer, intent(in) :: grid,face,seg
@@ -60,6 +63,35 @@ contains
     py_surface(:,idx)=values
   end subroutine
 
+  subroutine py_record_wall(face,segment,a,b,pressure,density,cf,area,volume,cbar,ialph)
+    integer, intent(in) :: face,segment,a,b,ialph
+    real(8), intent(in) :: pressure,density,cf(3),area,volume,cbar
+    real(8) :: values(6),tratio,mu,temp,distance
+    integer :: idx,p,code
+    if (py_force_zone == 0) return
+    idx=py_bcindex(py_force_zone,face,segment)
+    code=abs(py_bc(3,idx))
+    if (.not.(code==1005.or.code==1006.or.code==2004.or.code==2014.or.&
+              code==2024.or.code==2034.or.code==2016)) return
+    p=py_walloffset(idx)+(a-py_bc(4,idx))+(py_bc(5,idx)-py_bc(4,idx))*(b-py_bc(6,idx))
+    tratio=py_keywords(5)*pressure/density
+    values(1)=(py_keywords(5)*pressure-1.d0)*2.d0/(py_keywords(5)*py_flow(1)**2)
+    values(2)=tratio*py_flow(5)/1.8d0  ! Wall temperature in K, not adjacent-cell temperature.
+    values(3:5)=cf
+    if (ialph > 0) then
+      temp=values(5); values(5)=-values(4); values(4)=temp
+    end if
+    values(6)=0
+    if (area > 0.d0 .and. code >= 2000) then
+      ! First-cell normal distance, consistent with the native wall traction V/(2*A).
+      ! Unlike legacy nodal y+ statistics, this is a face-cell value without averaging.
+      distance=0.5d0*volume/area
+      mu=tratio**1.5d0*(1.d0+cbar/py_flow(5))/(tratio+cbar/py_flow(5))
+      values(6)=distance*py_flow(4)*1.d6*sqrt(0.5d0*sqrt(sum(cf**2))*density)/mu
+    end if
+    py_wall(:,p)=values
+  end subroutine
+
   subroutine py_copy_grid(x,y,z,jd,kd,id,grid,ialph)
     integer, intent(in) :: jd,kd,id,grid,ialph
     real(8), intent(out) :: x(jd,kd,id),y(jd,kd,id),z(jd,kd,id)
@@ -103,7 +135,22 @@ end module
 subroutine py_api_version(version)
   implicit none
   integer, intent(out) :: version
-  version=3
+  version=4
+end subroutine
+
+subroutine py_set_output_flags(write_restart)
+  use cfl3d_python_state, only: py_write_restart
+  implicit none
+  integer, intent(in) :: write_restart
+  py_write_restart=write_restart /= 0
+end subroutine
+
+subroutine py_get_wall_data(values,ncells)
+  use cfl3d_python_state, only: py_wall
+  implicit none
+  integer, intent(in) :: ncells
+  real(8), intent(out) :: values(6,ncells)
+  values=py_wall
 end subroutine
 
 subroutine py_get_surface_coefficients(values,nbc)
@@ -172,6 +219,10 @@ subroutine py_collect_results()
   call MPI_Allreduce(py_surface,gathered,size(py_surface),MPI_DOUBLE_PRECISION,MPI_SUM,py_comm,ierr)
   py_surface=gathered
   deallocate(gathered)
+  allocate(gathered(size(py_wall,1),size(py_wall,2)))
+  call MPI_Allreduce(py_wall,gathered,size(py_wall),MPI_DOUBLE_PRECISION,MPI_SUM,py_comm,ierr)
+  py_wall=gathered
+  deallocate(gathered)
   call MPI_Bcast(py_history,size(py_history),MPI_DOUBLE_PRECISION,0,py_comm,ierr)
 #endif
 end subroutine
@@ -214,6 +265,15 @@ subroutine py_configure(dims,counts,bcs,bcdata,blocks,connections,flow,reference
   end if
   if (allocated(py_history)) deallocate(py_history)
   if (allocated(py_surface)) deallocate(py_surface)
+  if (allocated(py_wall)) deallocate(py_wall,py_walloffset)
+  allocate(py_walloffset(nbc))
+  p=1
+  do g=1,nbc
+    py_walloffset(g)=p
+    p=p+(bcs(5,g)-bcs(4,g))*(bcs(7,g)-bcs(6,g))
+  end do
+  allocate(py_wall(6,p-1))
+  py_wall=0
   allocate(py_surface(10,nbc))
   py_surface=0; py_force_zone=0
   py_ngrid=ngrid; py_nbc=nbc; py_nconn=nconn

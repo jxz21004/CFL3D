@@ -1,6 +1,6 @@
-# CFL3D Python/MPI 第五轮检查点（分组气动力）— 2026-10-15
+# CFL3D Python/MPI 第六轮检查点（字典配置与 I/O）— 2026-10-15
 
-最新分组积分接口和验证见文末“第五轮”；前面保留此前各轮记录。
+最新字典配置及 I/O 接口和验证见文末“第六轮”；前面保留此前各轮记录。
 
 本轮在 `CFL3D/` 修改；旧的 `CFL3D-f2py-CGNS-source/` 保留作为参考。
 MPI 已通过下述内存网格验收；本轮又补齐 CGNS/ADF 文件入口的串行和 MPI 验收。
@@ -246,3 +246,39 @@ CFL3D_VALIDATION_DIRECTORY=build/mpi-forces-validation bash tools/validate_mpi.s
 结果在 `build/mpi-forces-validation/`，目录结构与此前回归相同。
 这些短程回归验证接口和积分一致性，不代表生产算例充分收敛。
 本轮未切换 Intel Fortran 编译器复测，也未复测 HDF5 文件路径。
+
+
+## 第六轮：options 字典与独立输出
+
+新增 `CFL3D(options={...})` 和 `CFL3D(options_dict)`，兼容原有 SolverOptions / mesh 参数。
+input_grid、output_directory 与三个开关统一由 options 管理：writevolumesolution 默认 True，
+writeTecplotSurfaceSolution 默认 True，writeflowsolution 默认 False。字典拷贝并校验，
+支持 list 方向参数和多重网格阶段字典列表，未知键明确报错。
+
+- CGNS/ADF 体结果包含原始顶点、结构化块、边界、连接和 CellCenter primitive fields，
+  同时写 Temperature（K）和 CFL3DUnits 量纲说明。
+- Tecplot ASCII 壁面文件包含 X/Y/Z、Cp、T(K)、Cfx/Cfy/Cfz、y+。
+  顶点为原网格点，流动量为面单元中心。原生 force.F 在最细网格上缓存壁面状态和剪切力；
+  y+ 使用第一层单元中心法向距离 V/(2A)，不是旧日志的节点平均统计。
+- PLOT3D .x/.q 采用原生 IPTYPE=1、64 位实数、32 位记录标记和 IBLANK。
+  缓存序列化与原生 plot3d.F 的排列一致，支持二维和三维及 y-up。
+- writeVolumeSolution / writeTecplotSurfaceSolution / writeFlowSolution 可在求解后独立调用。
+  快照与原网格、返回数组以及另一个 solver 的原生状态隔离，补写不重新计算。
+- 三个开关全关时保留历史、积分元数据与原生日志，不写体/表面解及 restart 数据。
+  MPI 所有 rank 仍缓存完整结果，仅 root 写文件；补写无需 collective。
+- 原生接口升到版本 4，已重建 GNU debug 串行/MPI 扩展和独立原生程序。
+
+验证：全部 30 项单元测试中 27 项通过，3 项可选 HDF5 测试跳过。
+覆盖字典配置、开关独立性、补写、缓存隔离、CGNS 流场读回、恒温壁面、Cf 再积分和 y+，
+以及三维 i/j/k 壁面与 y-up 转换。
+真实 ADF 双块的 2/3 进程和两个独立子通信器中，壁面六列数据、流场、历史和积分均与串行一致；
+root 补写的 Tecplot / PLOT3D 文件也与串行逐字节一致。
+独立原生 CFL3D 的 SST 平板 IPTYPE=1 对比：.q 差异为 0；.x 坐标最大差异 2.22e-16，
+IBLANK 和所有记录大小一致。测试实现为 tests/python/validate_plot3d.py。
+
+结果目录为 build/mpi-io-validation/，测试命令和新接口使用说明见 README.md 与 docs/python-wrapper.md。
+本轮没有下载依赖，现有 Intel MPI 与 CGNS/ADF 库继续复用。
+
+三进程 Valgrind 的新 I/O / 壁面缓存 / 补写测试各 rank 零错误，未检查泄漏。
+既有六算例的真实 ADF / 定升 / 自定义阶段 / 分组积分 MPI 回归也再次通过，
+记录位于 build/mpi-io-regression/；原生负体积 MPI_Abort 返回 255，没有超时。

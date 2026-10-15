@@ -27,7 +27,7 @@ c
      .                 nbck0,nbcidim,nbcjdim,nbckdim,ibcinfo,jbcinfo,
      .                 kbcinfo,nn,maxseg)
 #ifdef PYTHON_API
-      use cfl3d_python_state, only: py_record_surface
+      use cfl3d_python_state, only: py_record_surface,py_record_wall
 #endif
 c
 c     $Id$
@@ -41,7 +41,7 @@ c
 #   endif
 c
 #ifdef PYTHON_API
-      real py_before(10),py_after(10)
+      real py_before(10),py_after(10),py_cf(3)
 #endif
       dimension ub(jdim,kdim,idim),vb(jdim,kdim,idim),wb(jdim,kdim,idim)
       dimension vmuk(jdim-1,idim-1,2),vol(jdim,kdim,idim-1),
@@ -61,6 +61,9 @@ c
      .          jbcinfo(nn,maxseg,7,2),kbcinfo(nn,maxseg,7,2)
 c
       common /drag/ cdv,cdp
+#ifdef PYTHON_API
+      common /fluid2/ pr,prt,cbar
+#endif
       common /fluid/ gamma,gm1,gp1,gm1g,gp1g,ggm1
       common /fsum/ sref,cref,bref,xmc,ymc,zmc
       common /info/ title(20),rkap(3),xmach,alpha,beta,dt,fmax,nit,ntt,
@@ -192,6 +195,9 @@ c     pressure drag
       dcdpl = dcx*cosa*cosb-dcy*sinb+dcz*sina*cosb
 c
       dcdvl = 0.
+#ifdef PYTHON_API
+      py_cf=0.
+#endif
       if (ivisc(3).gt.0 .and. (abs(kbcinfo(nbl,ns,1,kk)).eq.2004 .or.
      .    abs(kbcinfo(nbl,ns,1,kk)).eq.2014 .or.
      .    abs(kbcinfo(nbl,ns,1,kk)).eq.2024 .or.
@@ -216,6 +222,9 @@ c
          dcy   = tau*(vrel-vnorm*sk(j,k,i,2)*sgn)
 c        viscous drag
          dcdvl  = dcx*cosa*cosb-dcy*sinb+dcz*sina*cosb
+#ifdef PYTHON_API
+         if (sk(j,k,i,4).gt.0.) py_cf=(/dcx,dcy,dcz/)/sk(j,k,i,4)
+#endif
          dcx = dcxp + dcx
          dcy = dcyp + dcy
          dcz = dczp + dcz
@@ -231,6 +240,12 @@ c
       dcdpl = dcdpl*fact
       dcdvl = dcdvl*fact
       dsw  = sk(j,k,i,4)*fact
+#ifdef PYTHON_API
+      call py_record_wall(4+kk,ns,i,j,
+     .     qk0(j,i,5,kk+kk-1),
+     .     qk0(j,i,1,kk+kk-1),py_cf*fact,
+     .     sk(j,k,i,4),vol(j,kc,i),cbar,ialph)
+#endif
 c
       swetl = swetl+dsw
       cxl   = cxl+dcx
@@ -332,6 +347,9 @@ c     pressure drag
       dcdpl = dcx*cosa*cosb-dcy*sinb+dcz*sina*cosb
 c
       dcdvl = 0.
+#ifdef PYTHON_API
+      py_cf=0.
+#endif
       if (ivisc(2).gt.0 .and. (abs(jbcinfo(nbl,ns,1,jj)).eq.2004 .or.
      .    abs(jbcinfo(nbl,ns,1,jj)).eq.2014 .or.
      .    abs(jbcinfo(nbl,ns,1,jj)).eq.2024 .or.
@@ -356,6 +374,9 @@ c
          dcy   = tau*(vrel-vnorm*sj(j,k,i,2)*sgn)
 c        viscous drag
          dcdvl  = dcx*cosa*cosb-dcy*sinb+dcz*sina*cosb
+#ifdef PYTHON_API
+         if (sj(j,k,i,4).gt.0.) py_cf=(/dcx,dcy,dcz/)/sj(j,k,i,4)
+#endif
          dcx = dcxp + dcx
          dcy = dcyp + dcy
          dcz = dczp + dcz
@@ -371,6 +392,12 @@ c
       dcdpl = dcdpl*fact
       dcdvl = dcdvl*fact
       dsw  = sj(j,k,i,4)*fact
+#ifdef PYTHON_API
+      call py_record_wall(2+jj,ns,i,k,
+     .     qj0(k,i,5,jj+jj-1),
+     .     qj0(k,i,1,jj+jj-1),py_cf*fact,
+     .     sj(j,k,i,4),vol(jc,k,i),cbar,ialph)
+#endif
 c
       swetl = swetl+dsw
       cxl   = cxl+dcx
@@ -472,6 +499,9 @@ c     pressure drag
       dcdpl = dcx*cosa*cosb-dcy*sinb+dcz*sina*cosb
 c
       dcdvl = 0.
+#ifdef PYTHON_API
+      py_cf=0.
+#endif
       if (ivisc(1).gt.0 .and. (abs(ibcinfo(nbl,ns,1,ii)).eq.2004 .or.
      .    abs(ibcinfo(nbl,ns,1,ii)).eq.2014 .or.
      .    abs(ibcinfo(nbl,ns,1,ii)).eq.2024 .or.
@@ -496,6 +526,9 @@ c
          dcy   = tau*(vrel-vnorm*si(j,k,i,2)*sgn)
 c        viscous drag
          dcdvl  = dcx*cosa*cosb-dcy*sinb+dcz*sina*cosb
+#ifdef PYTHON_API
+         if (si(j,k,i,4).gt.0.) py_cf=(/dcx,dcy,dcz/)/si(j,k,i,4)
+#endif
          dcx = dcxp + dcx
          dcy = dcyp + dcy
          dcz = dczp + dcz
@@ -511,6 +544,12 @@ c
       dcdpl = dcdpl*fact
       dcdvl = dcdvl*fact
       dsw  = si(j,k,i,4)*fact
+#ifdef PYTHON_API
+      call py_record_wall(ii,ns,j,k,
+     .     qi0(j,k,5,ii+ii-1),
+     .     qi0(j,k,1,ii+ii-1),py_cf*fact,
+     .     si(j,k,i,4),vol(j,k,ic),cbar,ialph)
+#endif
 c
       swetl = swetl+dsw
       cxl   = cxl+dcx

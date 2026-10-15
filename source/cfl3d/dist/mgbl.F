@@ -734,6 +734,11 @@ c     open plot3d/printout files
 c
       if (myid.eq.myhost) then
 c
+#ifdef PYTHON_API
+c     Python writes cached PLOT3D results; avoid empty legacy plot files.
+      open(unit=3,form='unformatted',status='scratch')
+      open(unit=4,form='unformatted',status='scratch')
+#else
       if (ibin.eq.1) then
       open(unit=3,file=plt3dg,form='unformatted',status='unknown')
       open(unit=4,file=plt3dq,form='unformatted',status='unknown')
@@ -741,6 +746,7 @@ c
          open(unit=3,file=plt3dg,form='formatted',status='unknown')
          open(unit=4,file=plt3dq,form='formatted',status='unknown')
       end if
+#endif
       open(unit=17,file=printout,form='formatted',status='unknown')
 c
       end if

@@ -1,6 +1,6 @@
 """Usage: python examples/python/run_cgns.py mesh.cgns --model sst --iterations 500"""
 import argparse
-from cfl3d import CFL3D, SolverOptions
+from cfl3d import CFL3D
 from numerical_options import add_numerical_options, numerical_options
 
 
@@ -18,10 +18,11 @@ def main():
     add_numerical_options(p)
     p.add_argument("--output-directory", default="cfl3d-output")
     a = p.parse_args()
-    solver = CFL3D(a.mesh, SolverOptions(mach=a.mach, alpha=a.alpha, beta=a.beta,
+    options = dict(input_grid=a.mesh, output_directory=a.output_directory, mach=a.mach, alpha=a.alpha, beta=a.beta,
                    reynolds=a.reynolds, temperature=a.temperature, turbulence=a.model,
-                   cfl=a.cfl, iterations=a.iterations, **numerical_options(p, a)))
-    result = solver.solve(output_directory=a.output_directory)
+                   cfl=a.cfl, iterations=a.iterations, **numerical_options(p, a))
+    solver = CFL3D(options=options)
+    result = solver.solve()
     print(result.coefficients)
     print(f"Final alpha: {result.final_alpha:.10g} degrees")
     if a.freestream_pressure is not None:

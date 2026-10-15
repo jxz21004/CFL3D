@@ -575,7 +575,15 @@ c
 #ifndef PYTHON_API
       open(unit=1,file=grid,form='unformatted',status='old')
 #endif
+#ifdef PYTHON_API
+      if (.not.py_write_restart) then
+         open(unit=2,form='unformatted',status='scratch')
+      else
+#endif
       open(unit=2,file=restrt,form='unformatted',status='unknown')
+#ifdef PYTHON_API
+      end if
+#endif
       open(unit=20,file=pplunge,form='formatted',status='unknown')
       open(unit=21,file=ovrlap,form='unformatted',status='unknown')
       open(unit=22,file=patch,form='unformatted',status='unknown')

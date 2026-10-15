@@ -217,7 +217,13 @@ c
       if (myid.eq.myhost) then
       if (icgns .ne. 1) then
          nzones = ngrid
+#ifdef PYTHON_API
+         if (py_write_restart) then
+#endif
          open(unit=2,file=restrt,form='unformatted',status='unknown')
+#ifdef PYTHON_API
+         end if
+#endif
          rewind( 2)
          if( iclcd .eq. 1 .or. iclcd .eq. 2 ) then
             open(unit=102,file=clcds,form='unformatted',

@@ -112,12 +112,16 @@ class SurfaceForceTests(unittest.TestCase):
             zone.coordinates[..., 1] = xyz[..., 2]
             zone.coordinates[..., 2] = -xyz[..., 1]
             y_up = CFL3D(mesh, replace(options, y_up=True))
-            y_up.solve(output_directory=root / "y-up")
+            rotated = y_up.solve(output_directory=root / "y-up")
             c = y_up.getSolution()
             np.testing.assert_allclose([c[k] for k in ("Mx", "My", "Mz")],
                                        [a["Mx"], a["Mz"], -a["My"]], rtol=2e-11, atol=1e-11)
             self.assertAlmostEqual(c["CL"], a["CL"], places=12)
             self.assertAlmostEqual(c["CD"], a["CD"], places=12)
+            for key, wall in r.wall_fields.items():
+                expected = wall.copy()
+                expected[...,3], expected[...,4] = wall[...,4], -wall[...,3]
+                np.testing.assert_allclose(rotated.wall_fields[key], expected, rtol=2e-12, atol=1e-12)
 
     def test_missing_pressure_and_unknown_group(self):
         with tempfile.TemporaryDirectory() as directory:

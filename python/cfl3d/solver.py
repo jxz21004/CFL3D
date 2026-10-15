@@ -1,6 +1,8 @@
 """Python-owned configuration and arrays passed directly to the native solver."""
 from __future__ import annotations
 from dataclasses import dataclass, field
+from collections.abc import Mapping
+from copy import deepcopy
 import os
 from pathlib import Path
 import threading
@@ -105,8 +107,47 @@ class SolverOptions:
     multigrid_stages: tuple[MultigridStage, ...] | None = None
     inversion: int | tuple[int, int, int] = 1  # IDIAG, scalar or (i,j,k)
     freestream_pressure: float | None = None  # Pa; coordinates/reference lengths are metres
+    input_grid: str | Path | None = None
+    output_directory: str | Path = "cfl3d-output"
+    writevolumesolution: bool = True
+    writeTecplotSurfaceSolution: bool = True
+    writeflowsolution: bool = False
+    volume_filename: str | Path = "volume.cgns"
+    surface_filename: str | Path = "surface.dat"
+    flow_prefix: str | Path = "flow"
+
+    @classmethod
+    def from_dict(cls, options):
+        """Normalize a user dictionary without mutating it; reject misspelled keys."""
+        values = deepcopy(dict(options))
+        unknown = set(values) - cls.__dataclass_fields__.keys()
+        if unknown:
+            raise ValueError(f"Unknown CFL3D options: {sorted(unknown, key=str)}")
+        for name in ("limiter", "flux", "inversion", "kappa", "moment_center", "multigrid_smoothing"):
+            if isinstance(values.get(name), list):
+                values[name] = tuple(values[name])
+        if values.get("multigrid_stages") is not None:
+            stages = []
+            for stage in values["multigrid_stages"]:
+                if isinstance(stage, Mapping):
+                    stage = dict(stage)
+                    if isinstance(stage.get("smoothing_steps"), list):
+                        stage["smoothing_steps"] = tuple(stage["smoothing_steps"])
+                    stage = MultigridStage(**stage)
+                stages.append(stage)
+            values["multigrid_stages"] = tuple(stages)
+        return cls(**values)
 
     def validate(self):
+        for name in ("input_grid", "output_directory", "volume_filename", "surface_filename", "flow_prefix"):
+            value = getattr(self, name)
+            if value is None and name == "input_grid":
+                continue
+            if not isinstance(value, (str, Path)) or not str(value).strip():
+                raise ValueError(f"{name} must be a nonempty path")
+        for name in ("writevolumesolution", "writeTecplotSurfaceSolution", "writeflowsolution"):
+            if not isinstance(getattr(self, name), bool):
+                raise ValueError(f"{name} must be a boolean")
         ints = ("iterations", "multigrid_levels", "coarse_iterations", "multigrid_cycle",
                 "turbulence_subiterations", "cfl_ramp_steps",
                 "first_order_iterations", "coarse_first_order_iterations")
@@ -215,6 +256,7 @@ class SolverResult:
     output_directory: Path
     final_alpha: float  # actual final angle in degrees, including native CL control
     surface_coefficients: dict[tuple[str, str], np.ndarray] = field(default_factory=dict)
+    wall_fields: dict[tuple[str, str], np.ndarray] = field(default_factory=dict)  # Cp,T[K],Cfx,Cfy,Cfz,y+
 
     @property
     def coefficients(self):
@@ -226,9 +268,10 @@ class SolverResult:
             coefficients.update(CDp=float(total[8]), CDv=float(total[9]))
         return coefficients
 
-    def save(self, filename):
+    def save(self, filename, *, include_volume=True):
         values = {"history": self.history, "final_alpha": np.asarray(self.final_alpha)}
-        values.update({f"zone_{name}": field for name, field in self.fields.items()})
+        if include_volume:
+            values.update({f"zone_{name}": field for name, field in self.fields.items()})
         keys = sorted(self.surface_coefficients)
         values["surface_names"] = np.asarray(keys, dtype=str).reshape(-1, 2)
         values["surface_coefficients"] = np.asarray([self.surface_coefficients[k] for k in keys]).reshape(-1, 10)
@@ -243,7 +286,9 @@ class CFL3D:
     native failure, start a fresh Python process before attempting another solve.
     """
 
-    def __init__(self, mesh, options=None, *, boundary_overrides=None, comm=None, groups=None):
+    def __init__(self, mesh=None, options=None, *, boundary_overrides=None, comm=None, groups=None):
+        if options is None and isinstance(mesh, (Mapping, SolverOptions)):
+            options, mesh = mesh, None
         self.comm = comm
         self._last_result = None
         self._group_definitions = {}
@@ -253,8 +298,18 @@ class CFL3D:
                 raise ValueError("CFL3D MPI needs an intracommunicator with a host and at least one worker")
 
         def load():
-            self.mesh = mesh if isinstance(mesh, CGNSMesh) else CGNSMesh.from_file(mesh)
-            self.options = options or SolverOptions()
+            self.options = SolverOptions.from_dict(options) if isinstance(options, Mapping) else options
+            if self.options is None:
+                self.options = SolverOptions()
+            if not isinstance(self.options, SolverOptions):
+                raise ValueError("options must be a dictionary or SolverOptions")
+            self.options.validate()
+            if mesh is not None and self.options.input_grid is not None:
+                raise ValueError("Specify the mesh argument or options.input_grid, not both")
+            input_mesh = mesh if mesh is not None else self.options.input_grid
+            if input_mesh is None:
+                raise ValueError("Set options['input_grid'] or provide a mesh")
+            self.mesh = input_mesh if isinstance(input_mesh, CGNSMesh) else CGNSMesh.from_file(input_mesh)
             self.boundary_overrides = boundary_overrides or {}
             self.options.validate()
             return self.mesh, self.options, self.boundary_overrides, {} if groups is None else groups
@@ -277,6 +332,44 @@ class CFL3D:
             if comm.Get_size() - 1 > len(self.mesh.zones):
                 raise ValueError("This MPI interface currently requires at least one zone per worker")
         self.addGroups(group_definitions)
+
+    def _output_path(self, filename, default):
+        if self._last_result is None:
+            raise RuntimeError("Call solve() successfully before writing a solution")
+        path = Path(filename) if filename is not None else self._last_output_directory / default
+        if self._last_mesh.source and path.resolve() == Path(self._last_mesh.source).resolve():
+            raise ValueError("Solution output must not overwrite the input CGNS mesh")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def writeVolumeSolution(self, filename=None):
+        """Write cached grid + cell fields to CGNS/ADF, independently of automatic flags."""
+        if self.comm is not None and self.comm.Get_rank() != 0:
+            return None
+        path = self._output_path(filename, self._last_options.volume_filename if self._last_result else "volume.cgns")
+        from .solution_io import write_volume
+        write_volume(path, self._last_mesh, self._last_fields, self._last_options)
+        return path
+
+    def writeTecplotSurfaceSolution(self, filename=None, groupName=None):
+        """Write wall quads with Cp,T[K],Cf components,y+; optional group selection."""
+        if self.comm is not None and self.comm.Get_rank() != 0:
+            return None
+        path = self._output_path(filename, self._last_options.surface_filename if self._last_result else "surface.dat")
+        from .solution_io import write_surface
+        members = self._group_members(groupName)
+        write_surface(path, self._last_mesh, self._last_wall_fields, members)
+        return path
+
+    def writeFlowSolution(self, prefix=None):
+        """Write cached cell-center PLOT3D .x/.q in CFL3D binary IPtype=1 format."""
+        if self.comm is not None and self.comm.Get_rank() != 0:
+            return None
+        prefix = self._output_path(prefix, self._last_options.flow_prefix if self._last_result else "flow")
+        from .solution_io import write_flow
+        for suffix in (".x", ".q"):
+            self._output_path(str(prefix)+suffix, "")
+        return write_flow(prefix, self._last_mesh, self._last_fields, self._last_options, self._last_final_alpha)
 
     def _cgns_surface_groups(self):
         families, zones, boundaries, qualified = {}, {}, {}, {}
@@ -326,17 +419,7 @@ class CFL3D:
         mesh axes. L/D/Y/Dp/Dv are N, moments Mx/My/Mz are N*m.
         This is a local call: any rank may query without an MPI collective.
         """
-        if self._last_result is None:
-            raise RuntimeError("Call solve() successfully before getSolution()")
-        if groupName is None:
-            members = set(self._last_surface_coefficients)
-        elif isinstance(groupName, str) and groupName in self._last_base_groups:
-            members = self._last_base_groups[groupName]
-        elif isinstance(groupName, str) and groupName in self._group_definitions:
-            members = set().union(*(self._last_base_groups[name]
-                                   for name in self._group_definitions[groupName]))
-        else:
-            raise ValueError(f"Unknown surface group {groupName!r}; inspect getGroupNames()")
+        members = self._group_members(groupName)
         total = (np.sum([self._last_surface_coefficients[key] for key in sorted(members)], axis=0)
                  if members else np.zeros(10))
         values = {name: float(total[index]) for index, name in enumerate(_SURFACE_COEFFICIENTS)}
@@ -355,6 +438,20 @@ class CFL3D:
         result["units"] = {name: "N" for name in ("L", "D", "Y", "Dp", "Dv")}
         result["units"].update({name: "N*m" for name in ("Mx", "My", "Mz")})
         return result
+
+    def _group_members(self, groupName):
+        if self._last_result is None:
+            raise RuntimeError("Call solve() successfully before querying solution groups")
+        if groupName is None:
+            members = set(self._last_surface_coefficients)
+        elif isinstance(groupName, str) and groupName in self._last_base_groups:
+            members = self._last_base_groups[groupName]
+        elif isinstance(groupName, str) and groupName in self._group_definitions:
+            members = set().union(*(self._last_base_groups[name]
+                                   for name in self._group_definitions[groupName]))
+        else:
+            raise ValueError(f"Unknown surface group {groupName!r}; inspect getGroupNames()")
+        return members
 
     def _checked(self, operation):
         """Agree on Python-side failures before entering the native collectives."""
@@ -519,7 +616,7 @@ class CFL3D:
                     rkap=np.array(_directions(o.kappa, "kappa")),
                     npoints=len(xyz), ncells=int(np.prod(dims-1, axis=0).sum())), xyz
 
-    def solve(self, *, output_directory="cfl3d-output"):
+    def solve(self, *, output_directory=None):
         self._last_result = None  # Failed solves must not expose an older run's loads.
         arrays, xyz = self._checked(self._arrays)
         base_groups = self._checked(self._cgns_surface_groups)
@@ -533,13 +630,14 @@ class CFL3D:
                                    + (" --mpi" if self.comm is not None else "")) from exc
             if bool(module.py_build_info()) != (self.comm is not None):
                 raise RuntimeError("Native extension MPI mode does not match the solver")
-            if getattr(module, "py_api_version", lambda: 0)() != 3:
+            if getattr(module, "py_api_version", lambda: 0)() != 4:
                 raise RuntimeError("Native interface changed; rebuild with python tools/build_python.py"
                                    + (" --mpi" if self.comm is not None else "") + " and restart Python")
             return module
         _native = self._checked(native_module)
         rank = self.comm.Get_rank() if self.comm is not None else 0
-        output_directory = self._checked(lambda: Path(output_directory).resolve())
+        output_directory = self._checked(lambda: Path(
+            self.options.output_directory if output_directory is None else output_directory).resolve())
         if self.comm is not None:
             output_directory = self.comm.bcast(output_directory if rank == 0 else None, root=0)
         # 旧核心按固定文件名写输出，计算进程必须使用独立目录，避免互相覆盖。
@@ -561,6 +659,7 @@ class CFL3D:
                         raise RuntimeError("Native MPI communicator configuration failed")
                 self._checked(set_comm)
             def configure():
+                _native.py_set_output_flags(int(self.options.writevolumesolution or self.options.writeflowsolution))
                 status = _native.py_configure(**arrays)
                 if status:
                     raise RuntimeError(f"Native configuration failed ({status}); start a fresh interpreter")
@@ -575,6 +674,8 @@ class CFL3D:
             history = _native.py_get_history(nrows)
             final_alpha = float(_native.py_get_final_alpha())
             surface_values = _native.py_get_surface_coefficients(arrays["bcs"].shape[1])
+            wall_counts = (arrays["bcs"][4]-arrays["bcs"][3])*(arrays["bcs"][6]-arrays["bcs"][5])
+            wall_values = _native.py_get_wall_data(int(wall_counts.sum()))
         finally:
             os.chdir(old_directory)
             if native_comm is not None:
@@ -592,13 +693,36 @@ class CFL3D:
                 fields[z.name][..., 3] = -internal_v
             offset += count
         if (not np.isfinite(q).all() or not np.isfinite(history).all()
-                or not np.isfinite(final_alpha) or not np.isfinite(surface_values).all()):
+                or not np.isfinite(final_alpha) or not np.isfinite(surface_values).all()
+                or not np.isfinite(wall_values).all()):
             raise RuntimeError("CFL3D returned nonfinite solution/history")
         surfaces = {key: surface_values[:, index].copy()
                     for index, key in enumerate(self._surface_keys) if key is not None}
-        result = SolverResult(fields, history, output_directory, final_alpha, surfaces)
-        self._checked(lambda: result.save(output_directory / "solution.npz") if rank == 0 else None)
+        walls = {}; offset = 0
+        for index, key in enumerate(self._surface_keys):
+            count = int(wall_counts[index])
+            if key is not None and abs(int(arrays["bcs"][2,index])) in (1005,1006,2004,2014,2024,2034,2016):
+                shape = (int(arrays["bcs"][4,index]-arrays["bcs"][3,index]),
+                         int(arrays["bcs"][6,index]-arrays["bcs"][5,index]), 6)
+                walls[key] = wall_values[:,offset:offset+count].T.reshape(shape, order="F").copy()
+            offset += count
+        result = SolverResult(fields, history, output_directory, final_alpha, surfaces, walls)
         self._last_surface_coefficients = {key: value.copy() for key, value in surfaces.items()}
+        self._last_wall_fields = {key: value.copy() for key, value in walls.items()}
+        self._last_fields = {name: value.copy() for name, value in fields.items()}
+        self._last_mesh = deepcopy(self.mesh)
+        self._last_final_alpha, self._last_output_directory = final_alpha, output_directory
         self._last_base_groups, self._last_options = base_groups, self.options
         self._last_result = result
+        def write_outputs():
+            if rank != 0:
+                return
+            result.save(output_directory / "solution.npz", include_volume=self.options.writevolumesolution)
+            if self.options.writevolumesolution:
+                self.writeVolumeSolution()
+            if self.options.writeTecplotSurfaceSolution:
+                self.writeTecplotSurfaceSolution()
+            if self.options.writeflowsolution:
+                self.writeFlowSolution()
+        self._checked(write_outputs)
         return result

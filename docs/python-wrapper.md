@@ -209,7 +209,7 @@ MIT 须为 1..20 的整数，MTT 非负，接口检查 MIT+MTT 不超过原生�
 阶段表及 MIT 使用不可变 tuple，可通过 dataclasses.replace 创建修改后的配置。
 embedded 网格尚未接入，NEMGL/ICONSF 仍没有可用的 embedded 计算接口。
 
-本版原生接口版本为 3，新增表面积分输出后必须重建串行和 MPI 扩展并重启 Python：
+本版原生接口版本为 4，新增壁面分布缓存后必须重建串行和 MPI 扩展并重启 Python：
 
 ```bash
 python tools/build_python.py --debug --jobs 8
@@ -304,6 +304,72 @@ BCDataSet 不会自动进行单位推断。拼错的覆盖名称会报错。
 
 ## 返回结果
 
+本版推荐把网格路径、输出目录、计算设置及输出开关统一放进 options 字典：
+
+```python
+solver = CFL3D(options={
+    "input_grid": "mesh.cgns",
+    "output_directory": "results",
+    "mach": 0.2, "alpha": 2.0, "turbulence": "sst",
+    "iterations": 1000, "cfl": 1.0,
+    "freestream_pressure": 101325.0,
+    "writevolumesolution": True,
+    "writeTecplotSurfaceSolution": True,
+    "writeflowsolution": False,
+})
+result = solver.solve()
+```
+
+也可使用 `CFL3D(options_dict)`。原有 `CFL3D(mesh, SolverOptions(...))` 保持可用。
+`input_grid` 与 mesh 参数不能同时设置；`solve(output_directory=...)` 仍可覆盖本次输出目录。
+字典在构造时复制并转换为不可变 SolverOptions，修改原字典不会影响已有 solver。
+标量/方向参数支持三元 list，`multigrid_stages` 支持字典列表，内部统一成 tuple 和 MultigridStage。
+未知键和非布尔输出开关会报错，输出开关键名须按上例大小写书写。
+
+自动输出文件和独立补写方法：
+
+| options 开关 | 默认值 | 自动输出 | 补写方法 |
+| --- | --- | --- | --- |
+| `writevolumesolution` | True | `volume.cgns`，及 NPZ 中的体流场 | `writeVolumeSolution(filename=None)` |
+| `writeTecplotSurfaceSolution` | True | `surface.dat` | `writeTecplotSurfaceSolution(filename=None, groupName=None)` |
+| `writeflowsolution` | False | `flow.x`、`flow.q` | `writeFlowSolution(prefix=None)` |
+
+文件名分别可通过 `volume_filename`、`surface_filename`、`flow_prefix` 设置。
+三个开关全关时不写体/表面解和原生 restart 数据，但仍保存历史、积分元数据和原生日志。
+场数据仍保留在本 solver 的 Python 快照中，补写方法不受开关限制，也不再进入原生 CFD 计算。
+补写以最近一次成功计算为准，不依赖输入文件继续存在，也不受另一个 solver 重用 Fortran 状态影响。
+尚未提供从只含历史的 NPZ 恢复整个快照的接口。
+
+```python
+# 自动输出曾关闭时，计算结束后仍可补写。
+solver.writeVolumeSolution()
+solver.writeTecplotSurfaceSolution()
+solver.writeTecplotSurfaceSolution("wing.dat", groupName="Wing")
+solver.writeFlowSolution("flow-later")
+```
+
+默认路径位于本次输出目录；显式传入的相对路径则相对于调用时工作目录。
+文件通过临时文件写完再替换目标，不允许覆盖原输入 CGNS 网格。
+MPI 中只由 rank 0 写文件，补写方法可仅由 root 调用；在其他 rank 调用返回 None。
+
+CGNS 体文件默认采用 ADF，包括原始顶点、结构化 zone、边界/连接和 CellCenter FlowSolution。
+Density、VelocityX/Y/Z、Pressure 保持 CFL3D 无量纲定义，Temperature 为 K；
+量纲记录在 FlowSolution 的 CFL3DUnits 描述中。该文件用于后处理，不提供原生 restart 接续。
+PLOT3D 按原生 `IPTYPE=1` 的单元中心二进制格式从缓存写出，含 32 位记录标记及 IBLANK、
+64 位坐标/守恒量；二维为两个坐标和四个守恒量，三维为三个坐标和五个守恒量。
+未实现 IPTYPE=0 的网格点解导出。SST 平板与独立原生程序的 `.q` 逐记录相同，
+`.x` 坐标最大差异为 `2.22e-16`，IBLANK 相同。
+
+表面输出使用 Tecplot ASCII FEQUADRILATERAL，每个实际 wall BC 一个 zone，
+可进一步用 CGNS/custom group 过滤。无 wall 时只有文件头。
+X/Y/Z 是原始壁面顶点；Cp、T、Cfx、Cfy、Cfz、y+ 为面单元中心变量（VARLOCATION 标明）。
+T 使用原生壁面边界状态换算为 K；Cf 从 force.F 的剪切力除以壁面面积取得，使用输入坐标轴。
+`y+ = rho_w*u_tau*d/mu_w`，使用第一层单元中心的法向距离 `d=V/(2A)`，
+以及内核的 Sutherland 分子黏度。它不采用旧 calyplus.F 文本统计的节点平均值。
+无黏壁面 Cf 和 y+ 为零。表面分布在最细网格最后一次力计算时缓存，时序与 getSolution 一致。
+`result.wall_fields[(zone,bc)]` 形状为 `(面方向1单元数,面方向2单元数,6)`，
+列依次为 Cp、T(K)、Cfx、Cfy、Cfz、y+，面方向按输入网格未固定的两个索引轴排序。
+
 `result.fields[zone_name]` 形状是 `(ni-1,nj-1,nk-1,5)`，依次为单元中心
 `rho,u,v,w,p`，**采用 CFL3D 的无量纲化**：自由来流 rho=1、声速=1、p=1/gamma。
 最后一个索引依然使用网格的 i/j/k 次序，不是核心内部 j/k/i 储存顺序。
@@ -314,12 +380,13 @@ BCDataSet 不会自动进行单位推断。拼错的覆盖名称会报错。
 residual, CL, CD, CX, CY, CMX, CMY, CMZ
 ```
 
-`result.coefficients` 返回最后一次迭代的系数字典，包含新增的 `CDp`、`CDv`。
+`result.coefficients` 返回最后一次迭代的系数字典，包含 `CDp`、`CDv`。
 输出目录还保存 `solution.npz`，包括 history、final_alpha、以 `zone_<name>` 命名的流场数组，
 以及逐边界的 `surface_names`、`surface_coefficients` 和 `surface_coefficient_names`。
 表面积分列依次为 `CL, CD, CX, CY, CZ, Cmx, Cmy, Cmz, CDp, CDv`；
 `surface_names` 每行是对应的 zone、BC 名称。原生 CFL3D 日志与 restart 文件也保留。
 输出文件不代表已收敛；迭代次数由配置决定，本版不实现 Python 收敛停止判据。
+关闭 `writevolumesolution` 后，自动 NPZ 不包含 `zone_<name>` 体流场数组。
 
 同一进程可以连续求解多个工况，每次重新传入配置和网格、从自由来流初始化。
 核心使用 COMMON 全局状态，禁止并发 solve；计算期间输出目录通过进程 cwd 切换，
@@ -411,6 +478,19 @@ MPI/f2py communicator 为实验性实现，验证状态见上文。
 BCDataSet 的数值数组会读出并传给现有边界检查；不支持的类型或非零热流不会被忽略。
 
 ## 本地验证和 CI
+
+新增字典配置与延迟 I/O 回归：
+
+```bash
+PYTHONPATH=python:tests/python python -m unittest test_solution_io -v
+PYTHONPATH=python:tests/python mpirun -np 3 python tests/python/validate_solution_io_mpi.py --directory build/mpi-io-validation
+PYTHONPATH=python:tests/python mpirun -np 4 python tests/python/validate_solution_io_mpi.py --split --directory build/mpi-io-validation
+python tools/build_python.py --standalone --debug --jobs 8
+PYTHONPATH=python:tests/python python tests/python/validate_plot3d.py --directory build/mpi-io-validation/plot3d-parity
+```
+
+覆盖输出开关全关后的三种补写、不同 solver 的快照隔离、CGNS 流场读回、壁面温度、
+Cf 再积分、y+ 定义、三维 i/j/k 壁面及 y-up、PLOT3D 原生格式一致性。
 
 分组积分回归（真实 CGNS/ADF、2/3 进程及两个独立子通信器）：
 
