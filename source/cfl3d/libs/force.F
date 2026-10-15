@@ -26,6 +26,9 @@ c
      .                 xtbj,xtbk,xtbi,iuns,qj0,qk0,qi0,nbci0,nbcj0,
      .                 nbck0,nbcidim,nbcjdim,nbckdim,ibcinfo,jbcinfo,
      .                 kbcinfo,nn,maxseg)
+#ifdef PYTHON_API
+      use cfl3d_python_state, only: py_record_surface
+#endif
 c
 c     $Id$
 c
@@ -37,6 +40,9 @@ c
       implicit complex(a-h,o-z)
 #   endif
 c
+#ifdef PYTHON_API
+      real py_before(10),py_after(10)
+#endif
       dimension ub(jdim,kdim,idim),vb(jdim,kdim,idim),wb(jdim,kdim,idim)
       dimension vmuk(jdim-1,idim-1,2),vol(jdim,kdim,idim-1),
      .          vmuj(kdim-1,idim-1,2),vmui(jdim-1,kdim-1,2)
@@ -144,6 +150,10 @@ c
       do 5 ns = 1,nseg
 c
       if (kbcinfo(nbl,ns,6,kk) .gt. 0 ) then
+#ifdef PYTHON_API
+c     Snapshot this segment's native pressure AND viscous contributions.
+      py_before = (/cl,cd,cx,cy,cz,cmx,cmy,cmz,cdp,cdv/)
+#endif
 c
       ist = kbcinfo(nbl,ns,2,kk)
       ifn = kbcinfo(nbl,ns,3,kk) - 1
@@ -254,6 +264,11 @@ c     integrated values
       cdv   = cdv + cdvl
 c
    10 continue
+#ifdef PYTHON_API
+      py_after = (/cl,cd,cx,cy,cz,cmx,cmy,cmz,cdp,cdv/)
+      call py_record_surface(4+kk,ns,py_after-py_before,
+     .                       i2d,ialph)
+#endif
       end if
     5 continue
     1 continue
@@ -278,6 +293,10 @@ c
       do 35 ns = 1,nseg
 c
       if (jbcinfo(nbl,ns,6,jj) .gt. 0 ) then
+#ifdef PYTHON_API
+c     Snapshot this segment's native pressure AND viscous contributions.
+      py_before = (/cl,cd,cx,cy,cz,cmx,cmy,cmz,cdp,cdv/)
+#endif
 c
       ist = jbcinfo(nbl,ns,2,jj)
       ifn = jbcinfo(nbl,ns,3,jj) - 1
@@ -386,6 +405,11 @@ c     integrated values
       cdv   = cdv + cdvl
 c
    40 continue
+#ifdef PYTHON_API
+      py_after = (/cl,cd,cx,cy,cz,cmx,cmy,cmz,cdp,cdv/)
+      call py_record_surface(2+jj,ns,py_after-py_before,
+     .                       i2d,ialph)
+#endif
       end if
    35 continue
     6 continue
@@ -409,6 +433,10 @@ c
       do 65 ns = 1,nseg
 c
       if (ibcinfo(nbl,ns,6,ii) .gt. 0 ) then
+#ifdef PYTHON_API
+c     Snapshot this segment's native pressure AND viscous contributions.
+      py_before = (/cl,cd,cx,cy,cz,cmx,cmy,cmz,cdp,cdv/)
+#endif
 c
       jst = ibcinfo(nbl,ns,2,ii)
       jfn = ibcinfo(nbl,ns,3,ii) - 1
@@ -516,6 +544,11 @@ c     integrated values
       cdv   = cdv + cdvl
 c
    70 continue
+#ifdef PYTHON_API
+      py_after = (/cl,cd,cx,cy,cz,cmx,cmy,cmz,cdp,cdv/)
+      call py_record_surface(0+ii,ns,py_after-py_before,
+     .                       i2d,ialph)
+#endif
       end if
    65 continue
     7 continue

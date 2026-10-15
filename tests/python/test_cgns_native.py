@@ -16,11 +16,13 @@ class NativeCGNSTests(unittest.TestCase):
     def assert_mesh_equal(self, expected, actual):
         self.assertEqual([z.name for z in expected.zones], [z.name for z in actual.zones])
         for a, b in zip(expected.zones, actual.zones):
+            self.assertEqual((a.family, a.additional_families), (b.family, b.additional_families))
             np.testing.assert_array_equal(a.coordinates, b.coordinates)
             self.assertEqual(len(a.boundaries), len(b.boundaries))
             self.assertEqual(len(a.connections), len(b.connections))
             for x, y in zip(a.boundaries, b.boundaries):
                 self.assertEqual((x.name, x.bc_type), (y.name, y.bc_type))
+                self.assertEqual((x.family, x.additional_families), (y.family, y.additional_families))
                 np.testing.assert_array_equal(x.point_range, y.point_range)
                 self.assertEqual(x.data.keys(), y.data.keys())
                 for key in x.data:
@@ -127,6 +129,21 @@ class NativeCGNSTests(unittest.TestCase):
             path.write_text("not a CGNS file")
             with self.assertRaisesRegex(ValueError, "cg_open"):
                 CGNSMesh.from_file(path)
+
+    def test_families_and_family_specified(self):
+        mesh = box_mesh(True)
+        mesh.zones[0].family = "Body"
+        mesh.zones[0].additional_families = ("Airframe",)
+        boundary = mesh.zones[0].boundaries[0]
+        boundary.family = "Wing"
+        boundary.additional_families = ("Assembly",)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "families.cgns"
+            self.assert_mesh_equal(mesh, CGNSMesh.from_file(write_adf(mesh, path)))
+            boundary.bc_type = "FamilySpecified"
+            restored = CGNSMesh.from_file(write_adf(mesh, path, family_bc_types={"Wing": "BCWallInviscid"}))
+            self.assertEqual(restored.zones[0].boundaries[0].bc_type, "BCWallInviscid")
+            self.assertEqual(restored.zones[0].boundaries[0].family, "Wing")
 
 
 if __name__ == "__main__":

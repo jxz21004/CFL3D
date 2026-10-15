@@ -3,14 +3,14 @@ module cfl3d_python_state
   implicit none
   integer, allocatable :: py_dims(:,:), py_counts(:,:), py_bc(:,:)
   integer, allocatable :: py_blocks(:,:), py_stages(:,:), py_connections(:,:,:)
-  real(8), allocatable :: py_bcdata(:,:), py_xyz(:,:), py_q(:,:), py_history(:,:)
+  real(8), allocatable :: py_bcdata(:,:), py_xyz(:,:), py_q(:,:), py_history(:,:), py_surface(:,:)
   integer, allocatable :: py_offsets(:), py_qoffsets(:)
   real(8) :: py_flow(7), py_reference(6), py_time(6), py_keywords(9)
   integer :: py_run(8), py_mg(5), py_scheme(6), py_flux(3), py_smoothing(5,5)
   real(8) :: py_rkap(3), py_final_alpha=0.0d0
   integer :: py_ngrid=0, py_nbc=0, py_nconn=0, py_nhistory=0
   integer :: py_status=0, py_used=0
-  integer :: py_comm=-1
+  integer :: py_comm=-1, py_force_zone=0
 contains
   integer function py_bcindex(grid,face,seg) result(idx)
     integer, intent(in) :: grid,face,seg
@@ -23,6 +23,42 @@ contains
       idx=idx+py_counts(face,g)
     end do
   end function
+
+  subroutine py_select_force_zone(block,zone_blocks)
+    integer, intent(in) :: block,zone_blocks(*)
+    integer :: g
+    py_force_zone=0
+    do g=1,py_ngrid
+      if (block == zone_blocks(g)) py_force_zone=g
+    end do
+  end subroutine
+
+  subroutine py_record_surface(face,segment,raw,i2d,ialph)
+    integer, intent(in) :: face,segment,i2d,ialph
+    real(8), intent(in) :: raw(10)
+    real(8) :: values(10),temp,yref,zref
+    integer :: idx
+    if (py_force_zone == 0) return  ! Coarse-grid forces are not output surfaces.
+    idx=py_bcindex(py_force_zone,face,segment)
+    ! raw: CL, CD, CX, CY, CZ, Cmx, Cmy, Cmz, CDp, CDv before Sref/length scaling.
+    values=raw
+    ! Match force.F's 2D moment suppression and rotation to input coordinates.
+    if (i2d == 1) then
+      values(6)=0; values(8)=0
+    end if
+    yref=py_reference(2); zref=py_reference(3)
+    if (ialph > 0) then
+      temp=values(8); values(8)=-values(7); values(7)=temp
+      temp=values(5); values(5)=-values(4); values(4)=temp
+      yref=py_reference(3); zref=py_reference(2)
+    end if
+    values=values/py_reference(1)
+    values(6)=values(6)/py_reference(3)
+    values(7)=values(7)/yref
+    values(8)=values(8)/zref
+    ! Only the finest block's owner writes this row. Each evaluation replaces it.
+    py_surface(:,idx)=values
+  end subroutine
 
   subroutine py_copy_grid(x,y,z,jd,kd,id,grid,ialph)
     integer, intent(in) :: jd,kd,id,grid,ialph
@@ -67,7 +103,15 @@ end module
 subroutine py_api_version(version)
   implicit none
   integer, intent(out) :: version
-  version=2
+  version=3
+end subroutine
+
+subroutine py_get_surface_coefficients(values,nbc)
+  use cfl3d_python_state, only: py_surface
+  implicit none
+  integer, intent(in) :: nbc
+  real(8), intent(out) :: values(10,nbc)
+  values=py_surface
 end subroutine
 
 subroutine py_get_final_alpha(alpha_degrees)
@@ -124,6 +168,10 @@ subroutine py_collect_results()
   call MPI_Allreduce(py_q,gathered,size(py_q),MPI_DOUBLE_PRECISION,MPI_SUM,py_comm,ierr)
   py_q=gathered
   deallocate(gathered)
+  allocate(gathered(size(py_surface,1),size(py_surface,2)))
+  call MPI_Allreduce(py_surface,gathered,size(py_surface),MPI_DOUBLE_PRECISION,MPI_SUM,py_comm,ierr)
+  py_surface=gathered
+  deallocate(gathered)
   call MPI_Bcast(py_history,size(py_history),MPI_DOUBLE_PRECISION,0,py_comm,ierr)
 #endif
 end subroutine
@@ -165,6 +213,9 @@ subroutine py_configure(dims,counts,bcs,bcdata,blocks,connections,flow,reference
     deallocate(py_bcdata,py_xyz,py_q,py_offsets,py_qoffsets)
   end if
   if (allocated(py_history)) deallocate(py_history)
+  if (allocated(py_surface)) deallocate(py_surface)
+  allocate(py_surface(10,nbc))
+  py_surface=0; py_force_zone=0
   py_ngrid=ngrid; py_nbc=nbc; py_nconn=nconn
   py_dims=dims; py_counts=counts; py_bc=bcs; py_bcdata=bcdata
   py_blocks=blocks; py_connections=connections; py_stages=stages

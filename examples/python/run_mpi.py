@@ -28,6 +28,9 @@ def main():
     if comm.rank == 0:
         print(result.coefficients)
         print(f"Final alpha: {result.final_alpha:.10g} degrees")
+        if args.freestream_pressure is not None:
+            # Cached loads are local: querying only rank 0 cannot strand workers.
+            print(solver.getSolution(args.group))
 
 
 if __name__ == "__main__":

@@ -11,6 +11,8 @@ class Boundary:
     bc_type: str
     point_range: np.ndarray
     data: dict[str, np.ndarray] = field(default_factory=dict)
+    family: str | None = None
+    additional_families: tuple[str, ...] = ()
 
 
 @dataclass
@@ -27,6 +29,8 @@ class Zone:
     coordinates: np.ndarray  # (ni,nj,nk,3), physical Cartesian axes
     boundaries: list[Boundary] = field(default_factory=list)
     connections: list[Connection] = field(default_factory=list)
+    family: str | None = None
+    additional_families: tuple[str, ...] = ()
 
     @property
     def dimensions(self):
@@ -60,6 +64,14 @@ def _range(node, name):
     if value.shape != (2, 3):
         raise ValueError(f"{node[name].name}: expected a 3D PointRange")
     return np.asarray(value.T, dtype=np.int64)
+
+
+def _families(node):
+    primary = _children(node, "FamilyName_t")
+    if len(primary) > 1:
+        raise ValueError(f"{node.name}: multiple primary FamilyName nodes")
+    return (_text(_data(primary[0])) if primary else None,
+            tuple(_text(_data(child)) for child in _children(node, "AdditionalFamilyName_t")))
 
 
 def _is_hdf5(path):
@@ -129,6 +141,11 @@ class CGNSMesh:
             b = bases[0]
             if tuple(_data(b).flat) != (3, 3):
                 raise NotImplementedError("Native wrapper currently requires cell/physical dimension 3 (including extruded 2D grids)")
+            family_types = {}
+            for family in _children(b, "Family_t"):
+                bcs = _children(family, "FamilyBC_t")
+                if len(bcs) == 1:
+                    family_types[family.name.rsplit("/", 1)[-1]] = _text(_data(bcs[0]))
             for z in _children(b, "Zone_t"):
                 if "ZoneType" not in z or _text(_data(z["ZoneType"])) != "Structured":
                     raise NotImplementedError(f"{z.name}: only structured zones are supported")
@@ -154,6 +171,7 @@ class CGNSMesh:
                 if not np.isfinite(coordinates).all():
                     raise ValueError(f"{z.name}: nonfinite coordinate")
                 zone = Zone(z.name.rsplit("/", 1)[-1], coordinates)
+                zone.family, zone.additional_families = _families(z)
                 for zb in _children(z, "ZoneBC_t"):
                     for bc in _children(zb, "BC_t"):
                         if "GridLocation" in bc and _text(_data(bc["GridLocation"])) != "Vertex":
@@ -166,8 +184,14 @@ class CGNSMesh:
                                     if name in data:
                                         raise ValueError(f"{bc.name}: ambiguous BC data {name}")
                                     data[name] = _data(array)
-                        zone.boundaries.append(Boundary(bc.name.rsplit("/", 1)[-1],
-                                                        _text(_data(bc)), _range(bc, "PointRange"), data))
+                        family, additional = _families(bc)
+                        bc_type = _text(_data(bc))
+                        if bc_type == "FamilySpecified":
+                            parts = (family or zone.family or "").strip("/").split("/")
+                            if len(parts) == 1 or (len(parts) == 2 and parts[0] == b.name.rsplit("/", 1)[-1]):
+                                bc_type = family_types.get(parts[-1], bc_type)
+                        zone.boundaries.append(Boundary(bc.name.rsplit("/", 1)[-1], bc_type,
+                                                        _range(bc, "PointRange"), data, family, additional))
                 for zg in _children(z, "ZoneGridConnectivity_t"):
                     if _children(zg, "GridConnectivity_t"):
                         raise NotImplementedError(f"{z.name}: general/overset connectivity is not supported")

@@ -3,6 +3,10 @@ python module _native
         subroutine py_api_version(version)
             integer intent(out) :: version
         end subroutine py_api_version
+        subroutine py_get_surface_coefficients(values,nbc)
+            real(kind=8) dimension(10,nbc),intent(out),depend(nbc) :: values
+            integer intent(in) :: nbc
+        end subroutine py_get_surface_coefficients
         subroutine py_get_final_alpha(alpha_degrees)
             real(kind=8) intent(out) :: alpha_degrees
         end subroutine py_get_final_alpha

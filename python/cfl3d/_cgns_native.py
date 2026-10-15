@@ -40,6 +40,11 @@ class CGNSLibrary:
             "cg_open": [_CHAR, _INT, _IP], "cg_close": [_INT],
             "cg_nbases": [_INT, _IP], "cg_base_read": [_INT, _INT, _CHAR, _IP, _IP],
             "cg_nzones": [_INT, _INT, _IP], "cg_zone_type": [_INT, _INT, _INT, _IP],
+            "cg_nfamilies": [_INT, _INT, _IP],
+            "cg_family_read": [_INT, _INT, _INT, _CHAR, _IP, _IP],
+            "cg_fambc_read": [_INT, _INT, _INT, _INT, _CHAR, _IP],
+            "cg_famname_read": [_CHAR], "cg_nmultifam": [_IP],
+            "cg_multifam_read": [_INT, _CHAR, _CHAR],
             "cg_zone_read": [_INT, _INT, _INT, _CHAR, sp],
             "cg_ngrids": [_INT, _INT, _INT, _IP],
             "cg_grid_read": [_INT, _INT, _INT, _INT, _CHAR],
@@ -144,6 +149,17 @@ def _data_arrays(api):
     return arrays
 
 
+def _families(api):
+    primary = C.create_string_buffer(1025)
+    family = primary.value.decode() if api.optional("cg_famname_read", primary) else None
+    additional = []
+    for i in range(1, api.count("cg_nmultifam") + 1):
+        name, value = _name(), C.create_string_buffer(1025)
+        api.call("cg_multifam_read", i, name, value)
+        additional.append(value.value.decode())
+    return family, tuple(additional)
+
+
 def read_mesh(filename, *, base=None):
     from .cgns import Boundary, CGNSMesh, Connection, Zone
 
@@ -164,6 +180,14 @@ def read_mesh(filename, *, base=None):
         b, basename, cell, physical = bases[0]
         if (cell, physical) != (3, 3):
             raise NotImplementedError("Native wrapper requires cell/physical dimension 3 (including extruded 2D grids)")
+        family_types = {}
+        for f in range(1, api.count("cg_nfamilies", fn, b) + 1):
+            name, nbc, ngeom = _name(), _INT(), _INT()
+            api.call("cg_family_read", fn, b, f, name, C.byref(nbc), C.byref(ngeom))
+            if nbc.value == 1:
+                bcname, bctype = _name(), _INT()
+                api.call("cg_fambc_read", fn, b, f, 1, bcname, C.byref(bctype))
+                family_types[name.value.decode()] = api.lib.cg_BCTypeName(bctype).decode()
         for z in range(1, api.count("cg_nzones", fn, b) + 1):
             typ = _INT()
             api.call("cg_zone_type", fn, b, z, C.byref(typ))
@@ -195,6 +219,8 @@ def read_mesh(filename, *, base=None):
             if not np.isfinite(coordinates).all():
                 raise ValueError(f"{zonename}: nonfinite coordinate")
             zone = Zone(zonename, coordinates)
+            api.navigate(fn, b, ("Zone_t", z))
+            zone.family, zone.additional_families = _families(api)
             for bc in range(1, api.count("cg_nbocos", fn, b, z) + 1):
                 bcname, bctype, pointset = _name(), _INT(), _INT()
                 count, normal_size = api.index(), api.index()
@@ -210,6 +236,14 @@ def read_mesh(filename, *, base=None):
                     raise NotImplementedError(f"{bcname.value.decode()}: boundary GridLocation must be Vertex")
                 points = (api.index * 6)()
                 api.call("cg_boco_read", fn, b, z, bc, points, None)
+                api.navigate(fn, b, ("Zone_t", z), ("ZoneBC_t", 1), ("BC_t", bc))
+                family, additional = _families(api)
+                bc_type = api.lib.cg_BCTypeName(bctype).decode()
+                if bc_type == "FamilySpecified":
+                    # 只解析本 base 的 FamilyBC；跨 base/多义 Family 保留给显式覆盖。
+                    parts = (family or zone.family or "").strip("/").split("/")
+                    if len(parts) == 1 or (len(parts) == 2 and parts[0] == basename):
+                        bc_type = family_types.get(parts[-1], bc_type)
                 data = {}
                 for ds in range(1, datasets.value + 1):
                     dsname, dstype, dirichlet, neumann = _name(), _INT(), _INT(), _INT()
@@ -224,8 +258,9 @@ def read_mesh(filename, *, base=None):
                                 raise ValueError(f"{bcname.value.decode()}: ambiguous BC data")
                             data.update(arrays)
                 # PointRange 的六个数是起点(i,j,k)、终点(i,j,k)，并保留 CGNS 的 1-based 索引。
-                zone.boundaries.append(Boundary(bcname.value.decode(), api.lib.cg_BCTypeName(bctype).decode(),
-                                               np.array(points, dtype=np.int64).reshape(3, 2, order="F"), data))
+                zone.boundaries.append(Boundary(bcname.value.decode(), bc_type,
+                                               np.array(points, dtype=np.int64).reshape(3, 2, order="F"),
+                                               data, family, additional))
             if api.count("cg_nzconns", fn, b, z) > 1:
                 raise NotImplementedError(f"{zonename}: multiple ZoneGridConnectivity nodes are not supported")
             if api.count("cg_nconns", fn, b, z) or api.count("cg_nholes", fn, b, z):

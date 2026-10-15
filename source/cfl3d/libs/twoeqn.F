@@ -2407,11 +2407,15 @@ c
      .             k.ge.klamlo .and. k.lt.klamhi) .or.
      .             real(smin(j,k,i)) .lt. 0.) then
                 cutoff=0.
-              else if( ides .eq. 3 .and.
-     .         real(fdsav(j,k,i)) .gt. real(cddes) ) then
-                cutoff = (1.d0 - fdsav(j,k,i))/(1.d0-cddes)
               else
                 cutoff=1.
+c               FDSAV exists only for DES.  Fortran does not guarantee
+c               short-circuit evaluation of a logical AND.
+                if (ides .eq. 3) then
+                  if (real(fdsav(j,k,i)) .gt. real(cddes)) then
+                    cutoff=(1.d0-fdsav(j,k,i))/(1.d0-cddes)
+                  end if
+                end if
               end if
               betax=blend(j,k,i)*beta1+(1.-blend(j,k,i))*beta2
               cmuc= blend(j,k,i)*cmuc1+(1.-blend(j,k,i))*cmuc2

@@ -12,6 +12,10 @@ def writer():
     signatures = {
         "cg_set_file_type": [integer], "cg_get_file_type": [integer, ip],
         "cg_base_write": [integer, C.c_char_p, integer, integer, ip],
+        "cg_family_write": [integer, integer, C.c_char_p, ip],
+        "cg_fambc_write": [integer, integer, integer, C.c_char_p, integer, ip],
+        "cg_famname_write": [C.c_char_p],
+        "cg_multifam_write": [C.c_char_p, C.c_char_p],
         "cg_zone_write": [integer, integer, C.c_char_p, sp, integer, ip],
         "cg_coord_write": [integer, integer, integer, integer, C.c_char_p, C.c_void_p, ip],
         "cg_boco_write": [integer, integer, integer, C.c_char_p, integer, integer, api.index, sp, ip],
@@ -27,7 +31,7 @@ def writer():
     return api
 
 
-def write_native(mesh, filename, *, base="Base", file_type="ADF"):
+def write_native(mesh, filename, *, base="Base", file_type="ADF", family_bc_types=None):
     api = writer()
     bc_types = {api.lib.cg_BCTypeName(i).decode(): i
                 for i in range(api.constant("NofValidBCTypes"))}
@@ -36,12 +40,32 @@ def write_native(mesh, filename, *, base="Base", file_type="ADF"):
     with api.open(path, api.constant("CG_MODE_WRITE")) as fn:
         b = C.c_int()
         api.call("cg_base_write", fn, base.encode(), 3, 3, C.byref(b))
+        families = set()
+        for zone in mesh.zones:
+            for item in (zone, *zone.boundaries):
+                families.update(f for f in (item.family, *item.additional_families) if f)
+        for family in sorted(families):
+            f = C.c_int()
+            api.call("cg_family_write", fn, b, family.encode(), C.byref(f))
+            if family in (family_bc_types or {}):
+                bc = C.c_int()
+                api.call("cg_fambc_write", fn, b, f, b"FamilyBC",
+                         bc_types[family_bc_types[family]], C.byref(bc))
+
+        def write_families(item):
+            if item.family:
+                api.call("cg_famname_write", item.family.encode())
+            for number, name in enumerate(item.additional_families, 1):
+                api.call("cg_multifam_write", f"Additional{number}".encode(), name.encode())
+
         for zone in mesh.zones:
             dims = zone.dimensions
             sizes = (api.index * 9)(*dims, *(n-1 for n in dims), 0, 0, 0)
             z = C.c_int()
             api.call("cg_zone_write", fn, b, zone.name.encode(), sizes,
                      api.constant("Structured"), C.byref(z))
+            api.navigate(fn, b.value, ("Zone_t", z.value))
+            write_families(zone)
             for axis, name in enumerate(("CoordinateX", "CoordinateY", "CoordinateZ")):
                 values = np.asfortranarray(zone.coordinates[..., axis], dtype=np.float64)
                 index = C.c_int()
@@ -52,6 +76,8 @@ def write_native(mesh, filename, *, base="Base", file_type="ADF"):
                 index = C.c_int()
                 api.call("cg_boco_write", fn, b, z, bc.name.encode(), bc_types[bc.bc_type],
                          api.constant("PointRange"), 2, points, C.byref(index))
+                api.navigate(fn, b.value, ("Zone_t", z.value), ("ZoneBC_t", 1), ("BC_t", index.value))
+                write_families(bc)
                 if bc.data:
                     ds = C.c_int()
                     api.call("cg_dataset_write", fn, b, z, index, b"Data", bc_types[bc.bc_type], C.byref(ds))
@@ -74,5 +100,5 @@ def write_native(mesh, filename, *, base="Base", file_type="ADF"):
     return path
 
 
-def write_adf(mesh, filename, *, base="Base"):
-    return write_native(mesh, filename, base=base)
+def write_adf(mesh, filename, *, base="Base", family_bc_types=None):
+    return write_native(mesh, filename, base=base, family_bc_types=family_bc_types)

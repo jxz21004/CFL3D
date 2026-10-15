@@ -43,6 +43,9 @@ c
      .                ncs,icsinfo,myid,myhost,mycomm,mblk2nd,nou,
      .                bou,nbuf,ibufdim,ncycmax,maxcs,thetay,iadvance,
      .                idefrm,igridg,nummem)
+#ifdef PYTHON_API
+      use cfl3d_python_state, only: py_select_force_zone
+#endif
 c
 c     $Id$
 c
@@ -305,6 +308,9 @@ c
             iuns = max(itrans(nbl),irotat(nbl),idefrm(nbl))
 c
             if (myid.eq.mblk2nd(nbl)) then
+#ifdef PYTHON_API
+               call py_select_force_zone(nbl,nblg)
+#endif
                call force(jdim,kdim,idim,x,y,z,sk,sj,si,cl,cd,
      .                    czz,cyy,cxx,cmy,cmx,cmz,chd,swet,icall,
      .                    q(1,2),q(1,3),q(1,4),vmuk,vmuj,vmui,vol,
@@ -996,6 +1002,9 @@ c
                icall = 0
                iuns = max(itrans(nbl),irotat(nbl),idefrm(nbl))
                if (myid.eq.mblk2nd(nbl)) then
+#ifdef PYTHON_API
+                  call py_select_force_zone(nbl,nblg)
+#endif
                   call force(jdim,kdim,idim,x,y,z,sk,sj,si,cl,cd,czz,
      .                       cyy,cxx,cmy,cmx,cmz,chd,swet,icall,q(1,2),
      .                       q(1,3),q(1,4),vmuk,vmuj,vmui,vol,ifo,jfo,

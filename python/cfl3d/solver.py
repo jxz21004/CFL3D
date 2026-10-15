@@ -1,6 +1,6 @@
 """Python-owned configuration and arrays passed directly to the native solver."""
 from __future__ import annotations
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import os
 from pathlib import Path
 import threading
@@ -10,6 +10,7 @@ from .cgns import CGNSMesh
 
 _NATIVE_LOCK = threading.Lock()
 _MODELS = {"euler": 0, "laminar": 1, "sa": 5, "sst": 7, "komega": 6}
+_SURFACE_COEFFICIENTS = ("CL", "CD", "CX", "CY", "CZ", "Cmx", "Cmy", "Cmz", "CDp", "CDv")
 _BC_TYPES = {"BCFarfield": (1003, ()), "BCSymmetryPlane": (1001, ()),
              "BCWallInviscid": (1005, ()), "BCOutflowSupersonic": (1002, ()),
              "BCWallViscous": (2004, (0., 0.)), "BCWallViscousHeatFlux": (2004, (0., 0.))}
@@ -103,6 +104,7 @@ class SolverOptions:
     multigrid_smoothing: tuple[int, ...] | None = None  # MIT, coarsest to finest
     multigrid_stages: tuple[MultigridStage, ...] | None = None
     inversion: int | tuple[int, int, int] = 1  # IDIAG, scalar or (i,j,k)
+    freestream_pressure: float | None = None  # Pa; coordinates/reference lengths are metres
 
     def validate(self):
         ints = ("iterations", "multigrid_levels", "coarse_iterations", "multigrid_cycle",
@@ -154,6 +156,10 @@ class SolverOptions:
             _finite(self.target_cl, "target_cl")
             if self.target_cl == 99999.0:
                 raise ValueError("99999 is the native disabled-CL sentinel; use target_cl=None")
+        if self.freestream_pressure is not None:
+            _finite(self.freestream_pressure, "freestream_pressure")
+            if self.freestream_pressure <= 0:
+                raise ValueError("freestream_pressure must be positive (Pa)")
         _integer(self.multigrid_up_iterations, "multigrid_up_iterations", 0, 19)
         if self.multigrid_smoothing is not None:
             _smoothing(self.multigrid_smoothing, self.multigrid_levels, "multigrid_smoothing")
@@ -208,16 +214,25 @@ class SolverResult:
     history: np.ndarray  # residual,CL,CD,CX,CY,CMX,CMY,CMZ
     output_directory: Path
     final_alpha: float  # actual final angle in degrees, including native CL control
+    surface_coefficients: dict[tuple[str, str], np.ndarray] = field(default_factory=dict)
 
     @property
     def coefficients(self):
         if not len(self.history):
             return {}
-        return dict(zip(("CL", "CD", "CX", "CY", "CMX", "CMY", "CMZ"), self.history[-1, 1:]))
+        coefficients = dict(zip(("CL", "CD", "CX", "CY", "CMX", "CMY", "CMZ"), self.history[-1, 1:]))
+        if self.surface_coefficients:
+            total = np.sum(list(self.surface_coefficients.values()), axis=0)
+            coefficients.update(CDp=float(total[8]), CDv=float(total[9]))
+        return coefficients
 
     def save(self, filename):
         values = {"history": self.history, "final_alpha": np.asarray(self.final_alpha)}
         values.update({f"zone_{name}": field for name, field in self.fields.items()})
+        keys = sorted(self.surface_coefficients)
+        values["surface_names"] = np.asarray(keys, dtype=str).reshape(-1, 2)
+        values["surface_coefficients"] = np.asarray([self.surface_coefficients[k] for k in keys]).reshape(-1, 10)
+        values["surface_coefficient_names"] = np.asarray(_SURFACE_COEFFICIENTS)
         np.savez_compressed(filename, **values)
 
 
@@ -228,8 +243,10 @@ class CFL3D:
     native failure, start a fresh Python process before attempting another solve.
     """
 
-    def __init__(self, mesh, options=None, *, boundary_overrides=None, comm=None):
+    def __init__(self, mesh, options=None, *, boundary_overrides=None, comm=None, groups=None):
         self.comm = comm
+        self._last_result = None
+        self._group_definitions = {}
         if comm is not None:
             from mpi4py import MPI
             if comm == MPI.COMM_NULL or comm.Is_inter() or comm.Get_size() < 2:
@@ -240,10 +257,10 @@ class CFL3D:
             self.options = options or SolverOptions()
             self.boundary_overrides = boundary_overrides or {}
             self.options.validate()
-            return self.mesh, self.options, self.boundary_overrides
+            return self.mesh, self.options, self.boundary_overrides, {} if groups is None else groups
 
         if comm is None:
-            load()
+            _, _, _, group_definitions = load()
         else:
             payload = None
             error = None
@@ -256,9 +273,88 @@ class CFL3D:
             error, payload = comm.bcast((error, payload), root=0)
             if error:
                 raise RuntimeError(f"CFL3D root configuration failed: {error}")
-            self.mesh, self.options, self.boundary_overrides = payload
+            self.mesh, self.options, self.boundary_overrides, group_definitions = payload
             if comm.Get_size() - 1 > len(self.mesh.zones):
                 raise ValueError("This MPI interface currently requires at least one zone per worker")
+        self.addGroups(group_definitions)
+
+    def _cgns_surface_groups(self):
+        families, zones, boundaries, qualified = {}, {}, {}, {}
+        for zone in self.mesh.zones:
+            for boundary in zone.boundaries:
+                key = (zone.name, boundary.name)
+                path = f"{zone.name}/{boundary.name}"
+                if path in qualified:
+                    raise ValueError(f"Duplicate CGNS boundary path {path}")
+                qualified[path] = {key}
+                zones.setdefault(zone.name, set()).add(key)
+                boundaries.setdefault(boundary.name, set()).add(key)
+                for family in (zone.family, *zone.additional_families,
+                               boundary.family, *boundary.additional_families):
+                    if family:
+                        families.setdefault(family, set()).add(key)
+        # 同名时以 Family 为准，其次 zone、BC；完整 zone/BC 路径始终可用。
+        return {**boundaries, **zones, **families, **qualified}
+
+    def addGroups(self, groups):
+        """Add {new_name: [CGNS group names, ...]}; union overlapping surfaces once."""
+        if not isinstance(groups, dict):
+            raise ValueError("groups must be a dictionary of new names to CGNS name lists")
+        base = self._last_base_groups if self._last_result is not None else self._cgns_surface_groups()
+        additions = {}
+        for name, members in groups.items():
+            if not isinstance(name, str) or not name:
+                raise ValueError("Group names must be nonempty strings")
+            if name in base or name in self._group_definitions:
+                raise ValueError(f"Group name {name!r} conflicts with an existing CGNS/group name")
+            if not isinstance(members, (list, tuple)) or not members:
+                raise ValueError(f"Group {name!r} needs a nonempty CGNS name list")
+            if any(not isinstance(member, str) or member not in base for member in members):
+                raise ValueError(f"Group {name!r} may only contain existing CGNS names")
+            additions[name] = tuple(members)
+        self._group_definitions.update(additions)
+        return self
+
+    def getGroupNames(self):
+        base = self._last_base_groups if self._last_result is not None else self._cgns_surface_groups()
+        return sorted(set(base) | self._group_definitions.keys())
+
+    def getSolution(self, groupName=None):
+        """Return cached native pressure+viscous coefficients and SI loads after solve.
+
+        CL/CD/CDp/CDv use the native wind axes; CY and moments use the input
+        mesh axes. L/D/Y/Dp/Dv are N, moments Mx/My/Mz are N*m.
+        This is a local call: any rank may query without an MPI collective.
+        """
+        if self._last_result is None:
+            raise RuntimeError("Call solve() successfully before getSolution()")
+        if groupName is None:
+            members = set(self._last_surface_coefficients)
+        elif isinstance(groupName, str) and groupName in self._last_base_groups:
+            members = self._last_base_groups[groupName]
+        elif isinstance(groupName, str) and groupName in self._group_definitions:
+            members = set().union(*(self._last_base_groups[name]
+                                   for name in self._group_definitions[groupName]))
+        else:
+            raise ValueError(f"Unknown surface group {groupName!r}; inspect getGroupNames()")
+        total = (np.sum([self._last_surface_coefficients[key] for key in sorted(members)], axis=0)
+                 if members else np.zeros(10))
+        values = {name: float(total[index]) for index, name in enumerate(_SURFACE_COEFFICIENTS)}
+        options = self._last_options
+        if options.freestream_pressure is None:
+            raise ValueError("Set SolverOptions(freestream_pressure=... in Pa) before solve() "
+                             "to obtain N and N*m; no static pressure is assumed")
+        dynamic_pressure = .5 * options.gamma * options.freestream_pressure * options.mach**2
+        scale = dynamic_pressure * options.sref
+        yref, zref = (options.bref, options.cref) if options.y_up else (options.cref, options.bref)
+        result = {name: values[name] for name in ("CL", "CD", "CY", "Cmx", "Cmy", "Cmz", "CDp", "CDv")}
+        result.update(L=values["CL"]*scale, D=values["CD"]*scale, Y=values["CY"]*scale,
+                      Dp=values["CDp"]*scale, Dv=values["CDv"]*scale,
+                      Mx=values["Cmx"]*scale*options.bref,
+                      My=values["Cmy"]*scale*yref, Mz=values["Cmz"]*scale*zref)
+        result["units"] = {name: "N" for name in ("L", "D", "Y", "Dp", "Dv")}
+        result["units"].update({name: "N*m" for name in ("Mx", "My", "Mz")})
+        return result
 
     def _checked(self, operation):
         """Agree on Python-side failures before entering the native collectives."""
@@ -296,7 +392,7 @@ class CFL3D:
         masks = {(g, f): np.zeros(tuple(zones[g].dimensions[a] - 1 for a in range(3) if a != f // 2), dtype=np.uint8)
                  for g in range(len(zones)) for f in range(6)}
 
-        def add(g, p, code, data):
+        def add(g, p, code, data, key=None):
             face, tangents, bounds = _face(p, zones[g].dimensions)
             a, b, c, d = bounds
             region = masks[g, face][a-1:b-1, c-1:d-1]
@@ -312,7 +408,7 @@ class CFL3D:
             if any((v - 1) % factor for axis, pair in zip(tangents, (bounds[:2], bounds[2:]))
                    for v in pair if not (i2d and axis == 0)):
                 raise ValueError("Boundary patch endpoints must align with every multigrid level")
-            segments[g, face].append((code, bounds, tuple(data)))
+            segments[g, face].append((code, bounds, tuple(data), key))
 
         names = {z.name: g for g, z in enumerate(zones)}
         connections = []
@@ -338,7 +434,7 @@ class CFL3D:
                             pass
                         else:
                             raise NotImplementedError(f"{key}: BCDataSet needs an explicit override; it will not be discarded")
-                add(g, bc.point_range, code, data)
+                add(g, bc.point_range, code, data, key)
             for cn in z.connections:
                 if cn.donor not in names:
                     raise ValueError(f"Unknown donor zone {cn.donor}")
@@ -377,15 +473,17 @@ class CFL3D:
         unknown = set(self.boundary_overrides) - used_overrides
         if unknown:
             raise ValueError(f"Unknown boundary override keys: {unknown}")
-        bc_rows, data_rows = [], []
+        bc_rows, data_rows, surface_keys = [], [], []
         for f in range(6):
             for g, z in enumerate(zones):
                 if not masks[g, f].all():
                     raise ValueError(f"{z.name}: face {('i0','idim','j0','jdim','k0','kdim')[f]} is not fully covered by BCs/connectivity")
                 counts[f, g] = len(segments[g, f])
-                for s, (code, bounds, data) in enumerate(segments[g, f], 1):
+                for s, (code, bounds, data, key) in enumerate(segments[g, f], 1):
                     bc_rows.append([g+1, s, code, *bounds, len(data)])
                     data_rows.append([*data, *([0.] * (12 - len(data)))])
+                    surface_keys.append(key)
+        self._surface_keys = tuple(surface_keys)
         blocks = np.zeros((7, len(zones)), dtype=np.int32, order="F")
         blocks[0] = o.multigrid_levels - 1
         blocks[3] = 333
@@ -422,7 +520,9 @@ class CFL3D:
                     npoints=len(xyz), ncells=int(np.prod(dims-1, axis=0).sum())), xyz
 
     def solve(self, *, output_directory="cfl3d-output"):
+        self._last_result = None  # Failed solves must not expose an older run's loads.
         arrays, xyz = self._checked(self._arrays)
+        base_groups = self._checked(self._cgns_surface_groups)
         def native_module():
             from importlib import import_module
             name = "_native_mpi" if self.comm is not None else "_native"
@@ -433,7 +533,7 @@ class CFL3D:
                                    + (" --mpi" if self.comm is not None else "")) from exc
             if bool(module.py_build_info()) != (self.comm is not None):
                 raise RuntimeError("Native extension MPI mode does not match the solver")
-            if getattr(module, "py_api_version", lambda: 0)() != 2:
+            if getattr(module, "py_api_version", lambda: 0)() != 3:
                 raise RuntimeError("Native interface changed; rebuild with python tools/build_python.py"
                                    + (" --mpi" if self.comm is not None else "") + " and restart Python")
             return module
@@ -474,6 +574,7 @@ class CFL3D:
             q = _native.py_get_solution(arrays["ncells"])
             history = _native.py_get_history(nrows)
             final_alpha = float(_native.py_get_final_alpha())
+            surface_values = _native.py_get_surface_coefficients(arrays["bcs"].shape[1])
         finally:
             os.chdir(old_directory)
             if native_comm is not None:
@@ -490,8 +591,14 @@ class CFL3D:
                 fields[z.name][..., 2] = fields[z.name][..., 3]
                 fields[z.name][..., 3] = -internal_v
             offset += count
-        if not np.isfinite(q).all() or not np.isfinite(history).all() or not np.isfinite(final_alpha):
+        if (not np.isfinite(q).all() or not np.isfinite(history).all()
+                or not np.isfinite(final_alpha) or not np.isfinite(surface_values).all()):
             raise RuntimeError("CFL3D returned nonfinite solution/history")
-        result = SolverResult(fields, history, output_directory, final_alpha)
+        surfaces = {key: surface_values[:, index].copy()
+                    for index, key in enumerate(self._surface_keys) if key is not None}
+        result = SolverResult(fields, history, output_directory, final_alpha, surfaces)
         self._checked(lambda: result.save(output_directory / "solution.npz") if rank == 0 else None)
+        self._last_surface_coefficients = {key: value.copy() for key, value in surfaces.items()}
+        self._last_base_groups, self._last_options = base_groups, self.options
+        self._last_result = result
         return result

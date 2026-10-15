@@ -209,7 +209,7 @@ MIT 须为 1..20 的整数，MTT 非负，接口检查 MIT+MTT 不超过原生�
 阶段表及 MIT 使用不可变 tuple，可通过 dataclasses.replace 创建修改后的配置。
 embedded 网格尚未接入，NEMGL/ICONSF 仍没有可用的 embedded 计算接口。
 
-本版原生接口版本为 2，新增参数后必须重建串行和 MPI 扩展并重启 Python：
+本版原生接口版本为 3，新增表面积分输出后必须重建串行和 MPI 扩展并重启 Python：
 
 ```bash
 python tools/build_python.py --debug --jobs 8
@@ -314,8 +314,11 @@ BCDataSet 不会自动进行单位推断。拼错的覆盖名称会报错。
 residual, CL, CD, CX, CY, CMX, CMY, CMZ
 ```
 
-`result.coefficients` 返回最后一次迭代的系数字典。输出目录还保存 `solution.npz`，
-包括 history、final_alpha 和以 `zone_<name>` 命名的流场数组，以及原生 CFL3D 日志与 restart 文件。
+`result.coefficients` 返回最后一次迭代的系数字典，包含新增的 `CDp`、`CDv`。
+输出目录还保存 `solution.npz`，包括 history、final_alpha、以 `zone_<name>` 命名的流场数组，
+以及逐边界的 `surface_names`、`surface_coefficients` 和 `surface_coefficient_names`。
+表面积分列依次为 `CL, CD, CX, CY, CZ, Cmx, Cmy, Cmz, CDp, CDv`；
+`surface_names` 每行是对应的 zone、BC 名称。原生 CFL3D 日志与 restart 文件也保留。
 输出文件不代表已收敛；迭代次数由配置决定，本版不实现 Python 收敛停止判据。
 
 同一进程可以连续求解多个工况，每次重新传入配置和网格、从自由来流初始化。
@@ -324,6 +327,76 @@ residual, CL, CD, CX, CY, CMX, CMY, CMZ
 原生错误通过 C 守卫返回 Python RuntimeError，不会用 STOP 终止解释器。
 错误中断可能留下核心分配的内存，因此失败后禁止重用该核心，应新建 Python 进程。
 构建新网格、更改选项或正常完成后的连续调用则已通过验证。
+
+## 按 CGNS 分组提取气动力
+
+`CFL3D.getSolution(groupName=None)` 在成功 `solve()` 后返回一个字典。
+不传名称时提取全部原生积分表面，传名称时提取对应部件：
+
+```python
+solver = CFL3D(
+    "wing.cgns",
+    SolverOptions(
+        mach=0.8, alpha=2.0, turbulence="sst", iterations=1000,
+        sref=93.0, cref=3.88, bref=30.0,
+        moment_center=(0.0, 0.0, 0.0),
+        freestream_pressure=101325.0,  # 自由来流静压，Pa；应改为实际工况值
+    ),
+    groups={"Aircraft": ["Wing", "Tail"]},  # Wing/Tail 是文件中的 CGNS 名称
+)
+result = solver.solve(output_directory="wing-results")
+print(solver.getGroupNames())
+loads = solver.getSolution("Aircraft")
+print(loads["CL"], loads["CD"], loads["CDp"], loads["CDv"])
+print(loads["D"], loads["Dp"], loads["Dv"], loads["My"])
+solver.addGroups({"WingOnly": ["Wing"]})  # 也可在求解后增加集合
+```
+
+默认分组包括 CGNS 的 `FamilyName_t` / `AdditionalFamilyName_t`、zone 名、BC 名，
+以及明确的 `zone/BC` 路径。zone 的 Family 包含其全部边界；BC 的 Family 包含该 BC。
+同名 BC 跨 zone 合并。不同类型同名时优先级为 Family、zone、BC；
+`zone/BC` 路径始终可用于精确选择。名称区分大小写。
+ADF 和 HDF5 读取器均保留这些 Family 信息；当前环境实际验证的是 ADF。
+`FamilySpecified` 可通过当前 base 内唯一的 `FamilyBC_t` 解析边界类型。
+
+新增集合使用 `{新名字: [CGNS 名称, ...]}`，不能与已有 CGNS 分组或新增集合重名，
+成员必须是已有 CGNS 名称，不支持集合递归引用。重叠成员取并集，每个边界只计一次。
+接口保持 CFL3D 的原生积分范围；远场和连接面等不参与原生力积分的表面贡献为零。
+这些结果来自最细网格上原生 `force.F` 的压力和黏性积分，并在内核释放数组前缓存，
+无需从壁面附近流场近似重算。定升时同样对应最后一次力计算，攻角时序见前文。
+
+返回字段与量纲：
+
+| 字段 | 含义 / 单位 |
+| --- | --- |
+| `CL, CD, CY` | 升力、阻力、输入坐标 Y 方向力系数 |
+| `Cmx, Cmy, Cmz` | 输入坐标轴上的力矩系数 |
+| `CDp, CDv` | 压差阻力、黏性阻力系数；`CD = CDp + CDv` |
+| `L, D, Y, Dp, Dv` | 对应的力，N |
+| `Mx, My, Mz` | 对应的力矩，N·m |
+| `units` | 上述有量纲字段的单位字典 |
+
+`CL/CD/CDp/CDv` 沿 CFL3D 原生风轴定义；`CY`、力矩使用输入网格坐标轴。
+`CY` 沿输入 Y 方向，`y_up=True` 时它不是横向侧力。
+本接口的有量纲输出要求坐标、参考长度、力矩中心使用 m，`sref` 使用 m²，
+`freestream_pressure` 使用 Pa。使用理想气体关系
+`q∞ = 0.5 * gamma * freestream_pressure * mach**2`，力为 `C * q∞ * sref`。
+`y_up=False` 的力矩参考长度依次为 `bref, cref, bref`；
+`y_up=True` 为 `bref, bref, cref`。力矩均相对于 `moment_center`。
+未设置静压仍可求解和读取 `result.coefficients`，但 `getSolution()` 会报错，
+避免在未指定工况压力时给出错误的 N / N·m 数值。
+
+MPI 求解结束时各 rank 都缓存完整分组积分。`getSolution()`、`getGroupNames()` 和
+`addGroups()` 是本地调用，可仅在 rank 0 上执行；构造函数及 `solve()` 仍须所有 rank 参与。
+一个对象缓存的结果不受另一个 CFL3D 对象后续求解影响。
+
+串行与 MPI 示例支持 `--freestream-pressure`、`--group` 和三个参考量开关，例如：
+
+```bash
+mpirun -np 3 python examples/python/run_mpi.py wing.cgns --model sst \
+  --mach 0.8 --alpha 2 --freestream-pressure 101325 \
+  --sref 93 --cref 3.88 --bref 30 --group Wing
+```
 
 ## 当前明确范围
 
@@ -338,6 +411,18 @@ MPI/f2py communicator 为实验性实现，验证状态见上文。
 BCDataSet 的数值数组会读出并传给现有边界检查；不支持的类型或非零热流不会被忽略。
 
 ## 本地验证和 CI
+
+分组积分回归（真实 CGNS/ADF、2/3 进程及两个独立子通信器）：
+
+```bash
+PYTHONPATH=python:tests/python python -m unittest test_surface_forces test_cgns_native -v
+CFL3D_VALIDATION_DIRECTORY=build/mpi-forces-validation bash tools/validate_mpi.sh --adf --controls --forces
+```
+
+检查分组和全部积分的一致性、重叠集合去重、`CDp+CDv=CD`、SI 换算、缓存独立性，
+并在三维 SST 网格上检查力矩中心平移与 y-up 旋转。
+三维 SST 验证还修复了旧 `twoeqn.F` 中普通 SST 模式读取 DES 专用 `fdsav` 数组的问题；
+Fortran 的逻辑 AND 不保证短路求值，现用嵌套条件确保仅 DES 模式访问该数组。
 
 新增计算控制的回归（包括真实 ADF 文件读入）：
 

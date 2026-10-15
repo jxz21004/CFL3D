@@ -18,12 +18,14 @@ def main():
     add_numerical_options(p)
     p.add_argument("--output-directory", default="cfl3d-output")
     a = p.parse_args()
-    result = CFL3D(a.mesh, SolverOptions(mach=a.mach, alpha=a.alpha, beta=a.beta,
+    solver = CFL3D(a.mesh, SolverOptions(mach=a.mach, alpha=a.alpha, beta=a.beta,
                    reynolds=a.reynolds, temperature=a.temperature, turbulence=a.model,
-                   cfl=a.cfl, iterations=a.iterations, **numerical_options(p, a))).solve(
-                   output_directory=a.output_directory)
+                   cfl=a.cfl, iterations=a.iterations, **numerical_options(p, a)))
+    result = solver.solve(output_directory=a.output_directory)
     print(result.coefficients)
     print(f"Final alpha: {result.final_alpha:.10g} degrees")
+    if a.freestream_pressure is not None:
+        print(solver.getSolution(a.group))
     print(f"Saved fields and convergence history to {result.output_directory / 'solution.npz'}")
 
 

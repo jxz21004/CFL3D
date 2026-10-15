@@ -39,7 +39,7 @@ def split_plate():
     return CGNSMesh(zones)
 
 
-def cases(controls=False):
+def _cases(controls=False):
     yield "box", box_mesh(True), SolverOptions(mach=.3, turbulence="euler", iterations=5,
                                                multigrid_levels=2)
     options = SolverOptions(mach=.2, reynolds=6e6, temperature=460/1.8, cfl=3,
@@ -63,6 +63,35 @@ def cases(controls=False):
             alpha_step_limit=.1, alpha_update_interval=5)
 
 
+def cases(controls=False, forces=False):
+    for name, mesh, options in _cases(controls):
+        if forces:
+            for index, zone in enumerate(mesh.zones, 1):
+                for boundary in zone.boundaries:
+                    boundary.family = f"Part{index}"
+                    boundary.additional_families = ("Whole",)
+            options = replace(options, freestream_pressure=101325.)
+        yield name, mesh, options
+
+
+def force_groups(enabled):
+    return {"Assembly": ["Part1", "Part2"], "Overlap": ["Whole", "Part1", "Whole"]} if enabled else None
+
+
+def check_forces(solver, result):
+    total = solver.getSolution()
+    assert total == solver.getSolution("Assembly") == solver.getSolution("Overlap") == solver.getSolution("Whole")
+    for key in ("CL", "CD", "CY", "Cmx", "Cmy", "Cmz"):
+        native_key = key.upper() if key.startswith("Cm") else key
+        np.testing.assert_allclose(total[key], result.coefficients[native_key], rtol=2e-11, atol=2e-13)
+    np.testing.assert_allclose(total["CD"], total["CDp"]+total["CDv"], rtol=2e-11, atol=2e-13)
+    parts = solver.getSolution("Part1"), solver.getSolution("Part2")
+    for key in total:
+        if key != "units":
+            np.testing.assert_allclose(total[key], sum(part[key] for part in parts), rtol=2e-11, atol=2e-11)
+    return total
+
+
 def compare_reference(result, filename, name):
     differences = {}
     with np.load(filename) as reference:
@@ -78,11 +107,17 @@ def compare_reference(result, filename, name):
         history_difference = float(np.max(np.abs(
             result.history[:, columns]-reference["history"][:, columns])))
         np.testing.assert_allclose(result.final_alpha, reference["final_alpha"], rtol=0, atol=2e-12)
+        keys = sorted(result.surface_coefficients)
+        np.testing.assert_array_equal(np.asarray(keys), reference["surface_names"])
+        values = np.asarray([result.surface_coefficients[key] for key in keys])
+        np.testing.assert_allclose(values, reference["surface_coefficients"], rtol=2e-10, atol=2e-13)
+        surface_difference = float(np.max(np.abs(values-reference["surface_coefficients"])))
     assert np.isfinite(result.history).all()
     return {"max_field_difference": max(differences.values()),
             "max_history_difference": history_difference,
             "history_columns_compared": "coefficients" if uniform else "all",
-            "history_rows": len(result.history), "final_alpha": result.final_alpha}
+            "history_rows": len(result.history), "final_alpha": result.final_alpha,
+            "max_surface_difference": surface_difference}
 
 
 def main():
@@ -92,14 +127,18 @@ def main():
     parser.add_argument("--native-error", action="store_true", help="Trigger a native negative-volume MPI abort")
     parser.add_argument("--adf", action="store_true", help="Read actual CGNS/ADF files instead of memory meshes")
     parser.add_argument("--controls", action="store_true", help="Also check CL matching and custom numerical controls")
+    parser.add_argument("--forces", action="store_true", help="Check CGNS family groups, force split and SI loads")
     parser.add_argument("--only", choices=("box", "sa", "sst", "lift", "controls", "lift_plate"))
     parser.add_argument("--directory", type=Path, required=True)
     args = parser.parse_args()
     root = args.directory.resolve()
     if args.prepare:
         adf_report = {}
-        for name, mesh, options in cases(args.controls):
-            result = CFL3D(mesh, options).solve(output_directory=root / "serial" / name)
+        for name, mesh, options in cases(args.controls, args.forces):
+            solver = CFL3D(mesh, options, groups=force_groups(args.forces))
+            result = solver.solve(output_directory=root / "serial" / name)
+            if args.forces:
+                check_forces(solver, result)
             expected_rows = sum(stage.iterations for stage in options.stage_schedule())
             assert result.history.shape == (expected_rows, 8)
             if name not in ("box", "lift"):
@@ -114,7 +153,10 @@ def main():
                 from cgns_fixtures import write_adf
                 (root / "meshes").mkdir(parents=True, exist_ok=True)
                 path = write_adf(mesh, root / "meshes" / f"{name}.cgns")
-                from_file = CFL3D(path, options).solve(output_directory=root / "serial-adf" / name)
+                file_solver = CFL3D(path, options, groups=force_groups(args.forces))
+                from_file = file_solver.solve(output_directory=root / "serial-adf" / name)
+                if args.forces:
+                    check_forces(file_solver, from_file)
                 adf_report[name] = compare_reference(from_file, root / "serial" / name / "solution.npz", name)
                 adf_report[name]["mesh_input"] = "CGNS/ADF"
         if args.adf:
@@ -157,16 +199,23 @@ def main():
         else:
             raise AssertionError("Expected collective CGNS file-read failure")
         comm.Barrier()
-    for name, mesh, options in cases(args.controls):
+    for name, mesh, options in cases(args.controls, args.forces):
         if args.only and name != args.only:
             continue
         source = root / "meshes" / f"{name}.cgns" if args.adf else mesh
-        solver = CFL3D(source if comm.rank == 0 else None, options, comm=comm)
+        solver = CFL3D(source if comm.rank == 0 else None, options, comm=comm,
+                       groups=force_groups(args.forces) if comm.rank == 0 else None)
         result = solver.solve(output_directory=root / run_name / name)
 
         report[name] = solver._checked(lambda: compare_reference(
             result, root / "serial" / name / "solution.npz", name))
         report[name]["mesh_input"] = "CGNS/ADF" if args.adf else "memory"
+        if args.forces:
+            report[name]["loads"] = solver._checked(lambda: check_forces(solver, result))
+            if comm.rank == 0:
+                # Only root calls these methods: they must never enter a collective.
+                solver.addGroups({"RootOnly": ["Part1"]})
+                assert solver.getSolution("RootOnly") == solver.getSolution("Part1")
         comm.Barrier()  # Native solve must not finalize MPI.
     if comm.rank == 0:
         report_path = root / run_name / "report.json"

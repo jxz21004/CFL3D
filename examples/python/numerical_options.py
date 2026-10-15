@@ -2,6 +2,11 @@
 
 
 def add_numerical_options(parser):
+    parser.add_argument("--freestream-pressure", type=float, help="Static pressure in Pa; enables SI loads")
+    parser.add_argument("--group", help="CGNS force group; default: all integrated surfaces")
+    parser.add_argument("--sref", type=float, default=1., help="Reference area in m^2")
+    parser.add_argument("--cref", type=float, default=1., help="Reference chord in m")
+    parser.add_argument("--bref", type=float, default=1., help="Reference span in m")
     parser.add_argument("--target-cl", type=float)
     parser.add_argument("--alpha-relaxation", type=float, default=1.)
     parser.add_argument("--alpha-step-limit", type=float, default=.2, help="Degrees per CL-control update")
@@ -23,7 +28,10 @@ def add_numerical_options(parser):
 
 
 def numerical_options(parser, args):
+    if args.group is not None and args.freestream_pressure is None:
+        parser.error("--group requires --freestream-pressure in Pa for dimensional loads")
     result = {name: getattr(args, name) for name in (
+        "freestream_pressure", "sref", "cref", "bref",
         "target_cl", "alpha_relaxation", "alpha_step_limit", "alpha_update_interval",
         "multigrid_levels", "multigrid_cycle", "mesh_sequence", "coarse_iterations",
         "first_order_iterations", "coarse_first_order_iterations", "multigrid_up_iterations",

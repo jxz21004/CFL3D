@@ -1,4 +1,6 @@
-# CFL3D Python/MPI 第四轮检查点（计算控制）— 2026-10-15
+# CFL3D Python/MPI 第五轮检查点（分组气动力）— 2026-10-15
+
+最新分组积分接口和验证见文末“第五轮”；前面保留此前各轮记录。
 
 本轮在 `CFL3D/` 修改；旧的 `CFL3D-f2py-CGNS-source/` 保留作为参考。
 MPI 已通过下述内存网格验收；本轮又补齐 CGNS/ADF 文件入口的串行和 MPI 验收。
@@ -193,3 +195,54 @@ CFL3D_VALIDATION_DIRECTORY=build/mpi-controls-validation bash tools/validate_mpi
 新增报告位于 build/mpi-controls-validation/ 下的 serial-adf/report.json、mpi-2/report.json、
 mpi-3/report.json、mpi-2-group-*/report.json；logs/ 保存 MPI、Valgrind 和错误退出记录。
 本轮尚未切换 Intel Fortran 编译器重复新参数验收；现有 MPI 库仍为 Intel MPI。
+
+## 第五轮：CGNS 分组、力矩与压差/黏性阻力
+
+新增 `CFL3D.getSolution(groupName=None)`、`getGroupNames()` 和 `addGroups({...})`。
+默认按 CGNS Family、zone、BC 或 zone/BC 路径选择表面；自定义集合成员为 CGNS 名称列表，
+集合名字不得与已有分组重名。重叠表面只计一次。
+ADF 与 HDF5 读取器保留 primary/additional Family；当前实际复测 ADF。
+单一 FamilyBC 的 FamilySpecified 可自动解析，其他情况仍需显式覆盖。
+
+原生 `force.F` 在每个边界分段前后记录积分增量，保留最细网格结果；
+MPI 仅由块拥有者写入，再向全部 rank 汇总。继续通过 f2py 返回 Python，原生 ABI 升至 3。
+结果缓存在各 CFL3D 对象中，查询不参与 MPI 通信，可只在 rank 0 执行。
+返回 CL/CD/CY/Cmx/Cmy/Cmz/CDp/CDv，以及 L/D/Y/Dp/Dv（N）和 Mx/My/Mz（N·m）。
+CDp 为压差阻力，CDv 为黏性阻力；两者来自原生积分，和等于 CD。
+NPZ 额外保存逐边界系数和名称，原有八列 history 格式保留。
+
+有量纲输出要求 `freestream_pressure` 为 Pa、坐标及参考长度为 m、参考面积为 m²；
+按 `q∞=0.5*gamma*p∞*Mach²` 换算。不设置压力可正常求解，但 getSolution 会明确报错。
+具体坐标定义、参考长度和示例见 docs/python-wrapper.md。
+
+三维 SST 测试定位并修复旧 twoeqn.F 的 DES 数组越界：逻辑 AND 不保证短路，
+普通 SST 也可能读取没有完整分配的 fdsav。现用嵌套条件隔离 DES 数组访问，
+保留 DES 模式原有公式。
+
+本轮环境为 GNU debug 串行/MPI 扩展及现有 Intel MPI，无新依赖下载。
+
+- 全部单元测试 26 项：23 项通过，3 项可选 HDF5 测试跳过。
+- 分组测试覆盖真实 ADF Family、额外 Family、集合去重、分部件相加、CDp/CDv、SI 缩放、
+  多个求解对象缓存独立性，以及三维 SST 力矩中心平移和 y-up 旋转。
+- 保留六个 Euler/SA/SST、显式阶段、定升算例；真实 ADF 串行、2/3 进程及两个独立
+  二进程子通信器均通过。流场、历史和逐边界系数的比较项最大绝对差异为 0。
+- 仅 root 增加集合和读取载荷后，各 rank 继续通过 barrier，确认查询无需 collective。
+- 三进程 Valgrind 自定义 MIT / 块矩阵求逆 / ADF 分组算例，各 rank 零错误，未检查泄漏。
+- 三维 SST 力矩中心与 y-up 测试完成 Valgrind 检查，零错误，未检查泄漏。
+- 原生负体积仍通过 MPI_Abort 退出，返回 255，无超时。
+- 串行示例实测输出 CDp/CDv 及 Dp/Dv；两个示例均新增压力、参考量、分组命令行开关。
+
+复现：
+
+```bash
+source /home/mdolabuser/.bashrc_mdolab
+export PYTHONPATH="$PWD/python:$PWD/tests/python"
+python tools/build_python.py --debug --jobs 8
+python tools/build_python.py --mpi --debug --jobs 8
+python -m unittest discover -s tests/python -v
+CFL3D_VALIDATION_DIRECTORY=build/mpi-forces-validation bash tools/validate_mpi.sh --adf --controls --forces
+```
+
+结果在 `build/mpi-forces-validation/`，目录结构与此前回归相同。
+这些短程回归验证接口和积分一致性，不代表生产算例充分收敛。
+本轮未切换 Intel Fortran 编译器复测，也未复测 HDF5 文件路径。
