@@ -166,6 +166,11 @@ c
          close(99)
       end if
 c
+#ifdef PYTHON_API
+c     Return to Python after cleanup; it still needs a live MPI runtime.
+      if (ierrflg.ne.0) call py_abort(ierrflg)
+      return
+#endif
 #if defined DIST_MPI
 c
       if (ierrflg.eq.0) then

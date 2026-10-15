@@ -146,7 +146,7 @@ c
      .          jdimg(maxbl),kdimg(maxbl),idimg(maxbl),idiagg(maxbl,3),
      .          nblcg(maxbl),idegg(maxbl,3),
      .          jsg(maxbl),ksg(maxbl),isg(maxbl),jeg(maxbl),keg(maxbl),
-     .          ieg(maxbl),mit(5,maxbl),ilamlog(maxbl),ilamhig(maxbl),
+     .          ieg(maxbl),mit(5,5),ilamlog(maxbl),ilamhig(maxbl),
      .          jlamlog(maxbl),jlamhig(maxbl),klamlog(maxbl),
      .          klamhig(maxbl),iwfg(maxbl,3)
       dimension utrans(maxbl),vtrans(maxbl),wtrans(maxbl),
@@ -273,6 +273,8 @@ c
      .                 subres,subtur,grdmov,alphahist,errfile,preout,
      .                 aeinp,aeout,sdhist,avgg,avgq
       common /unit5/ iunit5
+c     NKEY sizes the MPI buffer below; read the initialized COMMON value.
+      common /key/ nkey
       common /conversion/ radtodeg
       common /mydist2/ nnodes,myhost,myid,mycomm
       common /proces/ numprocs
@@ -451,7 +453,9 @@ c
 c        read input file up to title line
          nread = 14
          do n=1,nread
+#ifndef PYTHON_API
             read(iunit5,*)
+#endif
          end do
 c
          iunit   = 11

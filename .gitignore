@@ -53,3 +53,17 @@ build/tools/seq/v6_ronnie_mod
 build/tools/seq/v6inpdoubhalf
 build/tools/seq/gridswitchijk
 build/tools/seq/v6inpswitchijk
+docs/*.*
+# Python wrapper build and validation artifacts
+__pycache__/
+*.py[cod]
+*.so
+*.mod
+*.egg-info/
+build/python-native*/
+build/python-standalone*/
+build/mpi-*/
+build/cgns-validation*/
+build/serial-smoke/
+core
+core.*

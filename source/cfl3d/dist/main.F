@@ -20,8 +20,15 @@ c  License for the specific language governing permissions and limitations
 c  under the License.
 c  ---------------------------------------------------------------------------
 c
+#ifdef PYTHON_API
+      subroutine cfl3d_python_main
+#else
       program main
+#endif
 c
+#ifdef PYTHON_API
+      use cfl3d_python_state
+#endif
 c     $Id$
 c
 c***********************************************************************
@@ -364,16 +371,24 @@ c***********************************************************************
 c     MPI initialization
 c***********************************************************************
 c
+#ifdef PYTHON_API
+c     mpi4py owns MPI lifetime; use its communicator without MPI_Init.
+      if (py_comm.eq.-1) then
+         call py_abort(-103)
+         return
+      end if
+      mycomm = py_comm
+#else
       call MPI_Init (ierr)
       if (ierr.ne.MPI_SUCCESS) then
          write (11,*)'MPI_Init not successful...stopping'
          call MPI_Error_String(ierr, errmsg, len, ier)
 c        write (11,a1) (errmsg(l),l=1,len)
       endif
-      call MPI_Comm_Rank (MPI_COMM_WORLD, myid, ierr)
-      call MPI_Comm_Size (MPI_COMM_WORLD, numprocs, ierr)
-c
-      mycomm     = MPI_COMM_WORLD
+      mycomm = MPI_COMM_WORLD
+#endif
+      call MPI_Comm_Rank (mycomm, myid, ierr)
+      call MPI_Comm_Size (mycomm, numprocs, ierr)
       myhost     = 0
       istat_size = MPI_STATUS_SIZE
       nnodes = numprocs -1
@@ -463,6 +478,24 @@ c
       if (myid.eq.myhost) then
 #endif
 c
+#ifdef PYTHON_API
+      iunit5 = 32
+      output_dir = '.'
+      grid = 'memory'
+      plt3dg = 'plot3dg.bin'
+      plt3dq = 'plot3dq.bin'
+      output = 'cfl3d.out'
+      residual = 'cfl3d.res'
+      turbres = 'cfl3d.turres'
+      blomx = 'cfl3d.blomax'
+      output2 = 'cfl3d.out15'
+      printout = 'cfl3d.prout'
+      pplunge = 'cfl3d.out20'
+      ovrlap = 'ovrlp.bin'
+      patch = 'patch.bin'
+      restrt = 'restart.bin'
+
+#else
       iunit5 = 32
 c
 #if defined NOREDIRECT
@@ -488,7 +521,9 @@ c     more than 9999 lines
          write(iunit5,'(a80)') inpstring
       end do
   999 continue
+#ifndef PYTHON_API
       rewind(iunit5)
+#endif
 # endif
 c
       read(iunit5,'(a240)') string
@@ -511,6 +546,8 @@ c
       read(iunit5,'(a60)')ovrlap
       read(iunit5,'(a60)')patch
       read(iunit5,'(a60)')restrt
+
+#endif
 c
 c     asn file calls used on cray if single-precision unformated
 c     files are used/desired. Such files are directly readable
@@ -535,7 +572,9 @@ c
       rewind(66)
       rewind(99)
 
+#ifndef PYTHON_API
       open(unit=1,file=grid,form='unformatted',status='old')
+#endif
       open(unit=2,file=restrt,form='unformatted',status='unknown')
       open(unit=20,file=pplunge,form='formatted',status='unknown')
       open(unit=21,file=ovrlap,form='unformatted',status='unknown')
@@ -553,7 +592,9 @@ c***********************************************************************
 c
 c     read input file to get the array dimensions needed by precfl3d
 c
+#ifndef PYTHON_API
       rewind(iunit5)
+#endif
 c
       ibufdim0 = ibufdim
       nbuf0    = nbuf
@@ -571,7 +612,9 @@ c
 c
 c     rewind the input file so it can be read again
 c
+#ifndef PYTHON_API
       rewind(iunit5)
+#endif
 c
 c     sizer sets the parameters needed for cfl3d
 c
@@ -743,7 +786,9 @@ c
      .  status='unknown')
 #   endif
 c
+#ifndef PYTHON_API
       rewind( 1)
+#endif
       rewind( 2)
       rewind( 3)
       rewind( 4)
@@ -892,7 +937,7 @@ c   Close data base
 c
 c     remove the temporary input file, if used
 c
-#if defined NOREDIRECT
+#if defined NOREDIRECT || defined PYTHON_API
 #else
       if (myid.eq.myhost) then
          close(iunit5,status='delete')
@@ -905,5 +950,9 @@ c
 
       call termn8(myid,0,ibufdim,nbuf,bou,nou)
 c
+#ifdef PYTHON_API
+      return
+#else
       stop
+#endif
       end

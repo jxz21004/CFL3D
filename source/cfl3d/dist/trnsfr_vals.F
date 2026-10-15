@@ -94,7 +94,7 @@ c
       dimension nou(nbuf)
       dimension work(mwork),iwork(mworki)
       dimension inpl3d(nplots,11),inpr(nplots,11)
-      dimension levelg(maxbl),igridg(maxbl),mit(5,maxbl),
+      dimension levelg(maxbl),igridg(maxbl),mit(5,5),
      .          iflimg(maxbl,3),ifdsg(maxbl,3),iviscg(maxbl,3),
      .          jdimg(maxbl),kdimg(maxbl),idimg(maxbl),idiagg(maxbl,3),
      .          nblcg(maxbl),idegg(maxbl,3),jsg(maxbl),

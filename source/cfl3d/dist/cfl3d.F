@@ -27,6 +27,9 @@ c
      .                 nmds,maxaes,nslave,maxsegdg,nmaster,bcfiles,
      .                 bou,nou,grid,n_clcd,nblocks_clcd,blocks_clcd)
 c
+#ifdef PYTHON_API
+      use cfl3d_python_state
+#endif
 c     $Id$
 c
 c***********************************************************************
@@ -390,6 +393,9 @@ c
       common /deformz/ beta1,beta2,alpha1,alpha2,isktyp,negvol,meshdef,
      .                 nsprgit,ndgrd,ndwrt
       common /cgns/ icgns,iccg,ibase,nzones,nsoluse,irind,jrind,krind
+#ifdef PYTHON_API
+      integer py_g,py_b
+#endif
       common /unit5/ iunit5
       common /wrestq/ irest,irest2
 c
@@ -800,8 +806,11 @@ c
       call umalloc(maxbl,1,'mblk2nd',memuse,stats)
       allocate( mblkpt(mxxe),stat=stats )
       call umalloc(mxxe,1,'mblkpt',memuse,stats)
-      allocate( mit(5,maxbl),stat=stats )
-      call umalloc(5*maxbl,1,'mit',memuse,stats)
+c     MIT is indexed by multigrid level and mesh sequence, not block.
+c     MPI packs 25 entries even if MAXBL is smaller than five.
+      allocate( mit(5,5),stat=stats )
+      mit = 1
+      call umalloc(25,1,'mit',memuse,stats)
       allocate( mmceta(intmx),stat=stats )
       call umalloc(intmx,1,'mmceta',memuse,stats)
       allocate( mmcxie(intmx),stat=stats )
@@ -1096,6 +1105,34 @@ c
      .          gforcnm,gforcs,nsegdfrm,idfrmseg,iaesurf,maxsegdg,
      .          nmaster,aehist,timekeep,xorgae0,yorgae0,zorgae0,
      .          icouple,nblelst,iskmax,jskmax,kskmax,ue,irdrea)
+c
+#ifdef PYTHON_API
+      do py_g=1,py_ngrid
+         py_b=nblg(py_g)
+#if defined DIST_MPI
+         if (myid.eq.mblk2nd(py_b)) then
+#endif
+         call py_copy_solution(work(lw(1,py_b)),jdimg(py_b),
+     .        kdimg(py_b),idimg(py_b),py_g)
+#if defined DIST_MPI
+         end if
+#endif
+      end do
+      py_nhistory = min(ncycmax,sum(py_stages(1,:)))
+      allocate(py_history(py_nhistory,8))
+      py_history = 0
+      if (myid.eq.myhost) then
+      py_history(:,1) = rms(1:py_nhistory)
+      py_history(:,2) = clw(1:py_nhistory)
+      py_history(:,3) = cdw(1:py_nhistory)
+      py_history(:,4) = cxw(1:py_nhistory)
+      py_history(:,5) = cyw(1:py_nhistory)
+      py_history(:,6) = cmxw(1:py_nhistory)
+      py_history(:,7) = cmyw(1:py_nhistory)
+      py_history(:,8) = cmzw(1:py_nhistory)
+      end if
+      call py_collect_results()
+#endif
 c
 c***********************************************************************
 c     deallocate memory

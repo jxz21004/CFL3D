@@ -48,6 +48,9 @@ c
      .                  idfrmseg,iaesurf,maxsegdg,xorgae0,yorgae0,
      .                  zorgae0,icouple,iprnsurf)
 c
+#ifdef PYTHON_API
+      use cfl3d_python_state
+#endif
 c     $Id$
 c
 c***********************************************************************
@@ -80,6 +83,9 @@ c
       character*120 bou(ibufdim,nbuf)
 c
       integer bcfilei,bcfilej,bcfilek
+#ifdef PYTHON_API
+      integer py_idx
+#endif
 c
 #   ifdef CMPLX
       complex lreftra,lrefrot,lrefdef
@@ -107,7 +113,7 @@ c
      .          jdimg(maxbl),kdimg(maxbl),idimg(maxbl),idiagg(maxbl,3),
      .          nblcg(maxbl),idegg(maxbl,3),
      .          jsg(maxbl),ksg(maxbl),isg(maxbl),jeg(maxbl),keg(maxbl),
-     .          ieg(maxbl),mit(5,maxbl),ilamlog(maxbl),ilamhig(maxbl),
+     .          ieg(maxbl),mit(5,5),ilamlog(maxbl),ilamhig(maxbl),
      .          jlamlog(maxbl),jlamhig(maxbl),klamlog(maxbl),
      .          klamhig(maxbl),iwfg(maxbl,3)
       dimension utrans(maxbl),vtrans(maxbl),wtrans(maxbl),omegax(maxbl),
@@ -250,7 +256,11 @@ c
 c     free-form alphanumeric title
 
       if (ititr.eq.0) then
+#ifdef PYTHON_API
+c     Native initialization has no text headings.
+#else
          read(iunit5,10)(realval(i),i=1,20)
+#endif
          do i=1,20
             title(i) = realval(i)
          end do
@@ -286,8 +296,18 @@ c
 c     ***Note:  isnd and c2spe no longer used - they have been incorporated
 c               into solid wall BC2004
 c
+#ifdef PYTHON_API
+c     Native initialization has no text headings.
+#else
       read(iunit5,10)
+#endif
+#ifdef PYTHON_API
+      realval(1:5) = py_flow(1:5)
+      ialph = int(py_flow(6))
+      ihstry = int(py_flow(7))
+#else
       read(iunit5,*) (realval(i),i=1,5),ialph,ihstry
+#endif
 #   ifdef CMPLX
 c
 c     complex perturbations are set by keyword input, with defaults = 0
@@ -349,8 +369,16 @@ c     xmc  - moment center in x-direction
 c     ymc  - moment center in y-direction
 c     zmc  - moment center in z-direction
 c
+#ifdef PYTHON_API
+c     Native initialization has no text headings.
+#else
       read(iunit5,10)
+#endif
+#ifdef PYTHON_API
+      realval(1:6) = py_reference
+#else
       read(iunit5,*) (realval(i),i=1,6)
+#endif
       sref = realval(1)
       cref = realval(2)
       bref = realval(3)
@@ -394,9 +422,22 @@ c               2  deforming mesh
 c               3  combination rigid and deforming
 c     cfltau  - cfl number for tau-ts time step scheme
 c
+#ifdef PYTHON_API
+c     Native initialization has no text headings.
+#else
       read(iunit5,10)
+#endif
+#ifdef PYTHON_API
+      realval(1) = py_time(1)
+      irest = int(py_time(2))
+      iflagts = int(py_time(3))
+      realval(2) = py_time(4)
+      iunst = int(py_time(5))
+      realval(3) = py_time(6)
+#else
       read(iunit5,*) realval(1),irest,iflagts,realval(2),iunst,
      .               realval(3)
+#endif
       dt     = realval(1)
       dtold  = dt
       fmax   = realval(2)
@@ -475,8 +516,23 @@ c                  MUST be used to drive the first order errors from the
 c                  approximate factorization (and diagonalization, if used)
 c                  to zero.
 c
+#ifdef PYTHON_API
+c     Native initialization has no text headings.
+#else
       read(iunit5,10)
+#endif
+#ifdef PYTHON_API
+      ngrid = py_run(1)
+      nplot3d = py_run(2)
+      nprint = py_run(3)
+      nwrest = py_run(4)
+      ichk = py_run(5)
+      i2d = py_run(6)
+      ntstep = py_run(7)
+      ita = py_run(8)
+#else
       read(iunit5,*) ngrid,nplot3d,nprint,nwrest,ichk,i2d,ntstep,ita
+#endif
       write(iunit11,1639)
  1639 format(5x,5hngrid,3x,7hnplot3d,4x,6hnprint,4x,6hnwrest,
      .       6x,4hichk,7x,3hi2d,3x,7h ntstep,4x,6h   ita)
@@ -667,7 +723,11 @@ c           one of the directions.
 c
 c***** repeat above for each grid, 1 through ngrid *****
 c
+#ifdef PYTHON_API
+c     Native initialization has no text headings.
+#else
       read(iunit5,10)
+#endif
       nbl = 0
       nblock = 0
       write(iunit11,61)
@@ -676,7 +736,15 @@ c
       iemtot = 0
       do 71 igrid=1,ngrid
       nbl    = nbl+1
+#ifdef PYTHON_API
+      ncg = py_blocks(1,igrid)
+      iem = py_blocks(2,igrid)
+      iad = py_blocks(3,igrid)
+      ifor = py_blocks(4,igrid)
+      ivisc = py_blocks(5:7,igrid)
+#else
       read(iunit5,*) ncg,iem,iad,ifor,ivisc
+#endif
       write(iunit11,36) ncg,iem,iad,ifor,ivisc
       nblock = nblock+ncg+1
       if (iem .gt. 0 .and. ncg .gt. 0) then
@@ -1161,13 +1229,23 @@ c     kdim - number of points in K-direction
 c
 c***** repeat above for each grid, 1 through ngrid *****
 c
+#ifdef PYTHON_API
+c     Native initialization has no text headings.
+#else
       read(iunit5,10)
+#endif
       nbl = 0
       write(iunit11,1631)
  1631 format(6x,4hidim,6x,4hjdim,6x,4hkdim)
       do 7001 igrid=1,ngrid
       nbl = nbl+1
+#ifdef PYTHON_API
+      idim = py_dims(1,igrid)
+      jdim = py_dims(2,igrid)
+      kdim = py_dims(3,igrid)
+#else
       read(iunit5,*) idim,jdim,kdim
+#endif
       write(iunit11,336) idim,jdim,kdim
   336 format(3i10)
       if (i2d.gt.0 .and. idim.ne.2) then
@@ -1292,14 +1370,27 @@ c     klamhi - upper k index (0 if no laminar region)
 c
 c***** repeat above for each grid, 1 through ngrid *****
 c
+#ifdef PYTHON_API
+c     Native initialization has no text headings.
+#else
       read(iunit5,10)
+#endif
       nbl = 0
       write(iunit11,1939)
  1939 format(4x,6hilamlo,4x,6hilamhi,4x,6hjlamlo,
      .       4x,6hjlamhi,4x,6hklamlo,4x,6hklamhi)
       do 7201 igrid=1,ngrid
       nbl = nbl+1
+#ifdef PYTHON_API
+      ilamlo=0
+      ilamhi=0
+      jlamlo=0
+      jlamhi=0
+      klamlo=0
+      klamhi=0
+#else
       read(iunit5,*) ilamlo,ilamhi,jlamlo,jlamhi,klamlo,klamhi
+#endif
       if (ilamhi .gt. idimg(nbl)) ilamhi=idimg(nbl)
       if (jlamhi .gt. jdimg(nbl)) jlamhi=jdimg(nbl)
       if (klamhi .gt. kdimg(nbl)) klamhi=kdimg(nbl)
@@ -1382,14 +1473,29 @@ c            directions of the grid to which it connects.
 c
 c***** repeat above for each grid, 1 through ngrid *****
 c
+#ifdef PYTHON_API
+c     Native initialization has no text headings.
+#else
       read(iunit5,10)
+#endif
       nbl = 0
       write(iunit11,1931)
  1931 format(5x,5hinewg,4x,6higridc,
      .       8x,2his,8x,2hjs,8x,2hks,8x,2hie,8x,2hje,8x,2hke)
       do 7002 igrid=1,ngrid
       nbl = nbl+1
+#ifdef PYTHON_API
+      inewg=0
+      igridc=0
+      is=0
+      js=0
+      ks=0
+      ie=0
+      je=0
+      ke=0
+#else
       read(iunit5,*) inewg,igridc,is,js,ks,ie,je,ke
+#endif
       write(iunit11,36) inewg,igridc,is,js,ks,ie,je,ke
       if (igridc .gt. 0) then
          nblcg(nbl) = nblg(igridc)
@@ -1434,14 +1540,23 @@ c                   block splittng
 c
 c***** repeat above for each grid, 1 through ngrid *****
 c
+#ifdef PYTHON_API
+c     Native initialization has no text headings.
+#else
       read(iunit5,10)
+#endif
       nbl = 0
       write(iunit11,9004)
  9004 format(2x,8hidiag(i),2x,8hidiag(j),2x,8hidiag(k),
      .       2x,8hiflim(i),2x,8hiflim(j),2x,8hiflim(k))
       do 9002 igrid=1,ngrid
       nbl = nbl+1
+#ifdef PYTHON_API
+      idiag = py_scheme(1:3)
+      iflim = py_scheme(4:6)
+#else
       read(iunit5,*) idiag,iflim
+#endif
       write(iunit11,36) idiag,iflim
 c
 c  limit on ngc when iflim=4 (set via dimension of ncell):
@@ -1487,15 +1602,24 @@ c                     (recommended)
 c
 c***** repeat above for each grid, 1 through ngrid *****
 c
+#ifdef PYTHON_API
+c     Native initialization has no text headings.
+#else
       read(iunit5,10)
+#endif
       nbl = 0
       write(iunit11,1951)
  1951 format(3x,7hifds(i),3x,7hifds(j),3x,7hifds(k),
      .       2x,8hrkap0(i),2x,8hrkap0(j),2x,8hrkap0(k))
       do 7012 igrid=1,ngrid
       nbl = nbl+1
+#ifdef PYTHON_API
+      ifds = py_flux
+      realval(1:3) = py_rkap
+#else
       read(iunit5,*) ifds(1),ifds(2),ifds(3),realval(1),realval(2),
      .               realval(3)
+#endif
       rkap0(1) = realval(1)
       rkap0(2) = realval(2)
       rkap0(3) = realval(3)
@@ -1543,7 +1667,11 @@ c               = 1 the current grid is involved in grid-overlapping
 c
 c***** repeat above for each grid, 1 through ngrid *****
 c
+#ifdef PYTHON_API
+c     Native initialization has no text headings.
+#else
       read(iunit5,10)
+#endif
       nbl = 0
       write(iunit11,9009)
  9009 format(6x,4hgrid,5x,5hnbci0,3x,7hnbcidim,5x,5hnbcj0,3x,7hnbcjdim,
@@ -1553,8 +1681,19 @@ c
       lbg(1) = 1
       do 9007 igrid=1,ngrid
       nbl = nbl+1
+#ifdef PYTHON_API
+      ig = igrid
+      nbci0(nbl) = py_counts(1,igrid)
+      nbcidim(nbl) = py_counts(2,igrid)
+      nbcj0(nbl) = py_counts(3,igrid)
+      nbcjdim(nbl) = py_counts(4,igrid)
+      nbck0(nbl) = py_counts(5,igrid)
+      nbckdim(nbl) = py_counts(6,igrid)
+      iover = 0
+#else
       read(iunit5,*) ig,nbci0(nbl),nbcidim(nbl),nbcj0(nbl),nbcjdim(nbl),
      .          nbck0(nbl),nbckdim(nbl),iover
+#endif
       if (ig.ne.igrid) then
          write(iunit11,*)' you must put these lines in order by grid!'
          call termn8(myid,ierrflg,ibufdim,nbuf,bou,nou)
@@ -1641,7 +1780,11 @@ c                  (a value of 1 points to 'null')
 c
 c***** repeat above for 1 through nbci0 for each grid *****
 c
+#ifdef PYTHON_API
+c     Native initialization has no text headings.
+#else
       read(iunit5,10)
+#endif
       nbl = 0
       write(iunit11,1209)
  1209 format(3hi0:,3x,4hgrid,3x,7hsegment,4x,6hbctype,6x,4hjsta,
@@ -1661,10 +1804,19 @@ c
       bcvali(nbl,iseg,mm,1) = -1.e15
  1206 continue
       do 1201 iseg=1,nbci0(nbl)
+#ifdef PYTHON_API
+      py_idx = py_bcindex(igrid,1,iseg)
+      ig = py_bc(1,py_idx)
+      nseg = py_bc(2,py_idx)
+      ibctyp = py_bc(3,py_idx)
+      ibcinfo(nbl,abs(nseg),2:5,1) = py_bc(4:7,py_idx)
+      ndata = py_bc(8,py_idx)
+#else
       read(iunit5,*) ig,nseg,ibctyp,ibcinfo(nbl,abs(nseg),2,1),
      .                  ibcinfo(nbl,abs(nseg),3,1),
      .                  ibcinfo(nbl,abs(nseg),4,1),
      .                  ibcinfo(nbl,abs(nseg),5,1),ndata
+#endif
 c
       if (ibctyp .eq. 1004) then
           write(iunit11,2201)
@@ -1730,8 +1882,16 @@ c
       ifoseg = ifoseg*mfoseg
       nseg = abs(nseg)
       if (ndata.gt.0) then
+#ifdef PYTHON_API
+c     Native initialization has no text headings.
+#else
          read(iunit5,*)
+#endif
+#ifdef PYTHON_API
+      realval(1:ndata) = py_bcdata(1:ndata,py_idx)
+#else
          read(iunit5,*) (realval(mm),mm=1,ndata)
+#endif
          do mm=1,ndata
             bcvali(nbl,nseg,mm,1) = realval(mm)
          end do
@@ -1744,8 +1904,16 @@ c
             call termn8(myid,ierrflg,ibufdim,nbuf,bou,nou)
          end if
          bcfilei(nbl,nseg,1) = nfiles
+#ifdef PYTHON_API
+c     Native initialization has no text headings.
+#else
          read(iunit5,*)
+#endif
+#ifdef PYTHON_API
+      call py_abort(-101)
+#else
          read(iunit5,'(a60)') bcfiles(nfiles)
+#endif
       end if
       if (ig.ne.igrid) then
          write(iunit11,*)' you must put these lines in order by grid!'
@@ -1914,7 +2082,11 @@ c                  (a value of 1 points to 'null')
 c
 c***** repeat above for 1 through nbcidim for each grid *****
 c
+#ifdef PYTHON_API
+c     Native initialization has no text headings.
+#else
       read(iunit5,10)
+#endif
       nbl = 0
       write(iunit11,1309)
  1309 format(5hidim:,1x,4hgrid,3x,7hsegment,4x,6hbctype,6x,4hjsta,
@@ -1934,10 +2106,19 @@ c
       bcvali(nbl,iseg,mm,2) = -1.e15
  1306 continue
       do 1301 iseg=1,nbcidim(nbl)
+#ifdef PYTHON_API
+      py_idx = py_bcindex(igrid,2,iseg)
+      ig = py_bc(1,py_idx)
+      nseg = py_bc(2,py_idx)
+      ibctyp = py_bc(3,py_idx)
+      ibcinfo(nbl,abs(nseg),2:5,2) = py_bc(4:7,py_idx)
+      ndata = py_bc(8,py_idx)
+#else
       read(iunit5,*) ig,nseg,ibctyp,ibcinfo(nbl,abs(nseg),2,2),
      .                  ibcinfo(nbl,abs(nseg),3,2),
      .                  ibcinfo(nbl,abs(nseg),4,2),
      .                  ibcinfo(nbl,abs(nseg),5,2),ndata
+#endif
 c
       if (ibctyp .eq. 1004) then
           write(iunit11,2201)
@@ -1997,8 +2178,16 @@ c
       ifoseg = ifoseg*mfoseg
       nseg = abs(nseg)
       if (ndata.gt.0) then
+#ifdef PYTHON_API
+c     Native initialization has no text headings.
+#else
          read(iunit5,*)
+#endif
+#ifdef PYTHON_API
+      realval(1:ndata) = py_bcdata(1:ndata,py_idx)
+#else
          read(iunit5,*) (realval(mm),mm=1,ndata)
+#endif
          do mm=1,ndata
             bcvali(nbl,nseg,mm,2) = realval(mm)
          end do
@@ -2011,8 +2200,16 @@ c
             call termn8(myid,ierrflg,ibufdim,nbuf,bou,nou)
          end if
          bcfilei(nbl,nseg,2) = nfiles
+#ifdef PYTHON_API
+c     Native initialization has no text headings.
+#else
          read(iunit5,*)
+#endif
+#ifdef PYTHON_API
+      call py_abort(-101)
+#else
          read(iunit5,'(a60)') bcfiles(nfiles)
+#endif
       end if
       if (ig.ne.igrid) then
          write(iunit11,*)' you must put these lines in order by grid!'
@@ -2169,7 +2366,11 @@ c                  (a value of 1 points to 'null')
 c
 c***** repeat above for 1 through nbcj0 for each grid *****
 c
+#ifdef PYTHON_API
+c     Native initialization has no text headings.
+#else
       read(iunit5,10)
+#endif
       nbl = 0
       write(iunit11,1409)
  1409 format(3hj0:,3x,4hgrid,3x,7hsegment,4x,6hbctype,6x,4hista,
@@ -2189,10 +2390,19 @@ c
       bcvalj(nbl,iseg,mm,1) = -1.e15
  1406 continue
       do 1401 iseg=1,nbcj0(nbl)
+#ifdef PYTHON_API
+      py_idx = py_bcindex(igrid,3,iseg)
+      ig = py_bc(1,py_idx)
+      nseg = py_bc(2,py_idx)
+      jbctyp = py_bc(3,py_idx)
+      jbcinfo(nbl,abs(nseg),2:5,1) = py_bc(4:7,py_idx)
+      ndata = py_bc(8,py_idx)
+#else
       read(iunit5,*) ig,nseg,jbctyp,jbcinfo(nbl,abs(nseg),2,1),
      .                  jbcinfo(nbl,abs(nseg),3,1),
      .                  jbcinfo(nbl,abs(nseg),4,1),
      .                  jbcinfo(nbl,abs(nseg),5,1),ndata
+#endif
 c
       if (jbctyp .eq. 1004) then
           write(iunit11,2201)
@@ -2252,8 +2462,16 @@ c
       jfoseg = jfoseg*mfoseg
       nseg = abs(nseg)
       if (ndata.gt.0) then
+#ifdef PYTHON_API
+c     Native initialization has no text headings.
+#else
          read(iunit5,*)
+#endif
+#ifdef PYTHON_API
+      realval(1:ndata) = py_bcdata(1:ndata,py_idx)
+#else
          read(iunit5,*) (realval(mm),mm=1,ndata)
+#endif
          do mm=1,ndata
             bcvalj(nbl,nseg,mm,1) = realval(mm)
          end do
@@ -2266,8 +2484,16 @@ c
             call termn8(myid,ierrflg,ibufdim,nbuf,bou,nou)
          end if
          bcfilej(nbl,nseg,1) = nfiles
+#ifdef PYTHON_API
+c     Native initialization has no text headings.
+#else
          read(iunit5,*)
+#endif
+#ifdef PYTHON_API
+      call py_abort(-101)
+#else
          read(iunit5,'(a60)') bcfiles(nfiles)
+#endif
       end if
       if (ig.ne.igrid) then
          write(iunit11,*)' you must put these lines in order by grid!'
@@ -2423,7 +2649,11 @@ c                  (a value of 1 points to 'null')
 c
 c***** repeat above for 1 through nbcjdim for each grid *****
 c
+#ifdef PYTHON_API
+c     Native initialization has no text headings.
+#else
       read(iunit5,10)
+#endif
       nbl = 0
       write(iunit11,1509)
  1509 format(5hjdim:,1x,4hgrid,3x,7hsegment,4x,6hbctype,6x,4hista,
@@ -2443,10 +2673,19 @@ c
       bcvalj(nbl,iseg,mm,2) = -1.e15
  1506 continue
       do 1501 iseg=1,nbcjdim(nbl)
+#ifdef PYTHON_API
+      py_idx = py_bcindex(igrid,4,iseg)
+      ig = py_bc(1,py_idx)
+      nseg = py_bc(2,py_idx)
+      jbctyp = py_bc(3,py_idx)
+      jbcinfo(nbl,abs(nseg),2:5,2) = py_bc(4:7,py_idx)
+      ndata = py_bc(8,py_idx)
+#else
       read(iunit5,*) ig,nseg,jbctyp,jbcinfo(nbl,abs(nseg),2,2),
      .                  jbcinfo(nbl,abs(nseg),3,2),
      .                  jbcinfo(nbl,abs(nseg),4,2),
      .                  jbcinfo(nbl,abs(nseg),5,2),ndata
+#endif
 c
       if (jbctyp .eq. 1004) then
           write(iunit11,2201)
@@ -2506,8 +2745,16 @@ c
       jfoseg = jfoseg*mfoseg
       nseg = abs(nseg)
       if (ndata.gt.0) then
+#ifdef PYTHON_API
+c     Native initialization has no text headings.
+#else
          read(iunit5,*)
+#endif
+#ifdef PYTHON_API
+      realval(1:ndata) = py_bcdata(1:ndata,py_idx)
+#else
          read(iunit5,*) (realval(mm),mm=1,ndata)
+#endif
          do mm=1,ndata
             bcvalj(nbl,nseg,mm,2) = realval(mm)
          end do
@@ -2520,8 +2767,16 @@ c
             call termn8(myid,ierrflg,ibufdim,nbuf,bou,nou)
          end if
          bcfilej(nbl,nseg,2) = nfiles
+#ifdef PYTHON_API
+c     Native initialization has no text headings.
+#else
          read(iunit5,*)
+#endif
+#ifdef PYTHON_API
+      call py_abort(-101)
+#else
          read(iunit5,'(a60)') bcfiles(nfiles)
+#endif
       end if
       if (ig.ne.igrid) then
          write(iunit11,*)' you must put these lines in order by grid!'
@@ -2677,7 +2932,11 @@ c                  (a value of 1 points to 'null')
 c
 c***** repeat above for 1 through nbck0 for each grid *****
 c
+#ifdef PYTHON_API
+c     Native initialization has no text headings.
+#else
       read(iunit5,10)
+#endif
       nbl = 0
       write(iunit11,1609)
  1609 format(3hk0:,3x,4hgrid,3x,7hsegment,4x,6hbctype,6x,4hista,
@@ -2697,10 +2956,19 @@ c
       bcvalk(nbl,iseg,mm,1) = -1.e15
  1606 continue
       do 1601 iseg=1,nbck0(nbl)
+#ifdef PYTHON_API
+      py_idx = py_bcindex(igrid,5,iseg)
+      ig = py_bc(1,py_idx)
+      nseg = py_bc(2,py_idx)
+      kbctyp = py_bc(3,py_idx)
+      kbcinfo(nbl,abs(nseg),2:5,1) = py_bc(4:7,py_idx)
+      ndata = py_bc(8,py_idx)
+#else
       read(iunit5,*) ig,nseg,kbctyp,kbcinfo(nbl,abs(nseg),2,1),
      .                  kbcinfo(nbl,abs(nseg),3,1),
      .                  kbcinfo(nbl,abs(nseg),4,1),
      .                  kbcinfo(nbl,abs(nseg),5,1),ndata
+#endif
       if (kbctyp .eq. 1004) then
           write(iunit11,2201)
           call termn8(myid,ierrflg,ibufdim,nbuf,bou,nou)
@@ -2759,8 +3027,16 @@ c
       kfoseg = kfoseg*mfoseg
       nseg = abs(nseg)
       if (ndata.gt.0) then
+#ifdef PYTHON_API
+c     Native initialization has no text headings.
+#else
          read(iunit5,*)
+#endif
+#ifdef PYTHON_API
+      realval(1:ndata) = py_bcdata(1:ndata,py_idx)
+#else
          read(iunit5,*) (realval(mm),mm=1,ndata)
+#endif
          do mm=1,ndata
             bcvalk(nbl,nseg,mm,1) = realval(mm)
          end do
@@ -2773,8 +3049,16 @@ c
             call termn8(myid,ierrflg,ibufdim,nbuf,bou,nou)
          end if
          bcfilek(nbl,nseg,1) = nfiles
+#ifdef PYTHON_API
+c     Native initialization has no text headings.
+#else
          read(iunit5,*)
+#endif
+#ifdef PYTHON_API
+      call py_abort(-101)
+#else
          read(iunit5,'(a60)') bcfiles(nfiles)
+#endif
       end if
       if (ig.ne.igrid) then
          write(iunit11,*)' you must put these lines in order by grid!'
@@ -2930,7 +3214,11 @@ c                  (a value of 1 points to 'null')
 c
 c***** repeat above for 1 through nbckdim for each grid *****
 c
+#ifdef PYTHON_API
+c     Native initialization has no text headings.
+#else
       read(iunit5,10)
+#endif
       nbl = 0
       write(iunit11,1709)
  1709 format(5hkdim:,1x,4hgrid,3x,7hsegment,4x,6hbctype,6x,4hista,
@@ -2950,10 +3238,19 @@ c
       bcvalk(nbl,iseg,mm,2) = -1.e15
  1706 continue
       do 1710 iseg=1,nbckdim(nbl)
+#ifdef PYTHON_API
+      py_idx = py_bcindex(igrid,6,iseg)
+      ig = py_bc(1,py_idx)
+      nseg = py_bc(2,py_idx)
+      kbctyp = py_bc(3,py_idx)
+      kbcinfo(nbl,abs(nseg),2:5,2) = py_bc(4:7,py_idx)
+      ndata = py_bc(8,py_idx)
+#else
       read(iunit5,*) ig,nseg,kbctyp,kbcinfo(nbl,abs(nseg),2,2),
      .                  kbcinfo(nbl,abs(nseg),3,2),
      .                  kbcinfo(nbl,abs(nseg),4,2),
      .                  kbcinfo(nbl,abs(nseg),5,2),ndata
+#endif
       if (kbctyp .eq. 1004) then
           write(iunit11,2201)
           call termn8(myid,ierrflg,ibufdim,nbuf,bou,nou)
@@ -3012,8 +3309,16 @@ c
       kfoseg = kfoseg*mfoseg
       nseg = abs(nseg)
       if (ndata.gt.0) then
+#ifdef PYTHON_API
+c     Native initialization has no text headings.
+#else
          read(iunit5,*)
+#endif
+#ifdef PYTHON_API
+      realval(1:ndata) = py_bcdata(1:ndata,py_idx)
+#else
          read(iunit5,*) (realval(mm),mm=1,ndata)
+#endif
          do mm=1,ndata
             bcvalk(nbl,nseg,mm,2) = realval(mm)
          end do
@@ -3026,8 +3331,16 @@ c
             call termn8(myid,ierrflg,ibufdim,nbuf,bou,nou)
          end if
          bcfilek(nbl,nseg,2) = nfiles
+#ifdef PYTHON_API
+c     Native initialization has no text headings.
+#else
          read(iunit5,*)
+#endif
+#ifdef PYTHON_API
+      call py_abort(-101)
+#else
          read(iunit5,'(a60)') bcfiles(nfiles)
+#endif
       end if
       if (ig.ne.igrid) then
          write(iunit11,*)' you must put these lines in order by grid!'
@@ -3373,8 +3686,20 @@ c     ngam - multigrid cycle flag
 c          = 1  V-cycle
 c          = 2  W-cycle
 c
+#ifdef PYTHON_API
+c     Native initialization has no text headings.
+#else
       read(iunit5,10)
+#endif
+#ifdef PYTHON_API
+      mseq = py_mg(1)
+      mgflag = py_mg(2)
+      iconsf = py_mg(3)
+      mtt = py_mg(4)
+      ngam = py_mg(5)
+#else
       read(iunit5,*) mseq,mgflag,iconsf,mtt,ngam
+#endif
       write(iunit11,7832)
  7832 format(6x,4hmseq,4x,6hmgflag,4x,6hiconsf,7x,3hmtt,6x,4hngam)
       write(iunit11,36) mseq,mgflag,iconsf,mtt,ngam
@@ -3478,8 +3803,18 @@ c     epsssr(m) - residual smoothing coefficient for I, J,
 c                 and K directions
 c                 typical values: 0.3, 0.3, 0.3  (usually not used)
 c
+#ifdef PYTHON_API
+c     Native initialization has no text headings.
+#else
       read(iunit5,10)
+#endif
+#ifdef PYTHON_API
+      issc=0
+      issr=0
+      realval(1:6)=0.3
+#else
       read(iunit5,*) issc,(realval(n),n=1,3),issr,(realval(n),n=4,6)
+#endif
       do n=1,3
          epsssc(n) = realval(n)
          epsssr(n) = realval(n+3)
@@ -3508,11 +3843,22 @@ c            = m m embedded grids
 c     nitfo1 - number of first order iterations
 c
       ncyctot = 0
+#ifdef PYTHON_API
+c     Native initialization has no text headings.
+#else
       read(iunit5,10)
+#endif
       write(iunit11,7833)
  7833 format(6x,4hncyc,4x,6hmglevg,5x,5hnemgl,5x,5hnitfo)
       do 12 m=1,mseq
+#ifdef PYTHON_API
+      ncyc1(m) = py_stages(1,m)
+      mglevg(m) = py_stages(2,m)
+      nemgl(m) = py_stages(3,m)
+      nitfo1(m) = py_stages(4,m)
+#else
       read(iunit5,*) ncyc1(m),mglevg(m),nemgl(m),nitfo1(m)
+#endif
       idum = mglevg(m)+nemgl(m)
       if (m.gt.1 .and. ncyc1(m).ne.0 .and. nfreeze.ne.0) then
         write(iunit11,'('' not allowed to freeze turb model'',
@@ -3620,11 +3966,19 @@ c
 c     mitL   - iterations on level L for each level L from coarsest
 c               to finest (mitL=1 recommended)
 c
+#ifdef PYTHON_API
+c     Native initialization has no text headings.
+#else
       read(iunit5,10)
+#endif
       write(iunit11,783)
   783 format(6x,4hmit1,6x,4hmit2,6x,4hmit3,6x,4hmit4,6x,9hmit5  ...)
       do 121 m=1,mseq
+#ifdef PYTHON_API
+      mit(1:mglevg(m)+nemgl(m),m) = 1
+#else
       read(iunit5,*)  (mit(i,m),i=1,(mglevg(m)+nemgl(m)))
+#endif
       write(iunit11,36)(mit(i,m),i=1,(mglevg(m)+nemgl(m)))
   121 continue
 c
@@ -3634,13 +3988,25 @@ c     NOTE: If nbli is negative, then information for checking the
 c           1-1 blocking interfaces between grids is printed to
 c           fort.91 and fort.92.
 c
+#ifdef PYTHON_API
+c     Native initialization has no text headings.
+#else
       read(iunit5,10)
+#endif
+#ifdef PYTHON_API
+c     Native initialization has no text headings.
+#else
       read(iunit5,10)
+#endif
       write(iunit11,9098)
  9098 format(19h 1-1 blocking data:)
       write(iunit11,9099)
  9099 format(6x,4hnbli)
+#ifdef PYTHON_API
+      nbli = py_nconn
+#else
       read(iunit5,*) nbli
+#endif
       ntest = abs(nbli)
       ntest = ntest + ncgmax*ntest
       if (ntest.gt.mxbli) then
@@ -3693,15 +4059,26 @@ c             cell-centers
 c
 c***** repeat above nbli times *****
 c
+#ifdef PYTHON_API
+c     Native initialization has no text headings.
+#else
       read(iunit5,10)
+#endif
       write(iunit11,9047)
  9047 format(2x,6hnumber,4x,4hgrid,4x,4hista,4x,4hjsta,4x,4hksta,
      .       4x,4hiend,4x,4hjend,4x,4hkend,
      .       3x,5hisva1,3x,5hisva2)
       if (abs(nbli).gt.0) then
          do 9033 n=1,abs(nbli)
+#ifdef PYTHON_API
+      mdum = n
+      nblk(1,n) = py_connections(2,1,n)
+      limblk(1,1:6,n) = py_connections(3:8,1,n)
+      isva(1,1:2,n) = py_connections(9:10,1,n)
+#else
          read(iunit5,*)mdum,nblk(1,n),
      .     (limblk(1,l,n),l=1,6),(isva(1,ind,n),ind=1,2)
+#endif
          write(iunit11,37)mdum,nblk(1,n),
      .     (limblk(1,l,n),l=1,6),(isva(1,ind,n),ind=1,2)
 c        preliminary 1-1 interface check
@@ -3719,15 +4096,26 @@ c        preliminary 1-1 interface check
       end if
  37   format(10i8)
 c
+#ifdef PYTHON_API
+c     Native initialization has no text headings.
+#else
       read(iunit5,10)
+#endif
       write(iunit11,9147)
  9147 format(2x,6hnumber,4x,4hgrid,4x,4hista,4x,4hjsta,4x,4hksta,
      .       4x,4hiend,4x,4hjend,4x,4hkend,
      .       3x,5hisva1,3x,5hisva2)
       if (abs(nbli).gt.0) then
          do 9133 n=1,abs(nbli)
+#ifdef PYTHON_API
+      mdum = n
+      nblk(2,n) = py_connections(2,2,n)
+      limblk(2,1:6,n) = py_connections(3:8,2,n)
+      isva(2,1:2,n) = py_connections(9:10,2,n)
+#else
          read(iunit5,*)mdum,nblk(2,n),
      .     (limblk(2,l,n),l=1,6),(isva(2,ind,n),ind=1,2)
+#endif
          write(iunit11,37)mdum,nblk(2,n),
      .     (limblk(2,l,n),l=1,6),(isva(2,ind,n),ind=1,2)
 c        preliminary 1-1 interface check
@@ -3755,13 +4143,25 @@ c                 (input from file patch.bin)
 c            > 0  dynamic mesh patching
 c
 c
+#ifdef PYTHON_API
+c     Native initialization has no text headings.
+#else
       read(iunit5,10)
+#endif
+#ifdef PYTHON_API
+c     Native initialization has no text headings.
+#else
       read(iunit5,10)
+#endif
       write(iunit11,1260)
  1260 format(22h patch interface data:)
       write(iunit11,1261)
  1261 format(4x,6hninter)
+#ifdef PYTHON_API
+      ninter = 0
+#else
       read(iunit5,36)ninter
+#endif
       write(iunit11,36)ninter
 c
       if (iunst.eq.0 .and. ninter.gt.0) then
@@ -3856,8 +4256,16 @@ c    kinc   - increment factor in K-direction
 c
 c***** repeated nplot3d times *****
 c
+#ifdef PYTHON_API
+c     Native initialization has no text headings.
+#else
       read(iunit5,10)
+#endif
+#ifdef PYTHON_API
+c     Native initialization has no text headings.
+#else
       read(iunit5,10)
+#endif
 c
       if (nplot3d.ne.0) then
 c
@@ -3883,7 +4291,11 @@ c
          do 136 n=1,np3dread
 c
          if (iflag.eq.0) then
+#ifdef PYTHON_API
+      call py_abort(-102)
+#else
             read(iunit5,*)(im(l),l=1,11)
+#endif
             if (im(2) .eq. -1) then
              write(iunit11,*)'stopping...iptyp should not be -1',
      .       ' unless nplot3d=-1 (surface only)'
@@ -3902,7 +4314,11 @@ c
             end if
          else
             if (n.le.np3dhold) then
+#ifdef PYTHON_API
+      call py_abort(-102)
+#else
                read(iunit5,*) idum,iptyp,(idum,l=3,11)
+#endif
             end if
             if (iptyp .eq. 7 .and. i2d .ne. 0) then
              write(iunit11,*)'stopping...iptyp 7',
@@ -4118,8 +4534,16 @@ c            > 0 plot3d file written every movie iterations
 c            < 0 plot3d file written at start of computation
 c                AND plot3d file written every movie iterations
 c
+#ifdef PYTHON_API
+c     Native initialization has no text headings.
+#else
       read(iunit5,*)
+#endif
+#ifdef PYTHON_API
+      movie = 0
+#else
       read(iunit5,*) movie
+#endif
       write(iunit11,1302)
  1302 format(1x,5hmovie)
       write(iunit11,76) movie
@@ -4142,8 +4566,16 @@ c    kinc   - increment factor in K-direction
 c
 c***** repeated nprint times *****
 c
+#ifdef PYTHON_API
+c     Native initialization has no text headings.
+#else
       read(iunit5,10)
+#endif
+#ifdef PYTHON_API
+c     Native initialization has no text headings.
+#else
       read(iunit5,10)
+#endif
 c
       if (nprint.ne.0) then
 c
@@ -4165,10 +4597,18 @@ c
          do 236 n=1,nprint
 c
          if (iflag.eq.0) then
+#ifdef PYTHON_API
+      call py_abort(-102)
+#else
             read(iunit5,*)(im(l),l=1,11)
+#endif
          else
             if (n.le.nprnthold) then
+#ifdef PYTHON_API
+      call py_abort(-102)
+#else
                read(iunit5,*) idum,iptyp,(idum,l=3,11)
+#endif
             end if
          end if
 c
@@ -4366,10 +4806,26 @@ c                 the totals are not calculated.
 c
 c***** repeated ncs times *****
 c
+#ifdef PYTHON_API
+c     Native initialization has no text headings.
+#else
       read(iunit5,10)
+#endif
+#ifdef PYTHON_API
+c     Native initialization has no text headings.
+#else
       read(iunit5,10)
+#endif
+#ifdef PYTHON_API
+      ncs = 0
+#else
       read(iunit5,*)ncs
+#endif
+#ifdef PYTHON_API
+c     Native initialization has no text headings.
+#else
       read(iunit5,10)
+#endif
 c
       ncs2    = 0
 c
@@ -4387,7 +4843,11 @@ c
          ncs     = 0
          ntestcs = 0
          do 800 n=1,ncs1
+#ifdef PYTHON_API
+      call py_abort(-102)
+#else
          read(iunit5,*)(im(l),l=1,9)
+#endif
 c
          igrid = im(1)
 c
@@ -4665,20 +5125,44 @@ c
 c
 c        translation data
 c
+#ifdef PYTHON_API
+c     Native initialization has no text headings.
+#else
          read(iunit5,*)
+#endif
+#ifdef PYTHON_API
+c     Native initialization has no text headings.
+#else
          read(iunit5,*)
+#endif
+#ifdef PYTHON_API
+      call py_abort(-102)
+#else
          read(iunit5,*) ntrans
+#endif
          write(iunit11,600)
          write(iunit11,602)
          write(iunit11,604) ntrans
+#ifdef PYTHON_API
+c     Native initialization has no text headings.
+#else
          read(iunit5,*)
+#endif
          write(iunit11,606)
          if (ntrans .gt. 0) then
+#ifdef PYTHON_API
+      call py_abort(-102)
+#else
             read(iunit5,*) realval(1)
+#endif
             lreftra = realval(1)
             write(iunit11,608) real(lreftra)
          end if
+#ifdef PYTHON_API
+c     Native initialization has no text headings.
+#else
          read(iunit5,*)
+#endif
          write(iunit11,612)
          if (ntrans .gt. 0) then
             ichk1 = 0
@@ -4692,7 +5176,11 @@ c
                end if
             end if
             do 610 igrid=1,ntrans
+#ifdef PYTHON_API
+      call py_abort(-102)
+#else
             read(iunit5,*) igr,itran,(realval(i),i=1,4)
+#endif
             rfreq = realval(1)
             utran = realval(2)
             vtran = realval(3)
@@ -4736,11 +5224,19 @@ c
                call termn8(myid,ierrflg,ibufdim,nbuf,bou,nou)
             end if
          end if
+#ifdef PYTHON_API
+c     Native initialization has no text headings.
+#else
          read(iunit5,*)
+#endif
          write(iunit11,618)
          if (ntrans .gt. 0) then
             do 710 igrid=1,ntrans
+#ifdef PYTHON_API
+      call py_abort(-102)
+#else
             read(iunit5,*) igr,(realval(i),i=1,3)
+#endif
             dxmax = realval(1)
             dymax = realval(2)
             dzmax = realval(3)
@@ -4772,20 +5268,44 @@ c
 c
 c        rotation data
 c
+#ifdef PYTHON_API
+c     Native initialization has no text headings.
+#else
          read(iunit5,*)
+#endif
+#ifdef PYTHON_API
+c     Native initialization has no text headings.
+#else
          read(iunit5,*)
+#endif
+#ifdef PYTHON_API
+      call py_abort(-102)
+#else
          read(iunit5,*) nrotat
+#endif
          write(iunit11,624)
          write(iunit11,626)
          write(iunit11,604) nrotat
+#ifdef PYTHON_API
+c     Native initialization has no text headings.
+#else
          read(iunit5,*)
+#endif
          write(iunit11,606)
          if (nrotat .gt. 0) then
+#ifdef PYTHON_API
+      call py_abort(-102)
+#else
             read(iunit5,*) realval(1)
+#endif
             lrefrot = realval(1)
             write(iunit11,608) real(lrefrot)
          end if
+#ifdef PYTHON_API
+c     Native initialization has no text headings.
+#else
          read(iunit5,*)
+#endif
          write(iunit11,628)
          if (nrotat .gt. 0) then
             ichk1 = 0
@@ -4799,7 +5319,11 @@ c
                end if
             end if
             do 620 igrid=1,nrotat
+#ifdef PYTHON_API
+      call py_abort(-102)
+#else
             read(iunit5,*) igr,irota,(realval(i),i=1,7)
+#endif
             rfreq = realval(1)
             omegx = realval(2)
             omegy = realval(3)
@@ -4874,11 +5398,19 @@ c
                call termn8(myid,ierrflg,ibufdim,nbuf,bou,nou)
             end if
          end if
+#ifdef PYTHON_API
+c     Native initialization has no text headings.
+#else
          read(iunit5,*)
+#endif
          write(iunit11,632)
          if (nrotat .gt. 0) then
             do 720 igrid=1,nrotat
+#ifdef PYTHON_API
+      call py_abort(-102)
+#else
             read(iunit5,*) igr,(realval(i),i=1,3)
+#endif
             dtxmax = realval(1)
             dtymax = realval(2)
             dtzmax = realval(3)
@@ -5322,9 +5854,21 @@ c
          end if
 850      continue
 c
+#ifdef PYTHON_API
+c     Native initialization has no text headings.
+#else
          read(iunit5,*)
+#endif
+#ifdef PYTHON_API
+c     Native initialization has no text headings.
+#else
          read(iunit5,*)
+#endif
+#ifdef PYTHON_API
+      call py_abort(-102)
+#else
          read(iunit5,*) ndefrm
+#endif
          write(iunit11,'('' moving grid data - deforming surface'',
      .                   '' (forced motion):'')')
          write(iunit11,'(''  ndefrm'')')
@@ -5332,17 +5876,33 @@ c
             write(iunit11,'(i8)') ndefrm
          end if
          if (ndefrm.gt.0) then
+#ifdef PYTHON_API
+c     Native initialization has no text headings.
+#else
             read(iunit5,*)
+#endif
+#ifdef PYTHON_API
+      call py_abort(-102)
+#else
             read(iunit5,*) realval(1)
+#endif
             lrefdef = realval(1)
+#ifdef PYTHON_API
+c     Native initialization has no text headings.
+#else
             read(iunit5,*)
+#endif
             write(iunit11,'(''    lref'')')
             write(iunit11,'(f8.4)') real(lrefdef)
             write(iunit11,'(''    grid   idefrm    rfreq u/omegax'',
      .                      '' v/omegay w/omegaz    xorig'',
      .                      ''    yorig    zorig'')')
             do ndef=1,ndefrm
+#ifdef PYTHON_API
+      call py_abort(-102)
+#else
                read(iunit5,*) igr,idef,(realval(i),i=1,7)
+#endif
                rfr   = realval(1)
                omgx  = realval(2)
                omgy  = realval(3)
@@ -5417,7 +5977,11 @@ c                 no deformation...output (and use) default values
                   end do
                end if
             end do
+#ifdef PYTHON_API
+c     Native initialization has no text headings.
+#else
             read(iunit5,*)
+#endif
             write(iunit11,'(''    grid     icsi     icsf     jcsi'',
      .                      ''     jcsf     kcsi     kcsf'')')
 c
@@ -5431,7 +5995,11 @@ c
             end do
 c
             do ndef=1,ndefrm
+#ifdef PYTHON_API
+      call py_abort(-102)
+#else
                read(iunit5,*) igr,is,ie,js,je,ks,ke
+#endif
                write(iunit11,'(i8,6i9)') igr,is,ie,js,je,ks,ke
                nbl = nblg(igr)
                ncg = ncgg(igr)
@@ -5470,17 +6038,33 @@ c
      .                  jcsi,jcsf,kcsi,kcsf,maxsegdg,ngrid)
 c
             write(iunit11,'(i8)') ndefrm0
+#ifdef PYTHON_API
+c     Native initialization has no text headings.
+#else
             read(iunit5,*)
+#endif
+#ifdef PYTHON_API
+      call py_abort(-102)
+#else
             read(iunit5,*) realval(1)
+#endif
             lrefdef = realval(1)
+#ifdef PYTHON_API
+c     Native initialization has no text headings.
+#else
             read(iunit5,*)
+#endif
             write(iunit11,'(''    lref'')')
             write(iunit11,'(f8.4)') real(lrefdef)
             write(iunit11,'(''    grid   idefrm    rfreq u/omegax'',
      .                      '' v/omegay w/omegaz    xorig'',
      .                      ''    yorig    zorig'')')
             do ndef=1,abs(ndefrm)
+#ifdef PYTHON_API
+      call py_abort(-102)
+#else
                read(iunit5,*) igr,idef,(realval(i),i=1,7)
+#endif
                rfr   = realval(1)
                omgx  = realval(2)
                omgy  = realval(3)
@@ -5560,11 +6144,19 @@ c                    no deformation...output (and use) default values
                end if
             end do
 c
+#ifdef PYTHON_API
+c     Native initialization has no text headings.
+#else
             read(iunit5,*)
+#endif
             write(iunit11,'(''    grid     icsi     icsf     jcsi'',
      .                      ''     jcsf     kcsi     kcsf'')')
             do ndef=1,abs(ndefrm)
+#ifdef PYTHON_API
+      call py_abort(-102)
+#else
                read(iunit5,*) igr,is,ie,js,je,ks,ke
+#endif
             end do
             do ig=1,ngrid
                nbl = nblg(ig)
@@ -5578,22 +6170,46 @@ c
             ndefrm = ndefrm0
 c
          else
+#ifdef PYTHON_API
+c     Native initialization has no text headings.
+#else
             read(iunit5,*)
+#endif
             write(iunit11,'(''    lref'')')
+#ifdef PYTHON_API
+c     Native initialization has no text headings.
+#else
             read(iunit5,*)
+#endif
             write(iunit11,'(''    grid  idefrm    rfreq u/omegax'',
      .                      '' v/omegay w/omegaz    xorig'',
      .                      ''    yorig    zorig'')')
+#ifdef PYTHON_API
+c     Native initialization has no text headings.
+#else
             read(iunit5,*)
+#endif
             write(iunit11,'(''    grid    icsi     icsf     jcsi'',
      .                      ''     jcsf     kcsi     kcsf'')')
          end if
 c
 c        aeroelastic mesh data
 c
+#ifdef PYTHON_API
+c     Native initialization has no text headings.
+#else
          read(iunit5,*)
+#endif
+#ifdef PYTHON_API
+c     Native initialization has no text headings.
+#else
          read(iunit5,*)
+#endif
+#ifdef PYTHON_API
+      call py_abort(-102)
+#else
          read(iunit5,*) naesrf
+#endif
          write(iunit11,'('' moving grid data - aeroelastic surface'',
      .                   '' (aeroelastic motion):'')')
          write(iunit11,'(''  naesrf'')')
@@ -5604,10 +6220,18 @@ c
                call termn8(myid,ierrflg,ibufdim,nbuf,bou,nou)
             end if
             do naes=1,naesrf
+#ifdef PYTHON_API
+c     Native initialization has no text headings.
+#else
                read(iunit5,*)
+#endif
                write(iunit11,'(''  iaesrf    ngrid    grefl     uinf'',
      .                         ''     qinf   nmodes iskyhook'')')
+#ifdef PYTHON_API
+      call py_abort(-102)
+#else
                read(iunit5,*) iaes,ngd,(realval(i),i=1,3),nmodes,iskyhk
+#endif
                grefl = realval(1)
                uinf  = realval(2)
                qinf  = realval(3)
@@ -5627,13 +6251,21 @@ c
      .                            '' exceeds nmds'')')
                   call termn8(myid,ierrflg,ibufdim,nbuf,bou,nou)
                end if
+#ifdef PYTHON_API
+c     Native initialization has no text headings.
+#else
                read(iunit5,*)
+#endif
                write(iunit11,'(''    freq    gmass     damp x0(2n-1)'',
      .                         ''   x0(2n)  gf0(2n)'')')
                do nm = 1,nmodes
                   nm1  = 2*nm-1
                   nm2  = 2*nm
+#ifdef PYTHON_API
+      realval(1:6) = py_reference
+#else
                   read(iunit5,*) (realval(i),i=1,6)
+#endif
                   freq1  = realval(1)
                   gmass1 = realval(2)
                   damp1  = realval(3)
@@ -5661,11 +6293,19 @@ c
                      call termn8(myid,ierrflg,ibufdim,nbuf,bou,nou)
                   end if
                end do
+#ifdef PYTHON_API
+c     Native initialization has no text headings.
+#else
                read(iunit5,*)
+#endif
                write(iunit11,'(''  moddfl      amp     freq'',
      .                         ''       t0'')')
                do nm = 1,nmodes
+#ifdef PYTHON_API
+      call py_abort(-102)
+#else
                   read(iunit5,*)  moddfl,(realval(i),i=1,3)
+#endif
                   amp   = realval(1)
                   freqp = realval(2)
                   t0    = realval(3)
@@ -5676,12 +6316,20 @@ c
                   write(iunit11,'(i8,4f9.4)') moddfl,real(amp),
      .                                        real(freqp),real(t0)
                end do
+#ifdef PYTHON_API
+c     Native initialization has no text headings.
+#else
                read(iunit5,*)
+#endif
                write(iunit11,'(''    grid     iaei     iaef     jaei'',
      .                         ''     jaef     kaei     kaef'')')
                if (ngd.gt.0) then
                   do ng = 1,ngd
+#ifdef PYTHON_API
+      call py_abort(-102)
+#else
                      read(iunit5,*) igr,is,ie,js,je,ks,ke
+#endif
                      write(iunit11,'(i8,6i9)') igr,is,ie,js,je,ks,ke
                      nbl                = nblg(igr)
                      ncg                = ncgg(igr)
@@ -5725,7 +6373,11 @@ c
      .                        jcsi,jcsf,kcsi,kcsf,maxsegdg,ngrid)
 c
                   do ng = 1,abs(ngd)
+#ifdef PYTHON_API
+      call py_abort(-102)
+#else
                      read(iunit5,*) igr,is,ie,js,je,ks,ke
+#endif
                   end do
                   do ig=1,ngrid
                      nbl = nblg(ig)
@@ -5753,10 +6405,26 @@ c
             mxmds = max(mxmds,nmodes)
 c
          else
+#ifdef PYTHON_API
+c     Native initialization has no text headings.
+#else
             read(iunit5,*)
+#endif
+#ifdef PYTHON_API
+c     Native initialization has no text headings.
+#else
             read(iunit5,*)
+#endif
+#ifdef PYTHON_API
+c     Native initialization has no text headings.
+#else
             read(iunit5,*)
+#endif
+#ifdef PYTHON_API
+c     Native initialization has no text headings.
+#else
             read(iunit5,*)
+#endif
             write(iunit11,'(''  iaesrf    ngrid    grefl     uinf'',
      .                      ''     qinf   nmodes iskyhook'')')
             write(iunit11,'(''    freq    gmass     damp x0(2n-1)'',
@@ -5784,10 +6452,22 @@ c        If isktyp = 2 then an array of points in the i,j,k directions
 c        are read in.  These points are the control points rather than
 c        those computed using standard skip values
 c
+#ifdef PYTHON_API
+c     Native initialization has no text headings.
+#else
          read(iunit5,*)
+#endif
+#ifdef PYTHON_API
+c     Native initialization has no text headings.
+#else
          read(iunit5,*)
+#endif
+#ifdef PYTHON_API
+      call py_abort(-102)
+#else
          read(iunit5,*) nskip,isktyp,realval(1),realval(2),
      .                  realval(3),realval(4),nsprgit
+#endif
          beta1 = realval(1)
          alpha1= realval(2)
          beta2 = realval(3)
@@ -5819,9 +6499,17 @@ c
      .        ''severely compromise fidelity of surface geometry'',/)')
               end if
 
+#ifdef PYTHON_API
+c     Native initialization has no text headings.
+#else
               read(iunit5,*)
+#endif
               do ng = 1,nskip
+#ifdef PYTHON_API
+      call py_abort(-102)
+#else
                  read(iunit5,*) igr,iskp,jskp,kskp
+#endif
                  nbl = nblg(igr)
                  ncg = ncgg(igr)
 c                zero is shortcut for max skip value
@@ -5867,9 +6555,17 @@ c                skip value must divide evenly into dim-1 value
                  write(iunit11,'(/,'' WARNING: beta this small may '',
      .        ''severely compromise fidelity of surface geometry'',/)')
               end if
+#ifdef PYTHON_API
+c     Native initialization has no text headings.
+#else
               read(iunit5,*)
+#endif
               do ng = 1,abs(nskip)
+#ifdef PYTHON_API
+      call py_abort(-102)
+#else
                  read(iunit5,*) igr,iskp0,jskp0,kskp0
+#endif
               end do
               do igr=1,ngrid
                  nbl = nblg(igr)
@@ -5913,7 +6609,11 @@ c                skip value must divide evenly into dim-1 value
                  write(iunit11,'(/,'' WARNING: beta this small may '',
      .        ''severely compromise fidelity of surface geometry'',/)')
               end if
+#ifdef PYTHON_API
+c     Native initialization has no text headings.
+#else
               read(iunit5,*)
+#endif
            end if
          else
             if (nskip.ne.ngrid.and.nskip.ne.0) then
@@ -5930,11 +6630,23 @@ c                skip value must divide evenly into dim-1 value
                write(iunit11,'(/,'' WARNING: beta this small may '',
      .      ''severely compromise fidelity of surface geometry'',/)')
             end if
+#ifdef PYTHON_API
+c     Native initialization has no text headings.
+#else
             read(iunit5,*)
+#endif
             if(nskip.eq.ngrid) then
              do ng = 1,nskip
+#ifdef PYTHON_API
+c     Native initialization has no text headings.
+#else
                read(iunit5,*)
+#endif
+#ifdef PYTHON_API
+      call py_abort(-102)
+#else
                read(iunit5,*) igr,nskpi1(ng),nskpj1(ng),nskpk1(ng)
+#endif
                if (igr.ne.ng) then
                   write(iunit11,'(/,'' ERROR: control point input '',
      .            ''must include all blocks, and be entered in '',/,
@@ -5958,36 +6670,60 @@ c                skip value must divide evenly into dim-1 value
                end if
                nbl = nblg(igr)
                ncg = ncgg(igr)
+#ifdef PYTHON_API
+c     Native initialization has no text headings.
+#else
                read(iunit5,*)
+#endif
                iis = -9
                iie =  0
                do jj = 1,50
                  iis = iis + 10
                  iie = iie + 10
                  if(iie.gt.nskpi1(ng)) iie = nskpi1(ng)
+#ifdef PYTHON_API
+      call py_abort(-102)
+#else
                  read(iunit5,*) (iskip(nbl,ii),ii=iis,iie)
+#endif
                  if(iie.eq.nskpi1(ng)) goto 325
                enddo
 325            continue
+#ifdef PYTHON_API
+c     Native initialization has no text headings.
+#else
                read(iunit5,*)
+#endif
                iis = -9
                iie =  0
                do jj = 1,50
                  iis = iis + 10
                  iie = iie + 10
                  if(iie.gt.nskpj1(ng)) iie = nskpj1(ng)
+#ifdef PYTHON_API
+      call py_abort(-102)
+#else
                  read(iunit5,*) (jskip(nbl,ii),ii=iis,iie)
+#endif
                  if(iie.eq.nskpj1(ng)) goto 350
                enddo
 350            continue
+#ifdef PYTHON_API
+c     Native initialization has no text headings.
+#else
                read(iunit5,*)
+#endif
                iis = -9
                iie =  0
                do jj = 1,50
                  iis = iis + 10
                  iie = iie + 10
                  if(iie.gt.nskpk1(ng)) iie = nskpk1(ng)
+#ifdef PYTHON_API
+      call py_abort(-102)
+#else
                  read(iunit5,*) (kskip(nbl,ii),ii=iis,iie)
+#endif
                  if(iie.eq.nskpk1(ng)) goto 375
                enddo
 375            continue
@@ -6788,9 +7524,21 @@ c        multi-mode grid movement data - used to couple rigid and
 c        deforming grid motions, or deforming translation plus
 c        deforming rotation.
 c
+#ifdef PYTHON_API
+c     Native initialization has no text headings.
+#else
          read(iunit5,*)
+#endif
+#ifdef PYTHON_API
+c     Native initialization has no text headings.
+#else
          read(iunit5,*)
+#endif
+#ifdef PYTHON_API
+      call py_abort(-102)
+#else
          read(iunit5,*) ncoupl
+#endif
          write(iunit11,'('' moving grid data - multi-motion '',
      .                   ''coupling'')')
          write(iunit11,'(''  ncoupl'')')
@@ -6800,11 +7548,19 @@ c
                write(iunit11,'('' input error: ncoupl > ngrid'')')
                call termn8(myid,ierrflg,ibufdim,nbuf,bou,nou)
             end if
+#ifdef PYTHON_API
+c     Native initialization has no text headings.
+#else
             read(iunit5,*)
+#endif
             write(iunit11,'(''  slave   master   xorig   yorig'',
      .      ''   zorig'')')
             do nn=1,ncoupl
+#ifdef PYTHON_API
+      call py_abort(-102)
+#else
                read(iunit5,*) igslav,igmast,xorg,yorg,zorg
+#endif
                write(iunit11,'(i8,i9,3f9.4)') igslav,igmast,xorg,
      .         yorg,zorg
                nblslav = nblg(igslav)
@@ -6842,10 +7598,18 @@ c
                end if
             end do
          else if (ncoupl.lt.0) then
+#ifdef PYTHON_API
+      call py_abort(-102)
+#else
             read(iunit5,*) igslav,igmast,xorg,yorg,zorg
+#endif
             ncoupl = ngrid
             write(iunit11,'(i8)') ncoupl
+#ifdef PYTHON_API
+c     Native initialization has no text headings.
+#else
             read(iunit5,*)
+#endif
             write(iunit11,'(''  slave   master   xorig   yorig'',
      .      ''   zorig'')')
             do nn=1,ncoupl
@@ -6888,7 +7652,11 @@ c
             end do
          else
             write(iunit11,'(i8)') ncoupl
+#ifdef PYTHON_API
+c     Native initialization has no text headings.
+#else
             read(iunit5,*)
+#endif
             write(iunit11,'(''  slave   master   xorig   yorig'',
      .      ''   zorig'')')
          end if

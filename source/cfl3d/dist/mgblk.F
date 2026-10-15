@@ -142,7 +142,7 @@ c
       dimension levelg(maxbl),igridg(maxbl),iviscg(maxbl,3),
      .          jdimg(maxbl),kdimg(maxbl),idimg(maxbl),nblcg(maxbl),
      .          jsg(maxbl),ksg(maxbl),isg(maxbl),jeg(maxbl),keg(maxbl),
-     .          ieg(maxbl),mit(5,maxbl)
+     .          ieg(maxbl),mit(5,5)
       dimension bcvali(maxbl,maxseg,12,2),
      .          bcvalj(maxbl,maxseg,12,2),bcvalk(maxbl,maxseg,12,2),
      .          nbci0(maxbl),nbcidim(maxbl),nbcj0(maxbl),nbcjdim(maxbl),

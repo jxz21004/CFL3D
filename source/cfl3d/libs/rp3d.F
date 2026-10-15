@@ -22,6 +22,9 @@ c  ---------------------------------------------------------------------------
 c
       subroutine rp3d(x,y,z,jdim,kdim,idim,igrid,ialph,igeom_img,irr)
 c
+#ifdef PYTHON_API
+      use cfl3d_python_state
+#endif
 c     $Id$
 c
 c***********************************************************************
@@ -60,6 +63,10 @@ c
       call umalloc(jdim*kdim*idim,0,'zr',memuse,stats)
 #endif
 c
+#ifdef PYTHON_API
+      call py_copy_grid(x,y,z,jdim,kdim,idim,igrid,ialph)
+      return
+#endif
       if (ialph.eq.0) then
 #ifdef CMPLX
          if (igeom_img .eq. 0) then

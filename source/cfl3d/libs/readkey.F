@@ -23,6 +23,9 @@ c
       subroutine readkey(ititr,myid,ibufdim,nbuf,bou,nou,iunit11,
      .                   ierrflg)
 c
+#ifdef PYTHON_API
+      use cfl3d_python_state
+#endif
 c     $Id$
 c
 c***********************************************************************
@@ -1025,6 +1028,23 @@ c*********************************************
 c     check for keyword-driven inputs
 c*********************************************
 c
+#ifdef PYTHON_API
+      ifullns = int(py_keywords(1))
+      nsubturb = int(py_keywords(2))
+      cflturb = py_keywords(3)
+      edvislim = py_keywords(4)
+      gamma = py_keywords(5)
+      gm1 = gamma-1.
+      gp1 = gamma+1.
+      gm1g = gm1/gamma
+      gp1g = gp1/gamma
+      ggm1 = gamma*gm1
+      ititr = 1
+      title = transfer('        ',0.)
+      title(1) = transfer('PYTH    ',0.)
+      title(2) = transfer('ON      ',0.)
+      return
+#endif
       read(iunit5,1593) inpstr
       if (inpstr(1:1).eq.'>') then
          go to 1000

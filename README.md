@@ -9,6 +9,11 @@ The most up-to-date information can be found on the web at:
 
 https://nasa.github.io/CFL3D/
 
+## Python / MPI wrapper
+
+Python interface, build instructions, and supported options: [docs/python-wrapper.md](docs/python-wrapper.md).
+Current MPI validation results and limitations: [MPI_PROGRESS.md](MPI_PROGRESS.md).
+
 -------------
 
 Copyright 2001 United States Government as represented by the Administrator

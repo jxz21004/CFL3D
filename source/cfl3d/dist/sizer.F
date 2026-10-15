@@ -537,8 +537,11 @@ c
       call umalloc(maxbl0,1,'memblock',memuse,stats)
       allocate( mglevg(maxbl0), stat=stats )
       call umalloc(maxbl0,1,'mglevg',memuse,stats)
-      allocate( mit(5,maxbl0), stat=stats )
-      call umalloc(5*maxbl0,1,'mit',memuse,stats)
+c     MIT is indexed by multigrid level and mesh sequence, not block.
+c     Keep the same 5x5 layout as the solver and MPI packing routines.
+      allocate( mit(5,5), stat=stats )
+      mit = 1
+      call umalloc(25,1,'mit',memuse,stats)
       allocate( mmceta(intmx0), stat=stats )
       call umalloc(intmx0,1,'mmceta',memuse,stats)
       allocate( mmcxie(intmx0), stat=stats )
@@ -703,6 +706,7 @@ c
       lnmaster = 1
       lmxsegdg = 1
 c
+#ifndef PYTHON_API
       read(iunit5,*)
       read(iunit5,'(a60)')grid
       read(iunit5,'(a60)')plt3dg
@@ -719,6 +723,7 @@ c     the ovrlap file is opened (if needed) as unit 21 in global
 c     the patch file is opened (if needed) as unit 22 in global
       read(iunit5,'(a60)')patch
       read(iunit5,'(a60)')restrt
+#endif
 c
 c***********************************************************************
 c
@@ -2692,7 +2697,7 @@ c***********************************************************************
 c
 c     sequential build real and integer work array sizes
 c	  for some fortran compiler if sequential isum exceeds INT32, the code will raise error eventhough it is parallel mode for isum comes from a int + double
-      if (ftot_seq+dble(need) .gt. dble(huge(isum)) then
+      if (ftot_seq+dble(need) .gt. dble(huge(isum))) then
         write(*,*) 'WARNING: sequential workspace exceeds INT32'
         isum = huge(isum)
       else
@@ -3014,7 +3019,9 @@ c
          write(11,873)
       end if
 c
+#ifndef PYTHON_API
       rewind(iunit5)
+#endif
 c
 c     free up memory used by sizing routine
 c

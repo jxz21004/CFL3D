@@ -27,6 +27,9 @@ c
      .                   maxsegdg0,ntr,nnodes,nou,bou,iunit11,myid,
      .                   idm0,jdm0,kdm0)
 c
+#ifdef PYTHON_API
+      use cfl3d_python_state
+#endif
 c     $Id$
 c
 c***********************************************************************
@@ -60,6 +63,35 @@ c
       common /unit5/ iunit5
       common /elastic_ss/ idef_ss
 c
+#ifdef PYTHON_API
+      maxgr0 = py_ngrid
+      ncgmax = maxval(py_blocks(1,:))
+      maxbl0 = (ncgmax+1)*maxgr0
+      maxnode0 = max(maxgr0,nnodes)
+      maxseg0 = maxval(py_counts)
+      nplots0 = 1
+      mxbli0 = max(1,py_nconn*(ncgmax+1))
+      lbcprd0 = max(1,count(abs(py_bc(3,:)).eq.2005)*(ncgmax+1))
+      lbcrad0 = 1
+      lbcemb0 = 6*maxbl0
+      maxcs0 = 1
+      ncycmax0 = max(1,sum(py_stages(1,:)))
+      intmax0 = 1
+      nsub10 = 1
+      intmx0 = 1
+      mxxe0 = 1
+      mptch0 = 1
+      msub10 = 1
+      nmds0 = 1
+      maxaes0 = 1
+      maxsegdg0 = 1
+      ntr = 0
+      idm0 = maxval(py_dims(1,:))
+      jdm0 = maxval(py_dims(2,:))
+      kdm0 = maxval(py_dims(3,:))
+      nou = 0
+      return
+#endif
       do nn=1,nbuf0
          nou(nn) = 0
       end do

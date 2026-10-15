@@ -56,6 +56,9 @@ c
       use module_kwstm, only:kws_init
 #   endif
 c
+#ifdef PYTHON_API
+      use cfl3d_python_state
+#endif
 c     $Id$
 c
 c***********************************************************************
@@ -419,6 +422,12 @@ c        plot3d type
 c
          if (myid .eq.myhost) then
             if (igrid.eq.1) then
+#ifdef PYTHON_API
+               ndum = py_ngrid
+               itest(1:ngrid) = py_dims(1,:)
+               jtest(1:ngrid) = py_dims(2,:)
+               ktest(1:ngrid) = py_dims(3,:)
+#else
                read(1) ndum
                if (ndum.ne.ngrid) then
                   write(11,*) ' stopping....ngrid = ',ngrid,
@@ -426,6 +435,7 @@ c
                   call termn8(myid,-1,ibufdim,nbuf,bou,nou)
                end if
                read(1) (itest(ll),jtest(ll),ktest(ll),ll=1,ngrid)
+#endif
             end if
          end if
 c

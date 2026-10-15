@@ -1,0 +1,52 @@
+python module _native
+    interface
+        subroutine py_build_info(mpi_enabled)
+            integer intent(out) :: mpi_enabled
+        end subroutine py_build_info
+        subroutine py_set_communicator(comm,status)
+            integer intent(in) :: comm
+            integer intent(out) :: status
+        end subroutine py_set_communicator
+        subroutine py_configure(dims,counts,bcs,bcdata,blocks,connections,flow,reference,time_control,run_control,mg,stages,keywords,scheme,flux,rkap,ngrid,nbc,nconn,mseq,npoints,ncells,status) ! in :_native:source/python/python_state.F90
+            integer dimension(3,ngrid),intent(in) :: dims
+            integer dimension(6,ngrid),intent(in),depend(ngrid) :: counts
+            integer dimension(8,nbc),intent(in) :: bcs
+            real(kind=8) dimension(12,nbc),intent(in),depend(nbc) :: bcdata
+            integer dimension(7,ngrid),intent(in),depend(ngrid) :: blocks
+            integer dimension(10,2,nconn),intent(in) :: connections
+            real(kind=8) dimension(7),intent(in) :: flow
+            real(kind=8) dimension(6),intent(in) :: reference
+            real(kind=8) dimension(6),intent(in) :: time_control
+            integer dimension(8),intent(in) :: run_control
+            integer dimension(5),intent(in) :: mg
+            integer dimension(4,mseq),intent(in) :: stages
+            real(kind=8) dimension(5),intent(in) :: keywords
+            integer dimension(6),intent(in) :: scheme
+            integer dimension(3),intent(in) :: flux
+            real(kind=8) dimension(3),intent(in) :: rkap
+            integer, optional,intent(in),check(shape(dims, 1) == ngrid),depend(dims) :: ngrid=shape(dims, 1)
+            integer, optional,intent(in),check(shape(bcs, 1) == nbc),depend(bcs) :: nbc=shape(bcs, 1)
+            integer, optional,intent(in),check(shape(connections, 2) == nconn),depend(connections) :: nconn=shape(connections, 2)
+            integer, optional,intent(in),check(shape(stages, 1) == mseq),depend(stages) :: mseq=shape(stages, 1)
+            integer intent(in) :: npoints
+            integer intent(in) :: ncells
+            integer intent(out) :: status
+        end subroutine py_configure
+        subroutine py_set_coordinates(xyz,npoints) ! in :_native:source/python/python_state.F90
+            real(kind=8) dimension(npoints,3),intent(in) :: xyz
+            integer, optional,intent(in),check(shape(xyz, 0) == npoints),depend(xyz) :: npoints=shape(xyz, 0)
+        end subroutine py_set_coordinates
+        subroutine py_get_solution(q,ncells) ! in :_native:source/python/python_state.F90
+            real(kind=8) dimension(ncells,5),intent(out),depend(ncells) :: q
+            integer intent(in) :: ncells
+        end subroutine py_get_solution
+        subroutine py_get_history(history,nrows) ! in :_native:source/python/python_state.F90
+            real(kind=8) dimension(nrows,8),intent(out),depend(nrows) :: history
+            integer intent(in) :: nrows
+        end subroutine py_get_history
+        subroutine py_solve(status,nrows) ! in :_native:source/python/python_state.F90
+            integer intent(out) :: status
+            integer intent(out) :: nrows
+        end subroutine py_solve
+    end interface
+end python module _native
