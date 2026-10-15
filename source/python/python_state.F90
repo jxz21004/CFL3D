@@ -4,12 +4,14 @@ module cfl3d_python_state
   integer, allocatable :: py_dims(:,:), py_counts(:,:), py_bc(:,:)
   integer, allocatable :: py_blocks(:,:), py_stages(:,:), py_connections(:,:,:)
   real(8), allocatable :: py_bcdata(:,:), py_xyz(:,:), py_q(:,:), py_history(:,:), py_surface(:,:)
-  real(8), allocatable :: py_wall(:,:)
+  real(8), allocatable :: py_wall(:,:),py_wall_forces(:,:)
   integer, allocatable :: py_walloffset(:)
   integer, allocatable :: py_offsets(:), py_qoffsets(:)
   real(8) :: py_flow(7), py_reference(6), py_time(6), py_keywords(9)
   integer :: py_run(8), py_mg(5), py_scheme(6), py_flux(3), py_smoothing(5,5)
   real(8) :: py_rkap(3), py_final_alpha=0.0d0
+  real(8) :: py_force_angles(2)=0.0d0
+  integer :: py_force_angle_valid=0
   integer :: py_ngrid=0, py_nbc=0, py_nconn=0, py_nhistory=0
   integer :: py_status=0, py_used=0
   integer :: py_comm=-1, py_force_zone=0
@@ -36,12 +38,15 @@ contains
     end do
   end subroutine
 
-  subroutine py_record_surface(face,segment,raw,i2d,ialph)
+  subroutine py_record_surface(face,segment,raw,i2d,ialph,alpha,beta)
     integer, intent(in) :: face,segment,i2d,ialph
     real(8), intent(in) :: raw(10)
+    real(8), intent(in) :: alpha,beta
     real(8) :: values(10),temp,yref,zref
     integer :: idx
     if (py_force_zone == 0) return  ! Coarse-grid forces are not output surfaces.
+    ! CL control updates alpha after force evaluation; retain the actual force axes.
+    py_force_angles=(/alpha,beta/); py_force_angle_valid=1
     idx=py_bcindex(py_force_zone,face,segment)
     ! raw: CL, CD, CX, CY, CZ, Cmx, Cmy, Cmz, CDp, CDv before Sref/length scaling.
     values=raw
@@ -63,10 +68,12 @@ contains
     py_surface(:,idx)=values
   end subroutine
 
-  subroutine py_record_wall(face,segment,a,b,pressure,density,cf,area,volume,cbar,ialph)
+  subroutine py_record_wall(face,segment,a,b,pressure,density,cf,area,volume,cbar,ialph,force,viscous)
     integer, intent(in) :: face,segment,a,b,ialph
     real(8), intent(in) :: pressure,density,cf(3),area,volume,cbar
+    real(8), intent(in) :: force(3),viscous(3)
     real(8) :: values(6),tratio,mu,temp,distance
+    real(8) :: loads(6)
     integer :: idx,p,code
     if (py_force_zone == 0) return
     idx=py_bcindex(py_force_zone,face,segment)
@@ -78,8 +85,12 @@ contains
     values(1)=(py_keywords(5)*pressure-1.d0)*2.d0/(py_keywords(5)*py_flow(1)**2)
     values(2)=tratio*py_flow(5)/1.8d0  ! Wall temperature in K, not adjacent-cell temperature.
     values(3:5)=cf
+    ! Keep the native integrated cell loads: no reconstruction from Cp/normals is needed later.
+    loads(1:3)=force-viscous; loads(4:6)=viscous
     if (ialph > 0) then
       temp=values(5); values(5)=-values(4); values(4)=temp
+      temp=loads(3); loads(3)=-loads(2); loads(2)=temp
+      temp=loads(6); loads(6)=-loads(5); loads(5)=temp
     end if
     values(6)=0
     if (area > 0.d0 .and. code >= 2000) then
@@ -90,6 +101,7 @@ contains
       values(6)=distance*py_flow(4)*1.d6*sqrt(0.5d0*sqrt(sum(cf**2))*density)/mu
     end if
     py_wall(:,p)=values
+    py_wall_forces(:,p)=loads/py_reference(1)
   end subroutine
 
   subroutine py_copy_grid(x,y,z,jd,kd,id,grid,ialph)
@@ -135,7 +147,14 @@ end module
 subroutine py_api_version(version)
   implicit none
   integer, intent(out) :: version
-  version=4
+  version=5
+end subroutine
+
+subroutine py_get_force_angles(angles)
+  use cfl3d_python_state, only: py_force_angles
+  implicit none
+  real(8), intent(out) :: angles(2)
+  angles=py_force_angles
 end subroutine
 
 subroutine py_set_output_flags(write_restart)
@@ -151,6 +170,14 @@ subroutine py_get_wall_data(values,ncells)
   integer, intent(in) :: ncells
   real(8), intent(out) :: values(6,ncells)
   values=py_wall
+end subroutine
+
+subroutine py_get_wall_forces(values,ncells)
+  use cfl3d_python_state, only: py_wall_forces
+  implicit none
+  integer, intent(in) :: ncells
+  real(8), intent(out) :: values(6,ncells)
+  values=py_wall_forces
 end subroutine
 
 subroutine py_get_surface_coefficients(values,nbc)
@@ -206,7 +233,7 @@ subroutine py_collect_results()
   implicit none
 #ifdef DIST_MPI
   include 'mpif.h'
-  integer :: ierr
+  integer :: ierr,rank,owner,local_owner
   real(8), allocatable :: gathered(:,:)
   ! Each cell is filled only on its owning worker; host/other workers keep zero.
   ! SUM therefore assembles the solution without counting a cell twice.
@@ -223,6 +250,15 @@ subroutine py_collect_results()
   call MPI_Allreduce(py_wall,gathered,size(py_wall),MPI_DOUBLE_PRECISION,MPI_SUM,py_comm,ierr)
   py_wall=gathered
   deallocate(gathered)
+  allocate(gathered(size(py_wall_forces,1),size(py_wall_forces,2)))
+  call MPI_Allreduce(py_wall_forces,gathered,size(py_wall_forces),MPI_DOUBLE_PRECISION,MPI_SUM,py_comm,ierr)
+  py_wall_forces=gathered
+  deallocate(gathered)
+  call MPI_Comm_rank(py_comm,rank,ierr)
+  local_owner=-1
+  if (py_force_angle_valid /= 0) local_owner=rank
+  call MPI_Allreduce(local_owner,owner,1,MPI_INTEGER,MPI_MAX,py_comm,ierr)
+  if (owner >= 0) call MPI_Bcast(py_force_angles,2,MPI_DOUBLE_PRECISION,owner,py_comm,ierr)
   call MPI_Bcast(py_history,size(py_history),MPI_DOUBLE_PRECISION,0,py_comm,ierr)
 #endif
 end subroutine
@@ -265,7 +301,7 @@ subroutine py_configure(dims,counts,bcs,bcdata,blocks,connections,flow,reference
   end if
   if (allocated(py_history)) deallocate(py_history)
   if (allocated(py_surface)) deallocate(py_surface)
-  if (allocated(py_wall)) deallocate(py_wall,py_walloffset)
+  if (allocated(py_wall)) deallocate(py_wall,py_walloffset,py_wall_forces)
   allocate(py_walloffset(nbc))
   p=1
   do g=1,nbc
@@ -273,6 +309,8 @@ subroutine py_configure(dims,counts,bcs,bcdata,blocks,connections,flow,reference
     p=p+(bcs(5,g)-bcs(4,g))*(bcs(7,g)-bcs(6,g))
   end do
   allocate(py_wall(6,p-1))
+  allocate(py_wall_forces(6,p-1))
+  py_wall_forces=0
   py_wall=0
   allocate(py_surface(10,nbc))
   py_surface=0; py_force_zone=0
@@ -280,6 +318,7 @@ subroutine py_configure(dims,counts,bcs,bcdata,blocks,connections,flow,reference
   py_dims=dims; py_counts=counts; py_bc=bcs; py_bcdata=bcdata
   py_blocks=blocks; py_connections=connections; py_stages=stages
   py_flow=flow; py_reference=reference; py_time=time_control
+  py_force_angles=flow(2:3)*(acos(-1.d0)/180.d0); py_force_angle_valid=0
   py_run=run_control; py_mg=mg; py_keywords=keywords
   py_smoothing=smoothing; py_final_alpha=flow(2)
   py_scheme=scheme; py_flux=flux; py_rkap=rkap

@@ -1,6 +1,6 @@
-# CFL3D Python/MPI 第六轮检查点（字典配置与 I/O）— 2026-10-15
+# CFL3D Python/MPI 第七轮检查点（升力分布与截面 Cp）— 2026-10-15
 
-最新字典配置及 I/O 接口和验证见文末“第六轮”；前面保留此前各轮记录。
+最新升力分布及截面 Cp 接口和验证见文末“第七轮”；前面保留此前各轮记录。
 
 本轮在 `CFL3D/` 修改；旧的 `CFL3D-f2py-CGNS-source/` 保留作为参考。
 MPI 已通过下述内存网格验收；本轮又补齐 CGNS/ADF 文件入口的串行和 MPI 验收。
@@ -282,3 +282,49 @@ IBLANK 和所有记录大小一致。测试实现为 tests/python/validate_plot3
 三进程 Valgrind 的新 I/O / 壁面缓存 / 补写测试各 rank 零错误，未检查泄漏。
 既有六算例的真实 ADF / 定升 / 自定义阶段 / 分组积分 MPI 回归也再次通过，
 记录位于 build/mpi-io-regression/；原生负体积 MPI_Abort 返回 255，没有超时。
+
+
+## 第七轮：升力分布与截面 Cp
+
+CFL3D 对象新增 addLiftDistribution(nSegments, direction, groupName=None)、
+addSlices(direction, positions, sliceType="relative", groupName=None)，
+getLiftDistribution(index=0)、getSlices(index=None)、clearSurfaceAnalysis()，
+以及 nLiftDist / nSlice 计数。可在 solve 前或后注册，支持 CGNS 与自定义去重集合。
+
+- 原生 force.F 保存每个 wall 面单元的压力/黏性积分载荷，以及实际力积分时的 alpha/beta。
+  结果通过独立 f2py getter 返回；MPI 按面所有者汇总，并从有效计算进程广播力积分角度。
+  API 升到 5，当前环境已重建 GNU debug 串行和 MPI 扩展。
+- 升力分布按三角裁剪面积守恒分配原生逐面载荷，提供条带 CL/CD/CDp/CDv，
+  对应 dC/ds [1/m]；设置自由来流静压时另提供 dL/ds、dD/ds、dDp/ds、dDv/ds [N/m]。
+  定升最后一次反馈更新后的 final_alpha 不用于重新投影已积分载荷。
+- positions 对 relative / absolute 均为输入网格轴上的实际坐标 [m]。
+  relative 保存注册时的三角面交点重心坐标，后续网格变化时追踪材料位置；
+  absolute 每次重新与固定平面求交。当前用于稳态计算之间的几何变化，不涉及非定常移动网格求解。
+- 截面返回连接线段及面中心 Cp/T/Cf/y+，合并共形块的重合端点和重复线段。
+  与平面共面的面不产生线段；无交点时返回空数组；沿共享边时面积加权取相邻面值。
+  尚未实现非匹配表面或 overset zipper。
+- writeTecplotSurfaceSolution() 在主壁面文件旁写 *_lift.dat / *_slices.dat。
+  自动开关关闭时仍可注册、查询与补写，MPI 可仅 root 注册和输出，无额外 collective。
+
+验证：37 项单元测试中 34 项通过，3 项可选 HDF5 测试因没有 h5py 跳过。
+新增 7 项测试覆盖梯形面解析分布、翘曲面原生载荷守恒、共形跨块截线、共享边去重、
+拓扑检查、定升积分角度、原生面中心 Cp、SI 换算、relative/absolute 网格平移追踪、
+自动/延迟输出、三维 i/j/k 壁面、y-up 与非零侧滑角。
+真实 CGNS/ADF 的 2/3 进程及两个独立二进程通信器中，逐面载荷、流场、历史、
+分布、截面均与串行逐元素一致，主表面及两个分析 Tecplot 文件逐字节一致。
+三进程 Valgrind 使用 3 个条带以降低几何后处理开销，各 rank 零错误；未检查泄漏。
+完整 37 条带的 Valgrind 曾超过 90 秒时限，未将该超时作业计为通过。
+
+```bash
+python -m unittest discover -s tests/python -v
+PYTHONPATH=python:tests/python mpirun -np 2 python tests/python/validate_solution_io_mpi.py --directory build/mpi-slices-validation
+PYTHONPATH=python:tests/python mpirun -np 3 python tests/python/validate_solution_io_mpi.py --directory build/mpi-slices-validation
+PYTHONPATH=python:tests/python mpirun -np 4 python tests/python/validate_solution_io_mpi.py --split --directory build/mpi-slices-validation
+# Valgrind 需使用真实 Python 可执行文件，不要传 pyenv shell shim。
+# python_executable 应替换为当前解释器的 sys.executable。
+OPENBLAS_NUM_THREADS=1 PYTHONPATH=python:tests/python mpirun -np 3 valgrind --leak-check=no --error-exitcode=97 python_executable tests/python/validate_solution_io_mpi.py --segments 3 --directory build/mpi-slices-small-memcheck
+```
+
+本轮日志在 build/mpi-slices-validation/logs/，测试源为 tests/python/test_surface_analysis.py
+和 tests/python/validate_solution_io_mpi.py。使用方法与单位见 README.md 和 docs/python-wrapper.md。
+本轮未下载依赖；没有新增 commit。

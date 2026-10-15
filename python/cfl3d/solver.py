@@ -258,6 +258,8 @@ class SolverResult:
     surface_coefficients: dict[tuple[str, str], np.ndarray] = field(default_factory=dict)
     wall_fields: dict[tuple[str, str], np.ndarray] = field(default_factory=dict)  # Cp,T[K],Cfx,Cfy,Cfz,y+
 
+    wall_forces: dict[tuple[str, str], np.ndarray] = field(default_factory=dict)  # pressure XYZ, viscous XYZ / (q_inf*Sref)
+
     @property
     def coefficients(self):
         if not len(self.history):
@@ -292,6 +294,9 @@ class CFL3D:
         self.comm = comm
         self._last_result = None
         self._group_definitions = {}
+        self._lift_distributions = []
+        self._slice_requests = []
+        self._surface_analysis_mesh = None
         if comm is not None:
             from mpi4py import MPI
             if comm == MPI.COMM_NULL or comm.Is_inter() or comm.Get_size() < 2:
@@ -356,9 +361,21 @@ class CFL3D:
         if self.comm is not None and self.comm.Get_rank() != 0:
             return None
         path = self._output_path(filename, self._last_options.surface_filename if self._last_result else "surface.dat")
-        from .solution_io import write_surface
+        from .solution_io import write_surface, write_lift_distributions, write_slices
         members = self._group_members(groupName)
+        # Validate registered analyses before writing any files. Each request uses its own group.
+        distributions = [self.getLiftDistribution(i) for i in range(self.nLiftDist)]
+        slices = self.getSlices()
+        companions = {}
+        for label, data in (("lift", distributions), ("slices", slices)):
+            if data:
+                companions[label] = self._output_path(path.with_name(
+                    path.stem+"_"+label+(path.suffix or ".dat")), "")
         write_surface(path, self._last_mesh, self._last_wall_fields, members)
+        if distributions:
+            write_lift_distributions(companions["lift"], distributions)
+        if slices:
+            write_slices(companions["slices"], slices)
         return path
 
     def writeFlowSolution(self, prefix=None):
@@ -452,6 +469,155 @@ class CFL3D:
         else:
             raise ValueError(f"Unknown surface group {groupName!r}; inspect getGroupNames()")
         return members
+
+    @property
+    def nLiftDist(self):
+        return len(self._lift_distributions)
+
+    @property
+    def nSlice(self):
+        return len(self._slice_requests)
+
+    def _analysis_surface(self, require_solution=False):
+        from .surface_analysis import SurfaceMesh
+        if require_solution and self._last_result is None:
+            raise RuntimeError("Call solve() successfully before querying surface analysis")
+        if self._last_result is not None:
+            if self._surface_analysis_mesh is None:
+                self._surface_analysis_mesh = SurfaceMesh(
+                    self._last_mesh, self._last_wall_fields, self._last_wall_forces)
+            return self._surface_analysis_mesh
+        # Before solve, only geometry is needed to attach relative cuts to material faces.
+        walls = {}
+        for zone in self.mesh.zones:
+            for boundary in zone.boundaries:
+                key = zone.name, boundary.name
+                code = self.boundary_overrides.get(key, _BC_TYPES.get(boundary.bc_type, (0, ())))[0]
+                if abs(code) in (1005,1006,2004,2014,2024,2034,2016):
+                    ranges = np.sort(boundary.point_range, axis=1)
+                    counts = ranges[:,1]-ranges[:,0]
+                    walls[key] = np.zeros((*counts[counts > 0], 6))
+        return SurfaceMesh(self.mesh, walls, sref=self.options.sref)
+
+    def _analysis_members(self, groupName, surface):
+        if self._last_result is not None:
+            members = self._group_members(groupName)
+        else:
+            base = self._cgns_surface_groups()
+            if groupName is None:
+                members = set(surface.patches)
+            elif isinstance(groupName, str) and groupName in base:
+                members = base[groupName]
+            elif isinstance(groupName, str) and groupName in self._group_definitions:
+                members = set().union(*(base[name] for name in self._group_definitions[groupName]))
+            else:
+                raise ValueError(f"Unknown surface group {groupName!r}; inspect getGroupNames()")
+        members = frozenset(members) & surface.patches.keys()
+        surface.selected(members)  # Reject groups with no walls before registering requests.
+        return frozenset(members)
+
+    def addLiftDistribution(self, nSegments, direction, groupName=None):
+        """Register conservative strip loads along x/y/z (typically 150-250 strips).
+
+        None selects all walls; CGNS names and custom groups are supported.
+        Output accompanies writeTecplotSurfaceSolution(); query with getLiftDistribution().
+        """
+        from .surface_analysis import direction_index
+        _integer(nSegments, "nSegments", 1)
+        axis = direction_index(direction)
+        surface = self._analysis_surface()
+        members = self._analysis_members(groupName, surface)
+        lo, hi = surface.bounds(members)
+        if hi[axis]-lo[axis] <= surface.tolerance(members):
+            raise ValueError("Selected walls have zero extent in the distribution direction")
+        name = f"LiftDist_{self.nLiftDist+1:02d} {groupName or 'AllWalls'}: {direction.lower()} normal"
+        self._lift_distributions.append(dict(nSegments=nSegments, direction=direction.lower(),
+                                             groupName=groupName, name=name))
+        return name
+
+    def addSlices(self, direction, positions, sliceType="relative", groupName=None):
+        """Register Cp sections at axis positions in metres, before or after solve().
+
+        Relative cuts attach to the current surface triangles and follow subsequent
+        geometry changes. Absolute cuts intersect the fixed plane on every output.
+        Both return face-centered Cp/T/Cf/y+ and connected line segments.
+        """
+        from .surface_analysis import direction_index, slice_references
+        axis = direction_index(direction)
+        if not isinstance(sliceType, str) or sliceType.lower() not in ("relative", "absolute"):
+            raise ValueError("sliceType must be 'relative' or 'absolute'")
+        sliceType = sliceType.lower()
+        positions = np.asarray(positions)
+        if positions.dtype.kind not in "iuf" or positions.ndim > 1 or not positions.size:
+            raise ValueError("positions must be a finite scalar or nonempty 1D array in metres")
+        positions = np.atleast_1d(positions).astype(float)
+        if not np.isfinite(positions).all():
+            raise ValueError("positions must be finite")
+        surface = self._analysis_surface()
+        members = self._analysis_members(groupName, surface)
+        requests = []
+        for i, position in enumerate(positions):
+            name = (f"Slice_{self.nSlice+i+1:04d} {groupName or 'AllWalls'} "
+                    f"{sliceType.capitalize()} {direction.lower()} = {position:.8f}")
+            references = slice_references(surface, members, axis, position) if sliceType == "relative" else None
+            requests.append(dict(name=name, direction=direction.lower(), position=float(position),
+                                 sliceType=sliceType, groupName=groupName,
+                                 references=references, members=members))
+        self._slice_requests.extend(requests)
+        return [request["name"] for request in requests]
+
+    def getLiftDistribution(self, index=0):
+        """Return strip coefficients and dCL/ds, dCD/ds, dCDp/ds, dCDv/ds [1/m].
+
+        With freestream_pressure, also return dL/ds, dD/ds, dDp/ds, dDv/ds [N/m].
+        Coefficients use the global reference area, without local chord normalization.
+        This query is local and does not call MPI or the native solver.
+        """
+        from .surface_analysis import direction_index, lift_distribution
+        surface = self._analysis_surface(require_solution=True)
+        _integer(index, "index", 0)
+        if index >= self.nLiftDist:
+            raise ValueError("Lift distribution index is out of range; call addLiftDistribution()")
+        request = self._lift_distributions[index]
+        members = self._analysis_members(request["groupName"], surface)
+        options = self._last_options
+        scale = (None if options.freestream_pressure is None else
+                 .5*options.gamma*options.freestream_pressure*options.mach**2*options.sref)
+        data = lift_distribution(surface, members, request["nSegments"],
+                                 direction_index(request["direction"]), self._last_force_angles,
+                                 options.y_up, scale)
+        return {**request, **data, "force_angles": np.rad2deg(self._last_force_angles).copy()}
+
+    def getSlices(self, index=None):
+        """Return all registered cuts as a list, or one cut dictionary by index.
+
+        points/coordinates are metres, segments are zero-based point indices;
+        Cp/T/Cf/y+ are segment-centered. Nonintersecting cuts return empty arrays.
+        """
+        from .surface_analysis import direction_index, slice_references, evaluate_slice
+        surface = self._analysis_surface(require_solution=True)
+        if index is not None:
+            _integer(index, "index", 0)
+            if index >= self.nSlice:
+                raise ValueError("Slice index is out of range; call addSlices()")
+        result = []
+        for request in (self._slice_requests if index is None else [self._slice_requests[index]]):
+            members = self._analysis_members(request["groupName"], surface)
+            axis = direction_index(request["direction"])
+            absolute = request["sliceType"] == "absolute"
+            if not absolute and members != request["members"]:
+                raise ValueError("Relative slice wall membership changed; clear and register slices again")
+            references = (slice_references(surface, members, axis, request["position"])
+                          if absolute else request["references"])
+            data = evaluate_slice(surface, members, references, axis, request["position"], absolute)
+            metadata = {key: value for key, value in request.items() if key not in ("references", "members")}
+            result.append({**metadata, **data})
+        return result if index is None else result[0]
+
+    def clearSurfaceAnalysis(self):
+        """Remove registered distributions and cuts (e.g. before changing mesh topology)."""
+        self._lift_distributions.clear()
+        self._slice_requests.clear()
 
     def _checked(self, operation):
         """Agree on Python-side failures before entering the native collectives."""
@@ -618,6 +784,7 @@ class CFL3D:
 
     def solve(self, *, output_directory=None):
         self._last_result = None  # Failed solves must not expose an older run's loads.
+        self._surface_analysis_mesh = None
         arrays, xyz = self._checked(self._arrays)
         base_groups = self._checked(self._cgns_surface_groups)
         def native_module():
@@ -630,7 +797,7 @@ class CFL3D:
                                    + (" --mpi" if self.comm is not None else "")) from exc
             if bool(module.py_build_info()) != (self.comm is not None):
                 raise RuntimeError("Native extension MPI mode does not match the solver")
-            if getattr(module, "py_api_version", lambda: 0)() != 4:
+            if getattr(module, "py_api_version", lambda: 0)() != 5:
                 raise RuntimeError("Native interface changed; rebuild with python tools/build_python.py"
                                    + (" --mpi" if self.comm is not None else "") + " and restart Python")
             return module
@@ -676,6 +843,9 @@ class CFL3D:
             surface_values = _native.py_get_surface_coefficients(arrays["bcs"].shape[1])
             wall_counts = (arrays["bcs"][4]-arrays["bcs"][3])*(arrays["bcs"][6]-arrays["bcs"][5])
             wall_values = _native.py_get_wall_data(int(wall_counts.sum()))
+            wall_force_values = _native.py_get_wall_forces(int(wall_counts.sum()))
+            # CL control can update final_alpha after force evaluation: use the force-time angles.
+            force_angles = _native.py_get_force_angles()
         finally:
             os.chdir(old_directory)
             if native_comm is not None:
@@ -694,21 +864,25 @@ class CFL3D:
             offset += count
         if (not np.isfinite(q).all() or not np.isfinite(history).all()
                 or not np.isfinite(final_alpha) or not np.isfinite(surface_values).all()
-                or not np.isfinite(wall_values).all()):
+                or not np.isfinite(wall_values).all() or not np.isfinite(wall_force_values).all()
+                or not np.isfinite(force_angles).all()):
             raise RuntimeError("CFL3D returned nonfinite solution/history")
         surfaces = {key: surface_values[:, index].copy()
                     for index, key in enumerate(self._surface_keys) if key is not None}
-        walls = {}; offset = 0
+        walls = {}; wall_forces = {}; offset = 0
         for index, key in enumerate(self._surface_keys):
             count = int(wall_counts[index])
             if key is not None and abs(int(arrays["bcs"][2,index])) in (1005,1006,2004,2014,2024,2034,2016):
                 shape = (int(arrays["bcs"][4,index]-arrays["bcs"][3,index]),
                          int(arrays["bcs"][6,index]-arrays["bcs"][5,index]), 6)
                 walls[key] = wall_values[:,offset:offset+count].T.reshape(shape, order="F").copy()
+                wall_forces[key] = wall_force_values[:,offset:offset+count].T.reshape(shape, order="F").copy()
             offset += count
-        result = SolverResult(fields, history, output_directory, final_alpha, surfaces, walls)
+        result = SolverResult(fields, history, output_directory, final_alpha, surfaces, walls, wall_forces)
         self._last_surface_coefficients = {key: value.copy() for key, value in surfaces.items()}
         self._last_wall_fields = {key: value.copy() for key, value in walls.items()}
+        self._last_wall_forces = {key: value.copy() for key, value in wall_forces.items()}
+        self._last_force_angles = np.array(force_angles, copy=True)
         self._last_fields = {name: value.copy() for name, value in fields.items()}
         self._last_mesh = deepcopy(self.mesh)
         self._last_final_alpha, self._last_output_directory = final_alpha, output_directory

@@ -194,3 +194,36 @@ def write_flow(prefix, mesh, fields, options, final_alpha):
                 _record(qfile, [options.mach,final_alpha,options.reynolds,0.0], np.float64)
                 _record(qfile, conservative, np.float64)
     return x_path, q_path
+
+
+def write_lift_distributions(path, distributions):
+    """Tecplot ordered zones: conservative coefficient densities and optional SI loads."""
+    columns = ("stations", "width", "dCL_ds", "dCD_ds", "dCDp_ds", "dCDv_ds")
+    labels = ("Station [m]", "Width [m]", "dCL/ds [1/m]", "dCD/ds [1/m]",
+              "dCDp/ds [1/m]", "dCDv/ds [1/m]")
+    if distributions and "dL_ds" in distributions[0]:
+        columns += ("dL_ds", "dD_ds", "dDp_ds", "dDv_ds")
+        labels += ("dL/ds [N/m]", "dD/ds [N/m]", "dDp/ds [N/m]", "dDv/ds [N/m]")
+    with _temporary_output(path) as temporary, temporary.open("w", encoding="utf-8") as stream:
+        stream.write('TITLE = "CFL3D strip loads"\nVARIABLES = '+', '.join(map(json.dumps, labels))+'\n')
+        for data in distributions:
+            stream.write(f'ZONE T={json.dumps(data["name"])}, I={len(data["stations"])}, DATAPACKING=POINT\n')
+            np.savetxt(stream, np.column_stack([data[name] for name in columns]), fmt="%.16e")
+
+
+def write_slices(path, slices):
+    """Tecplot connected section lines; Cp/T/Cf/y+ retain face-centered values."""
+    from .surface_analysis import WALL_VARIABLES
+    with _temporary_output(path) as temporary, temporary.open("w", encoding="utf-8") as stream:
+        stream.write('TITLE = "CFL3D wall sections"\n')
+        stream.write('VARIABLES = "X", "Y", "Z", "Cp", "T", "Cfx", "Cfy", "Cfz", "y+"\n')
+        for data in slices:
+            if not len(data["segments"]):
+                continue
+            stream.write(f'ZONE T={json.dumps(data["name"])}, N={len(data["points"])}, E={len(data["segments"])}, '
+                         'ZONETYPE=FELINESEG, DATAPACKING=BLOCK, VARLOCATION=([4-9]=CELLCENTERED)\n')
+            for column in range(3):
+                np.savetxt(stream, data["points"][:,column], fmt="%.16e")
+            for name in WALL_VARIABLES:
+                np.savetxt(stream, data[name], fmt="%.16e")
+            np.savetxt(stream, data["segments"]+1, fmt="%d")

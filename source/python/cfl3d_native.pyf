@@ -1,5 +1,8 @@
 python module _native
     interface
+        subroutine py_get_force_angles(angles)
+            real(kind=8) dimension(2),intent(out) :: angles
+        end subroutine py_get_force_angles
         subroutine py_set_output_flags(write_restart)
             integer intent(in) :: write_restart
         end subroutine py_set_output_flags
@@ -7,6 +10,10 @@ python module _native
             real(kind=8) dimension(6,ncells),intent(out),depend(ncells) :: values
             integer intent(in) :: ncells
         end subroutine py_get_wall_data
+        subroutine py_get_wall_forces(values,ncells)
+            real(kind=8) dimension(6,ncells),intent(out),depend(ncells) :: values
+            integer intent(in) :: ncells
+        end subroutine py_get_wall_forces
         subroutine py_api_version(version)
             integer intent(out) :: version
         end subroutine py_api_version

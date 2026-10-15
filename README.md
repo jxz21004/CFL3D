@@ -5,7 +5,7 @@
 收敛历史及按部件积分的气动力。支持串行和原生主控/计算进程 MPI 路径。
 Python 求解不依赖 `.inp` 模板，也不把 CGNS 网格转换为 PLOT3D。
 
-当前 Python 包版本为 `0.1.0`，原生接口版本为 **4**。
+当前 Python 包版本为 `0.1.0`，原生接口版本为 **5**。
 完整参数说明见 [Python 接口文档](docs/python-wrapper.md)，
 各轮验证结果见 [MPI_PROGRESS.md](MPI_PROGRESS.md)，
 原始 CFL3D 文档见 [NASA CFL3D](https://nasa.github.io/CFL3D/)。
@@ -81,7 +81,7 @@ python -c "from cfl3d import CFL3D, SolverOptions, _native; print('native API:',
 python -c "from cfl3d._cgns_native import library; print('CGNS has HDF5:', library().has_hdf5)"
 ```
 
-第一条应输出接口版本 `4`。第二条输出 `False` 时仍可正常读取 CGNS/ADF；
+第一条应输出接口版本 `5`。第二条输出 `False` 时仍可正常读取 CGNS/ADF；
 若要读取 HDF5，需使用支持 HDF5 的 CGNS 库或可选 h5py。
 
 ## 3. 输入网格与量纲
@@ -288,6 +288,59 @@ PLOT3D `.x/.q` 使用原生端序、32 位 Fortran 记录标记、64 位实数�
 `.x` 为单元中心坐标，`.q` 为守恒量。三维是五分量，二维是 x-z（y-up 为 x-y）平面的四分量。
 当前不支持网格点 IPTYPE=0 输出；缓存补写不重新进入求解内核。
 
+### 升力分布与截面 Cp
+
+在 `solve()` 前注册，可随表面结果自动输出；也可在计算结束后注册并补写：
+
+```python
+solver = CFL3D(options=options, groups={"Aircraft": ["Wing", "Tail"]})
+solver.addLiftDistribution(200, "y", groupName="Wing")
+solver.addSlices("y", [-3.0, -1.5, 1.5, 3.0], sliceType="absolute", groupName="Wing")
+# relative 同样输入实际坐标（m），截线绑定注册时的面单元，随后跟随网格变化。
+solver.addSlices("y", [1.5], sliceType="relative", groupName="Wing")
+result = solver.solve()
+
+lift = solver.getLiftDistribution(0)  # 第一个分布；索引从 0 开始
+print(lift["stations"], lift["dCL_ds"], lift["dCDp_ds"], lift["dCDv_ds"])
+print("CL from strips:", (lift["dCL_ds"] * lift["width"]).sum())
+print("CL from wall forces:", solver.getSolution("Wing")["CL"])
+sections = solver.getSlices()        # 列表；getSlices(0) 返回单个截面字典
+print(sections[0]["coordinates"], sections[0]["Cp"])
+solver.writeTecplotSurfaceSolution() # 自动输出关闭时也可补写
+```
+
+`direction` 为输入网格的 `x/y/z`，`groupName=None` 选择全部 wall 边界；支持 CGNS 名称和
+自定义集合，重叠表面只计一次。`nSegments` 为正整数，通常可取 150–250。
+上例假定 CGNS 中存在 `Wing/Tail`；截面位置须替换为实际网格的坐标。
+
+| 查询结果 | 含义 / 单位 |
+| --- | --- |
+| `edges`, `stations`, `width` | 等宽条带边界、中点、宽度，m |
+| `bin_CL/CD/CDp/CDv` | 每个条带的积分系数；求和等于该 wall 分组的总系数 |
+| `dCL_ds/dCD_ds/dCDp_ds/dCDv_ds` | 单位长度的积分系数，1/m，使用全局 `sref` |
+| `dL_ds/dD_ds/dDp_ds/dDv_ds` | 单位长度的力，N/m；仅设置 `freestream_pressure` 时提供 |
+| 截面 `points`, `segments` | 截线顶点坐标（m），及从 0 开始的两端点连接索引 |
+| 截面 `coordinates`, `Cp`, `T`, `Cfx/Cfy/Cfz`, `y+` | 线段中点（m）及面中心流动量，T 为 K |
+
+升力分布将原生逐面载荷按几何交叠面积守恒分配到条带，包含压力和黏性贡献。
+这里的 `dCL_ds` 不是按局部弦长归一化的二维翼型 `cl`。
+定升计算使用实际力积分时的迎角；该角度（度）记录在 `force_angles`，可能与
+`result.final_alpha` 不同。
+
+以 `surface.dat` 为表面文件名时，已注册的分析分别写入 `surface_lift.dat` 和
+`surface_slices.dat`，每个请求一个 Tecplot zone；无交点的截面不写 zone。
+补写 `wing.dat` 则生成 `wing_lift.dat` / `wing_slices.dat`。
+`writeTecplotSurfaceSolution(groupName=...)` 只筛选主壁面文件；分析使用各自注册的分组。
+分析文件随 `writeTecplotSurfaceSolution` 开关一起控制，也可由上述补写方法重新生成。
+MPI 注册、查询、补写均无需集体通信，可仅在 rank 0 调用；`solve()` 仍须所有 rank 参与。
+
+`relative` 追踪注册时的三角面交点，`absolute` 每次按固定平面重新截取；两者的位置都以 m
+输入，不是展向比例。拓扑改变后须先 `clearSurfaceAnalysis()` 再重新注册。
+当前支持稳态计算间的几何变化追踪，尚未接入原生非定常移动网格。
+共形块交界处合并重合端点和重复线段；未实现 overset zipper 或非匹配表面的补缝。
+Cp 保留面中心值，截线恰好沿共享边时使用相邻面的面积加权值；与平面完全共面的壁面
+不生成截线。`clearSurfaceAnalysis()` 清除全部请求，`nLiftDist/nSlice` 返回已注册数量。
+
 ## 8. 定升与数值参数
 
 options 字典在构造时复制并校验，之后修改原字典不会改变已有 solver。
@@ -343,11 +396,13 @@ CFL3D_VALIDATION_DIRECTORY=build/mpi-forces-validation bash tools/validate_mpi.s
 
 MPI 回归脚本需要 `bash`、`timeout`、`rg`；若检测到 Valgrind，会额外检查非法访问和未初始化值，
 不进行泄漏扫描。测试自己生成真实 ADF 文件，不需要用户提供网格。
-当前版本已通过 27 项单元测试，3 项可选 HDF5 测试因环境无 h5py 跳过；
+当前版本包含 37 项单元测试，其中 3 项可选 HDF5 测试因环境无 h5py 跳过；
 ADF 串行、2/3 进程、两个独立子通信器的比较项与串行基准一致。
 分组与 I/O 测试覆盖 CDp/CDv、集合去重、有量纲换算、三维力矩中心、壁面 y+、恒温壁面、三个索引方向的壁面、y-up 旋转和延迟输出。
 新增标准模板也已使用双块 CGNS/ADF 网格完成串行与三进程运行，覆盖定升、多重网格和
 分组载荷输出；保存的流场、历史、最终攻角和逐边界积分逐项一致。
+升力分布与截面回归另覆盖梯形面解析分布、逐面载荷守恒、跨块截线、相对/绝对截面、
+三维 i/j/k 壁面、y-up 和侧滑角，以及 MPI 延迟输出。
 这是接口一致性与短程计算验证，尚无生产规模或长期收敛保证。
 
 Python 接口目前支持稳态、实数、结构网格、一对一多块连接和多重网格。

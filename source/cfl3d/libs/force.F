@@ -41,7 +41,7 @@ c
 #   endif
 c
 #ifdef PYTHON_API
-      real py_before(10),py_after(10),py_cf(3)
+      real py_before(10),py_after(10),py_cf(3),py_viscous(3)
 #endif
       dimension ub(jdim,kdim,idim),vb(jdim,kdim,idim),wb(jdim,kdim,idim)
       dimension vmuk(jdim-1,idim-1,2),vol(jdim,kdim,idim-1),
@@ -196,7 +196,7 @@ c     pressure drag
 c
       dcdvl = 0.
 #ifdef PYTHON_API
-      py_cf=0.
+      py_cf=0.; py_viscous=0.
 #endif
       if (ivisc(3).gt.0 .and. (abs(kbcinfo(nbl,ns,1,kk)).eq.2004 .or.
      .    abs(kbcinfo(nbl,ns,1,kk)).eq.2014 .or.
@@ -223,6 +223,7 @@ c
 c        viscous drag
          dcdvl  = dcx*cosa*cosb-dcy*sinb+dcz*sina*cosb
 #ifdef PYTHON_API
+         py_viscous=(/dcx,dcy,dcz/)
          if (sk(j,k,i,4).gt.0.) py_cf=(/dcx,dcy,dcz/)/sk(j,k,i,4)
 #endif
          dcx = dcxp + dcx
@@ -244,7 +245,8 @@ c
       call py_record_wall(4+kk,ns,i,j,
      .     qk0(j,i,5,kk+kk-1),
      .     qk0(j,i,1,kk+kk-1),py_cf*fact,
-     .     sk(j,k,i,4),vol(j,kc,i),cbar,ialph)
+     .     sk(j,k,i,4),vol(j,kc,i),cbar,ialph,
+     .     (/dcx,dcy,dcz/),py_viscous*fact)
 #endif
 c
       swetl = swetl+dsw
@@ -282,7 +284,7 @@ c
 #ifdef PYTHON_API
       py_after = (/cl,cd,cx,cy,cz,cmx,cmy,cmz,cdp,cdv/)
       call py_record_surface(4+kk,ns,py_after-py_before,
-     .                       i2d,ialph)
+     .                       i2d,ialph,alpha,beta)
 #endif
       end if
     5 continue
@@ -348,7 +350,7 @@ c     pressure drag
 c
       dcdvl = 0.
 #ifdef PYTHON_API
-      py_cf=0.
+      py_cf=0.; py_viscous=0.
 #endif
       if (ivisc(2).gt.0 .and. (abs(jbcinfo(nbl,ns,1,jj)).eq.2004 .or.
      .    abs(jbcinfo(nbl,ns,1,jj)).eq.2014 .or.
@@ -375,6 +377,7 @@ c
 c        viscous drag
          dcdvl  = dcx*cosa*cosb-dcy*sinb+dcz*sina*cosb
 #ifdef PYTHON_API
+         py_viscous=(/dcx,dcy,dcz/)
          if (sj(j,k,i,4).gt.0.) py_cf=(/dcx,dcy,dcz/)/sj(j,k,i,4)
 #endif
          dcx = dcxp + dcx
@@ -396,7 +399,8 @@ c
       call py_record_wall(2+jj,ns,i,k,
      .     qj0(k,i,5,jj+jj-1),
      .     qj0(k,i,1,jj+jj-1),py_cf*fact,
-     .     sj(j,k,i,4),vol(jc,k,i),cbar,ialph)
+     .     sj(j,k,i,4),vol(jc,k,i),cbar,ialph,
+     .     (/dcx,dcy,dcz/),py_viscous*fact)
 #endif
 c
       swetl = swetl+dsw
@@ -435,7 +439,7 @@ c
 #ifdef PYTHON_API
       py_after = (/cl,cd,cx,cy,cz,cmx,cmy,cmz,cdp,cdv/)
       call py_record_surface(2+jj,ns,py_after-py_before,
-     .                       i2d,ialph)
+     .                       i2d,ialph,alpha,beta)
 #endif
       end if
    35 continue
@@ -500,7 +504,7 @@ c     pressure drag
 c
       dcdvl = 0.
 #ifdef PYTHON_API
-      py_cf=0.
+      py_cf=0.; py_viscous=0.
 #endif
       if (ivisc(1).gt.0 .and. (abs(ibcinfo(nbl,ns,1,ii)).eq.2004 .or.
      .    abs(ibcinfo(nbl,ns,1,ii)).eq.2014 .or.
@@ -527,6 +531,7 @@ c
 c        viscous drag
          dcdvl  = dcx*cosa*cosb-dcy*sinb+dcz*sina*cosb
 #ifdef PYTHON_API
+         py_viscous=(/dcx,dcy,dcz/)
          if (si(j,k,i,4).gt.0.) py_cf=(/dcx,dcy,dcz/)/si(j,k,i,4)
 #endif
          dcx = dcxp + dcx
@@ -548,7 +553,8 @@ c
       call py_record_wall(ii,ns,j,k,
      .     qi0(j,k,5,ii+ii-1),
      .     qi0(j,k,1,ii+ii-1),py_cf*fact,
-     .     si(j,k,i,4),vol(j,k,ic),cbar,ialph)
+     .     si(j,k,i,4),vol(j,k,ic),cbar,ialph,
+     .     (/dcx,dcy,dcz/),py_viscous*fact)
 #endif
 c
       swetl = swetl+dsw
@@ -586,7 +592,7 @@ c
 #ifdef PYTHON_API
       py_after = (/cl,cd,cx,cy,cz,cmx,cmy,cmz,cdp,cdv/)
       call py_record_surface(0+ii,ns,py_after-py_before,
-     .                       i2d,ialph)
+     .                       i2d,ialph,alpha,beta)
 #endif
       end if
    65 continue
