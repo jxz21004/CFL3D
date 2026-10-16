@@ -25,7 +25,7 @@ def main():
                    if (prefix / d / "libcgns.so").exists()), None)
     if libdir is None:
         parser.error("A shared libcgns.so installation is required")
-    target = ROOT / "python/cfl3d/_cgns_bridge.so"
+    target = ROOT / "cfl3d/_cgns_bridge.so"
     # Atomic installation leaves libraries loaded by other processes intact.
     with tempfile.TemporaryDirectory(dir=target.parent) as directory:
         output = Path(directory) / target.name

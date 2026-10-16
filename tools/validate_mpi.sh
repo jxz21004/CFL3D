@@ -2,7 +2,7 @@
 # Load the desired Python/Intel MPI environment before invoking this script.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-export PYTHONPATH="$PWD/python:$PWD/tests/python${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONPATH="$PWD:$PWD/tests/python${PYTHONPATH:+:$PYTHONPATH}"
 export I_MPI_FABRICS="${I_MPI_FABRICS:-shm}"
 mpi_python=$(python -c 'import sys; print(sys.executable)')
 validation_root="${CFL3D_VALIDATION_DIRECTORY:-build/mpi-validation}"

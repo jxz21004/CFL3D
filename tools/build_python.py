@@ -111,7 +111,7 @@ def main():
                 shim_objects.append(compile_file(source))
         extension = build / (module + sysconfig.get_config_var("EXT_SUFFIX"))
         subprocess.run([args.fc, "-shared", "-o", str(extension), *map(str, shim_objects), str(archive)], check=True)
-    target = ROOT / "python/cfl3d" / extension.name
+    target = ROOT / "cfl3d" / extension.name
     shutil.copy2(extension, target)
     print(f"Built {target}")
 

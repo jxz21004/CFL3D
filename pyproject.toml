@@ -16,4 +16,6 @@ mpi = ["mpi4py>=4.0"]
 hdf5 = ["h5py>=3.8"]
 
 [tool.setuptools.packages.find]
-where = ["python"]
+where = ["."]
+include = ["cfl3d", "cfl3d.*"]
+namespaces = false

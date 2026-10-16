@@ -29,12 +29,12 @@ python tools/build_cgns.py
 MPI 默认使用 `mpif90`。`--compiler-family intel` 提供 Intel 编译参数并默认选择
 `ifort`/`mpiifort`，已通过本轮构建和 MPI 回归。
 两类编译器均以统一的 8 字节 REAL 编译求解器。
-构建输出安装到 `python/cfl3d/_native.<ABI>.so`，无需修改原有 makefiles。
+构建输出安装到 `cfl3d/_native.<ABI>.so`，无需修改原有 makefiles。
 `--debug` 开启调试符号和新接口的数组边界检查；旧 Fortran 内核有合法的跨维展开访问，
 不能整体启用 `-fcheck=bounds`。
 
 `pip install` 安装 Python 包和依赖；共享库需要执行上述单独的构建命令。
-已有依赖时可以直接设置 `PYTHONPATH=python:tests/python` 在源码目录测试。
+已有依赖时可以直接设置 `PYTHONPATH=.:tests/python` 在源码目录测试。
 内存网格和 CGNS/ADF 读取均不需要 h5py。`h5py` 已改为可选的 `hdf5` 依赖组。
 原生读取器需 C 编译器和已有 CGNS 头文件/共享库；`CGNS_HOME` 指向安装目录。
 当前容器可先 `source /home/mdolabuser/.bashrc_mdolab`，再执行 `python tools/build_cgns.py`。
@@ -535,11 +535,11 @@ BCDataSet 的数值数组会读出并传给现有边界检查；不支持的类�
 新增升力分布、截面 Cp、字典配置与延迟 I/O 回归：
 
 ```bash
-PYTHONPATH=python:tests/python python -m unittest test_surface_analysis test_solution_io -v
-PYTHONPATH=python:tests/python mpirun -np 3 python tests/python/validate_solution_io_mpi.py --directory build/mpi-io-validation
-PYTHONPATH=python:tests/python mpirun -np 4 python tests/python/validate_solution_io_mpi.py --split --directory build/mpi-io-validation
+PYTHONPATH=.:tests/python python -m unittest test_surface_analysis test_solution_io -v
+PYTHONPATH=.:tests/python mpirun -np 3 python tests/python/validate_solution_io_mpi.py --directory build/mpi-io-validation
+PYTHONPATH=.:tests/python mpirun -np 4 python tests/python/validate_solution_io_mpi.py --split --directory build/mpi-io-validation
 python tools/build_python.py --standalone --debug --jobs 8
-PYTHONPATH=python:tests/python python tests/python/validate_plot3d.py --directory build/mpi-io-validation/plot3d-parity
+PYTHONPATH=.:tests/python python tests/python/validate_plot3d.py --directory build/mpi-io-validation/plot3d-parity
 ```
 
 覆盖输出开关全关后的三种补写、不同 solver 的快照隔离、CGNS 流场读回、壁面温度、
@@ -548,7 +548,7 @@ Cf 再积分、y+ 定义、三维 i/j/k 壁面及 y-up、PLOT3D 原生格式一�
 分组积分回归（真实 CGNS/ADF、2/3 进程及两个独立子通信器）：
 
 ```bash
-PYTHONPATH=python:tests/python python -m unittest test_surface_forces test_cgns_native -v
+PYTHONPATH=.:tests/python python -m unittest test_surface_forces test_cgns_native -v
 CFL3D_VALIDATION_DIRECTORY=build/mpi-forces-validation bash tools/validate_mpi.sh --adf --controls --forces
 ```
 
@@ -571,7 +571,7 @@ Valgrind 检查的是自定义 MIT 和块矩阵求逆算例，不进行泄漏扫
 ```bash
 source /home/mdolabuser/.bashrc_mdolab
 python tools/build_cgns.py
-PYTHONPATH=python:tests/python python -m unittest test_cgns_native -v
+PYTHONPATH=.:tests/python python -m unittest test_cgns_native -v
 CFL3D_VALIDATION_DIRECTORY=build/cgns-validation bash tools/validate_mpi.sh --adf
 ```
 

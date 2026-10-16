@@ -10,6 +10,11 @@ Python 求解不依赖 `.inp` 模板，也不把 CGNS 网格转换为 PLOT3D。
 各轮验证结果见 [MPI_PROGRESS.md](MPI_PROGRESS.md)，
 原始 CFL3D 文档见 [NASA CFL3D](https://nasa.github.io/CFL3D/)。
 
+Python 包位于仓库根目录 `cfl3d/`，使用 flat layout；Fortran 绑定源文件仍在
+`source/python/`，测试及样例分别在 `tests/python/` 和 `examples/python/`。
+若此前已从 `python/cfl3d/` 安装 editable 包，目录迁移后重新执行下文的 editable 安装命令。
+手动配置过 `PYTHONPATH` 时，将其改为仓库根目录。
+
 ## 1. 环境要求
 
 以下流程假定已有可用的 Python 环境和相应依赖，不要求复刻开发容器。
@@ -69,7 +74,7 @@ python tools/build_python.py --compiler-family intel --fc ifort --jobs 8
 python tools/build_python.py --mpi --compiler-family intel --fc mpiifort --jobs 8
 ```
 
-构建产物写入 `python/cfl3d/`：串行 `_native`、MPI `_native_mpi` 和 `_cgns_bridge.so`。
+构建产物写入 `cfl3d/`：串行 `_native`、MPI `_native_mpi` 和 `_cgns_bridge.so`。
 `pip install` 只注册 Python 包，**不会自动编译这些库**。
 切换 Python ABI、NumPy 主版本、编译器、MPI 实现或更新原生接口后，应重新编译相关扩展并
 重启 Python 进程。调试时在求解器构建命令追加 `--debug`；并发编译数可用 `--jobs` 调整。

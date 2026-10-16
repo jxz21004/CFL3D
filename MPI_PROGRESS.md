@@ -68,7 +68,7 @@ Intel MPI 扩展与 GNU 串行的 SA 流场最大绝对差异为 `2.031e-15`，
 ```bash
 cd /CFL3d_temp/CFL3D
 source /home/mdolabuser/.bashrc_mdolab
-export PYTHONPATH="$PWD/python:$PWD/tests/python"
+export PYTHONPATH="$PWD:$PWD/tests/python"
 python tools/build_python.py --debug --jobs 8
 python tools/build_python.py --mpi --debug --jobs 8
 CFL3D_VALIDATION_DIRECTORY=build/mpi-validation-gnu bash tools/validate_mpi.sh
@@ -135,7 +135,7 @@ h5py 改为可选依赖。没有下载、安装或重编译 CGNS 库。
 ```bash
 source /home/mdolabuser/.bashrc_mdolab
 python tools/build_cgns.py
-PYTHONPATH=python:tests/python python -m unittest test_cgns_native -v
+PYTHONPATH=.:tests/python python -m unittest test_cgns_native -v
 CFL3D_VALIDATION_DIRECTORY=build/cgns-validation bash tools/validate_mpi.sh --adf
 ```
 
@@ -185,7 +185,7 @@ mit 固定通信布局和 nkey 初始化原因已在对应代码处解释。编�
 
 ```bash
 source /home/mdolabuser/.bashrc_mdolab
-export PYTHONPATH="$PWD/python:$PWD/tests/python"
+export PYTHONPATH="$PWD:$PWD/tests/python"
 python tools/build_python.py --debug --jobs 8
 python tools/build_python.py --mpi --debug --jobs 8
 python -m unittest discover -s tests/python -v
@@ -236,7 +236,7 @@ NPZ 额外保存逐边界系数和名称，原有八列 history 格式保留。
 
 ```bash
 source /home/mdolabuser/.bashrc_mdolab
-export PYTHONPATH="$PWD/python:$PWD/tests/python"
+export PYTHONPATH="$PWD:$PWD/tests/python"
 python tools/build_python.py --debug --jobs 8
 python tools/build_python.py --mpi --debug --jobs 8
 python -m unittest discover -s tests/python -v
@@ -317,14 +317,35 @@ getLiftDistribution(index=0)、getSlices(index=None)、clearSurfaceAnalysis()，
 
 ```bash
 python -m unittest discover -s tests/python -v
-PYTHONPATH=python:tests/python mpirun -np 2 python tests/python/validate_solution_io_mpi.py --directory build/mpi-slices-validation
-PYTHONPATH=python:tests/python mpirun -np 3 python tests/python/validate_solution_io_mpi.py --directory build/mpi-slices-validation
-PYTHONPATH=python:tests/python mpirun -np 4 python tests/python/validate_solution_io_mpi.py --split --directory build/mpi-slices-validation
+PYTHONPATH=.:tests/python mpirun -np 2 python tests/python/validate_solution_io_mpi.py --directory build/mpi-slices-validation
+PYTHONPATH=.:tests/python mpirun -np 3 python tests/python/validate_solution_io_mpi.py --directory build/mpi-slices-validation
+PYTHONPATH=.:tests/python mpirun -np 4 python tests/python/validate_solution_io_mpi.py --split --directory build/mpi-slices-validation
 # Valgrind 需使用真实 Python 可执行文件，不要传 pyenv shell shim。
 # python_executable 应替换为当前解释器的 sys.executable。
-OPENBLAS_NUM_THREADS=1 PYTHONPATH=python:tests/python mpirun -np 3 valgrind --leak-check=no --error-exitcode=97 python_executable tests/python/validate_solution_io_mpi.py --segments 3 --directory build/mpi-slices-small-memcheck
+OPENBLAS_NUM_THREADS=1 PYTHONPATH=.:tests/python mpirun -np 3 valgrind --leak-check=no --error-exitcode=97 python_executable tests/python/validate_solution_io_mpi.py --segments 3 --directory build/mpi-slices-small-memcheck
 ```
 
 本轮日志在 build/mpi-slices-validation/logs/，测试源为 tests/python/test_surface_analysis.py
 和 tests/python/validate_solution_io_mpi.py。使用方法与单位见 README.md 和 docs/python-wrapper.md。
 本轮未下载依赖；没有新增 commit。
+
+
+## 目录布局调整 — 2026-10-16
+
+将 Python 包从 python/cfl3d/ 迁移到仓库根目录 cfl3d/（flat layout），包内 Python 源码逐字节保持不变。
+pyproject.toml 显式限定只发现 cfl3d 与其子包，避免将 source/build/docs 等目录识别为 Python 包。
+串行/MPI 扩展及 CGNS 桥的构建目标同步移到 cfl3d/；验证脚本与文档的 PYTHONPATH 改为仓库根目录。
+source/python/、tests/python/ 和 examples/python/ 的用途与位置保持不变。
+
+验证使用 /tmp 下的临时环境，复用已有 NumPy、mpi4py、setuptools 和 pip，没有下载依赖。
+editable 安装成功，在仓库外、不设置 PYTHONPATH 时仍能导入新目录的 cfl3d，顶层打包名称仅为 cfl3d。
+GNU debug 串行/MPI 扩展及 CGNS 桥已通过实际构建并写入新位置。
+加载现有 Intel/CGNS 动态库环境后，37 项测试中 34 项通过，3 项可选 HDF5 测试跳过；
+真实 CGNS/ADF 三进程的流场、壁面载荷、升力分布、截面及延迟输出与串行一致。
+标准样例在仓库外可正常加载；验证日志位于 build/mpi-flat-layout-validation/logs/。
+已有 editable 安装需在迁移后重新安装；手动指定的 PYTHONPATH 应改为仓库根目录。
+
+随后已按要求在当前 Bash Python 环境（/home/mdolabuser/.pyenv/versions/3.12.12/bin/python）
+重新执行 editable 安装，没有下载或更新依赖。在仓库外且不将仓库加入 PYTHONPATH 时，
+确认导入来自根目录 cfl3d/，串行/MPI API 均为 5，CGNS 桥可加载；
+原生载荷回积分、截面、延迟输出和网格追踪的集成测试通过。
