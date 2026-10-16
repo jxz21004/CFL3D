@@ -147,7 +147,7 @@ end module
 subroutine py_api_version(version)
   implicit none
   integer, intent(out) :: version
-  version=5
+  version=6
 end subroutine
 
 subroutine py_get_force_angles(angles)

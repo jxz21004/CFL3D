@@ -1,16 +1,20 @@
 """Python-owned configuration and arrays passed directly to the native solver."""
 from __future__ import annotations
-from dataclasses import dataclass, field
-from collections.abc import Mapping
+from dataclasses import dataclass, field, asdict
+from collections.abc import Mapping, MutableMapping
 from copy import deepcopy
 import os
 from pathlib import Path
 import threading
+import sys
+import json
+import hashlib
 from numbers import Real
 import numpy as np
 from .cgns import CGNSMesh
 
 _NATIVE_LOCK = threading.Lock()
+_AUTO_COMM = object()
 _MODELS = {"euler": 0, "laminar": 1, "sa": 5, "sst": 7, "komega": 6}
 _SURFACE_COEFFICIENTS = ("CL", "CD", "CX", "CY", "CZ", "Cmx", "Cmy", "Cmz", "CDp", "CDv")
 _BC_TYPES = {"BCFarfield": (1003, ()), "BCSymmetryPlane": (1001, ()),
@@ -115,14 +119,20 @@ class SolverOptions:
     volume_filename: str | Path = "volume.cgns"
     surface_filename: str | Path = "surface.dat"
     flow_prefix: str | Path = "flow"
+    restartFile: str | Path | None = None
 
     @classmethod
     def from_dict(cls, options):
         """Normalize a user dictionary without mutating it; reject misspelled keys."""
-        values = deepcopy(dict(options))
-        unknown = set(values) - cls.__dataclass_fields__.keys()
-        if unknown:
-            raise ValueError(f"Unknown CFL3D options: {sorted(unknown, key=str)}")
+        names = {name.casefold(): name for name in cls.__dataclass_fields__}
+        values = {}
+        for key, value in dict(options).items():
+            name = names.get(key.casefold()) if isinstance(key, str) else None
+            if name is None:
+                raise ValueError(f"Unknown CFL3D option: {key!r}")
+            if name in values:
+                raise ValueError(f"Duplicate CFL3D option ignoring case: {key!r}")
+            values[name] = deepcopy(value)
         for name in ("limiter", "flux", "inversion", "kappa", "moment_center", "multigrid_smoothing"):
             if isinstance(values.get(name), list):
                 values[name] = tuple(values[name])
@@ -130,7 +140,14 @@ class SolverOptions:
             stages = []
             for stage in values["multigrid_stages"]:
                 if isinstance(stage, Mapping):
-                    stage = dict(stage)
+                    stage_names = {name.casefold(): name for name in MultigridStage.__dataclass_fields__}
+                    normalized = {}
+                    for key, value in stage.items():
+                        name = stage_names.get(key.casefold()) if isinstance(key, str) else None
+                        if name is None or name in normalized:
+                            raise ValueError(f"Unknown or duplicate multigrid stage option: {key!r}")
+                        normalized[name] = value
+                    stage = normalized
                     if isinstance(stage.get("smoothing_steps"), list):
                         stage["smoothing_steps"] = tuple(stage["smoothing_steps"])
                     stage = MultigridStage(**stage)
@@ -139,9 +156,9 @@ class SolverOptions:
         return cls(**values)
 
     def validate(self):
-        for name in ("input_grid", "output_directory", "volume_filename", "surface_filename", "flow_prefix"):
+        for name in ("input_grid", "output_directory", "volume_filename", "surface_filename", "flow_prefix", "restartFile"):
             value = getattr(self, name)
-            if value is None and name == "input_grid":
+            if value is None and name in ("input_grid", "restartFile"):
                 continue
             if not isinstance(value, (str, Path)) or not str(value).strip():
                 raise ValueError(f"{name} must be a nonempty path")
@@ -234,6 +251,96 @@ class SolverOptions:
         return stage.smoothing_steps or template[available_levels-stage.levels:available_levels]
 
 
+
+class RuntimeOptions(MutableMapping):
+    """Rank-local, case-insensitive options with validated atomic updates.
+
+    Changes remain local until checkOptions()/solve() verifies the object's
+    communicator. Native controls are installed together at the next solve.
+    """
+
+    def __init__(self, options=None):
+        if isinstance(options, RuntimeOptions):
+            options = options.snapshot()
+        value = (deepcopy(options) if isinstance(options, SolverOptions)
+                 else SolverOptions.from_dict({} if options is None else options))
+        value.validate()
+        object.__setattr__(self, "_value", value)
+        object.__setattr__(self, "_check_callback", None)
+
+    @staticmethod
+    def _name(key):
+        names = {name.casefold(): name for name in SolverOptions.__dataclass_fields__}
+        name = names.get(key.casefold()) if isinstance(key, str) else None
+        if name is None:
+            raise KeyError(f"Unknown CFL3D option: {key!r}")
+        return name
+
+    def __getitem__(self, key):
+        return deepcopy(getattr(self._value, self._name(key)))
+
+    def __setitem__(self, key, value):
+        self.update({key: value})
+
+    def __delitem__(self, key):
+        raise TypeError("Options cannot be deleted; assign a default value explicitly")
+
+    def __iter__(self):
+        return iter(SolverOptions.__dataclass_fields__)
+
+    def __len__(self):
+        return len(SolverOptions.__dataclass_fields__)
+
+    def __getattr__(self, key):
+        try:
+            name = self._name(key)
+        except KeyError:
+            return getattr(self._value, key)
+        return deepcopy(getattr(self._value, name))
+
+    def __setattr__(self, key, value):
+        self[key] = value
+
+    def update(self, *args, **kwargs):
+        provided = dict(*args, **kwargs)
+        changes = SolverOptions.from_dict(provided)
+        # Normalize provided names separately so unspecified defaults never replace existing values.
+        values = {name: getattr(self._value, name) for name in self}
+        for key in provided:
+            name = self._name(key)
+            values[name] = getattr(changes, name)
+        candidate = SolverOptions(**values)
+        candidate.validate()
+        object.__setattr__(self, "_value", candidate)
+
+    def check(self):
+        """Check locally when standalone, or collectively when owned by a CFL3D object."""
+        if self._check_callback is not None:
+            return self._check_callback()
+        self._value.validate()
+        return True
+
+    def snapshot(self):
+        return deepcopy(self._value)
+
+
+def _automatic_comm(comm):
+    if comm is not _AUTO_COMM:
+        return comm
+    # Normal Python must not initialize MPI merely by constructing a serial solver.
+    mpi = sys.modules.get("mpi4py.MPI")
+    launched = any(name in os.environ for name in
+                   ("PMI_SIZE", "PMIX_RANK", "OMPI_COMM_WORLD_SIZE", "MPI_LOCALNRANKS"))
+    if mpi is None and launched:
+        try:
+            from mpi4py import MPI as mpi
+        except ImportError as exc:
+            raise RuntimeError("MPI launch detected but mpi4py is unavailable") from exc
+    if mpi is not None and mpi.Is_initialized() and not mpi.Is_finalized() and mpi.COMM_WORLD.size > 1:
+        return mpi.COMM_WORLD
+    return None
+
+
 def _face(point_range, dims):
     p = np.asarray(point_range)
     if p.shape != (3, 2) or not np.issubdtype(p.dtype, np.integer):
@@ -288,55 +395,166 @@ class CFL3D:
     native failure, start a fresh Python process before attempting another solve.
     """
 
-    def __init__(self, mesh=None, options=None, *, boundary_overrides=None, comm=None, groups=None):
+    def __init__(self, mesh=None, options=None, *, boundary_overrides=None, comm=_AUTO_COMM, groups=None):
         if options is None and isinstance(mesh, (Mapping, SolverOptions)):
             options, mesh = mesh, None
+        comm = _automatic_comm(comm)
+        if comm is not None:
+            from mpi4py import MPI
+            if comm == MPI.COMM_NULL or comm.Is_inter():
+                raise ValueError("CFL3D needs a valid intracommunicator")
+            if comm.Get_size() == 1:
+                comm = None  # A one-rank communicator uses the serial core.
         self.comm = comm
         self._last_result = None
         self._group_definitions = {}
         self._lift_distributions = []
         self._slice_requests = []
         self._surface_analysis_mesh = None
-        if comm is not None:
-            from mpi4py import MPI
-            if comm == MPI.COMM_NULL or comm.Is_inter() or comm.Get_size() < 2:
-                raise ValueError("CFL3D MPI needs an intracommunicator with a host and at least one worker")
+        self._flow_state = None
+        self._loaded_restart_file = None
+        self._comm_members = self._current_comm_members()
+
+        def parse():
+            return RuntimeOptions(options) if options is not None or self.comm is None or self.comm.rank == 0 else None
+        local_options = self._checked(parse)
+        if self.comm is not None:
+            root_options = self.comm.bcast(local_options.snapshot() if self.comm.rank == 0 else None, root=0)
+            # Explicit rank-local settings are retained; None is a compatibility shorthand.
+            if local_options is None:
+                local_options = RuntimeOptions(root_options)
+        self._options = local_options
+        object.__setattr__(self._options, "_check_callback", self.checkOptions)
+        self.checkOptions()
 
         def load():
-            self.options = SolverOptions.from_dict(options) if isinstance(options, Mapping) else options
-            if self.options is None:
-                self.options = SolverOptions()
-            if not isinstance(self.options, SolverOptions):
-                raise ValueError("options must be a dictionary or SolverOptions")
-            self.options.validate()
             if mesh is not None and self.options.input_grid is not None:
                 raise ValueError("Specify the mesh argument or options.input_grid, not both")
             input_mesh = mesh if mesh is not None else self.options.input_grid
             if input_mesh is None:
                 raise ValueError("Set options['input_grid'] or provide a mesh")
-            self.mesh = input_mesh if isinstance(input_mesh, CGNSMesh) else CGNSMesh.from_file(input_mesh)
-            self.boundary_overrides = boundary_overrides or {}
-            self.options.validate()
-            return self.mesh, self.options, self.boundary_overrides, {} if groups is None else groups
-
+            loaded = input_mesh if isinstance(input_mesh, CGNSMesh) else CGNSMesh.from_file(input_mesh)
+            return loaded, boundary_overrides or {}, {} if groups is None else groups
         if comm is None:
-            _, _, _, group_definitions = load()
+            self.mesh, self.boundary_overrides, group_definitions = load()
         else:
-            payload = None
-            error = None
-            # 只让主控读文件。先广播读取错误，再一起退出，避免其他 rank 等不到数据。
-            if comm.Get_rank() == 0:
-                try:
-                    payload = load()
-                except Exception as exc:
-                    error = f"{type(exc).__name__}: {exc}"
-            error, payload = comm.bcast((error, payload), root=0)
-            if error:
-                raise RuntimeError(f"CFL3D root configuration failed: {error}")
-            self.mesh, self.options, self.boundary_overrides, group_definitions = payload
-            if comm.Get_size() - 1 > len(self.mesh.zones):
+            payload = self._checked(lambda: load() if comm.rank == 0 else None)
+            self.mesh, root_overrides, group_definitions = comm.bcast(payload, root=0)
+            self.boundary_overrides = deepcopy(root_overrides if boundary_overrides is None else boundary_overrides)
+            if comm.size - 1 > len(self.mesh.zones):
                 raise ValueError("This MPI interface currently requires at least one zone per worker")
         self.addGroups(group_definitions)
+        self._input_grid_at_construction = self.options.input_grid
+
+    @property
+    def options(self):
+        return self._options
+
+    @options.setter
+    def options(self, values):
+        self._options = RuntimeOptions(values)
+        object.__setattr__(self._options, "_check_callback", self.checkOptions)
+
+    def setOption(self, name, value):
+        self.options[name] = value
+        return self
+
+    def getOption(self, name):
+        return self.options[name]
+
+    def setOptions(self, values):
+        self.options.update(values)
+        return self
+
+    def _current_comm_members(self):
+        if self.comm is None:
+            return (0,)
+        from mpi4py import MPI
+        group, world_group = self.comm.Get_group(), MPI.COMM_WORLD.Get_group()
+        try:
+            return tuple(MPI.Group.Translate_ranks(group, list(range(self.comm.size)), world_group))
+        finally:
+            group.Free()
+            world_group.Free()
+
+    def checkOptions(self):
+        """Collectively validate rank-local options within this object's comm only."""
+        def validate():
+            self.options.validate()
+            if hasattr(self, "_input_grid_at_construction"):
+                old = self._input_grid_at_construction
+                current = self.options.input_grid
+                old_path = None if old is None else Path(old).resolve()
+                current_path = None if current is None else Path(current).resolve()
+                if old_path != current_path:
+                    raise ValueError("input_grid selects the mesh at construction; create a new CFL3D object to change it")
+        self._checked(validate)
+        if self.comm is None:
+            return True
+        members = self._current_comm_members()
+        payload = json.dumps(asdict(self.options.snapshot()), sort_keys=True, default=str)
+        gathered = self.comm.allgather((members == self._comm_members, payload))
+        if not all(item[0] for item in gathered):
+            raise RuntimeError("CFL3D communicator membership changed after construction")
+        if len({item[1] for item in gathered}) != 1:
+            decoded = [json.loads(item[1]) for item in gathered]
+            differing = [key for key in decoded[0] if any(d[key] != decoded[0][key] for d in decoded[1:])]
+            raise RuntimeError(f"CFL3D options differ within comm on {differing}; update every participating rank")
+        return True
+
+    def getFlowState(self):
+        """Return an independent Python snapshot, including native turbulence/ghost state."""
+        if self._flow_state is None:
+            raise RuntimeError("Call solve() before retrieving flow state")
+        return deepcopy(self._flow_state)
+
+    def setFlowState(self, state):
+        """Install a Python-owned state locally; all ranks must install the same state."""
+        from .restart import FlowState
+        if not isinstance(state, FlowState):
+            raise TypeError("state must be returned by getFlowState()")
+        state.validate(self.mesh, self.options)
+        self._flow_state = deepcopy(state)
+        return self
+
+    def resetFlow(self):
+        """Start the next solve from freestream instead of cached state or restartFile."""
+        self._flow_state = None
+        self._loaded_restart_file = None
+        self.options.restartFile = None
+        return self
+
+    def writeRestartFile(self, filename=None):
+        """Write a complete Python checkpoint; a root-only call needs no MPI collective."""
+        if self.comm is not None and self.comm.rank != 0:
+            return None
+        path = self._output_path(filename, "restart.npz")
+        from .restart import write_restart
+        if self._flow_state is None:
+            raise RuntimeError("No flow state is available")
+        write_restart(path, self._flow_state)
+        return path
+
+    def _prepare_flow_state(self):
+        from .restart import read_restart
+        restart_file = str(Path(self.options.restartFile).resolve()) if self.options.restartFile is not None else None
+        reload_file = restart_file is not None and restart_file != self._loaded_restart_file
+        if self.comm is not None:
+            reload_file = any(self.comm.allgather(reload_file))
+        if reload_file:
+            state = self._checked(lambda: read_restart(restart_file,self.mesh,self.options)
+                                  if self.comm is None or self.comm.rank == 0 else None)
+            if self.comm is not None:
+                state = self.comm.bcast(state,root=0)
+            self._flow_state = state
+            self._loaded_restart_file = restart_file
+        self._checked(lambda: self._flow_state.validate(self.mesh,self.options)
+                      if self._flow_state is not None else None)
+        if self.comm is not None:
+            hashes = self.comm.allgather(None if self._flow_state is None else self._flow_state.digest)
+            if len(set(hashes))!=1:
+                raise RuntimeError("CFL3D cached flow states differ within comm")
+        return self._flow_state
 
     def _output_path(self, filename, default):
         if self._last_result is None:
@@ -754,6 +972,9 @@ class CFL3D:
         if i2d:
             blocks[4] = 0
         schedule = o.stage_schedule()
+        if getattr(self, "_continuing", False):
+            # A cached solution is already on the finest grid: do not repeat grid sequencing.
+            schedule = (schedule[-1],)
         mseq = len(schedule)
         stages = np.zeros((4, mseq), dtype=np.int32, order="F")
         smoothing = np.ones((5, 5), dtype=np.int32, order="F")
@@ -785,7 +1006,20 @@ class CFL3D:
     def solve(self, *, output_directory=None):
         self._last_result = None  # Failed solves must not expose an older run's loads.
         self._surface_analysis_mesh = None
+        self.checkOptions()
+        state = self._prepare_flow_state()
+        self._continuing = state is not None
         arrays, xyz = self._checked(self._arrays)
+        if state is not None:
+            arrays["time_control"][1] = -1  # Native full-state restart, without old convergence history.
+        if self.comm is not None:
+            fingerprint = hashlib.sha256()
+            for key,value in sorted(arrays.items()):
+                fingerprint.update(key.encode())
+                fingerprint.update(np.asarray(value).tobytes())
+            fingerprint.update(xyz.tobytes())
+            if len(set(self.comm.allgather(fingerprint.hexdigest()))) != 1:
+                raise RuntimeError("CFL3D mesh/boundary/native configuration differs within comm")
         base_groups = self._checked(self._cgns_surface_groups)
         def native_module():
             from importlib import import_module
@@ -797,7 +1031,7 @@ class CFL3D:
                                    + (" --mpi" if self.comm is not None else "")) from exc
             if bool(module.py_build_info()) != (self.comm is not None):
                 raise RuntimeError("Native extension MPI mode does not match the solver")
-            if getattr(module, "py_api_version", lambda: 0)() != 5:
+            if getattr(module, "py_api_version", lambda: 0)() != 6:
                 raise RuntimeError("Native interface changed; rebuild with python tools/build_python.py"
                                    + (" --mpi" if self.comm is not None else "") + " and restart Python")
             return module
@@ -810,6 +1044,17 @@ class CFL3D:
         # 旧核心按固定文件名写输出，计算进程必须使用独立目录，避免互相覆盖。
         local_directory = output_directory if rank == 0 else output_directory / f"rank-{rank:04d}"
         self._checked(lambda: local_directory.mkdir(parents=True, exist_ok=True))
+        checkpoint_path = output_directory / ".cfl3d-state.bin"
+        def stage_checkpoint():
+            if rank == 0:
+                protected = [self.mesh.source, self.options.restartFile]
+                if any(value and checkpoint_path.resolve() == Path(value).resolve() for value in protected):
+                    raise ValueError("Input files must not use the internal .cfl3d-state.bin output path")
+                if state is not None:
+                    checkpoint_path.write_bytes(state.native)
+                else:
+                    checkpoint_path.unlink(missing_ok=True)
+        self._checked(stage_checkpoint)
         acquired = _NATIVE_LOCK.acquire(blocking=False)
         old_directory = Path.cwd()
         native_comm = None
@@ -826,7 +1071,8 @@ class CFL3D:
                         raise RuntimeError("Native MPI communicator configuration failed")
                 self._checked(set_comm)
             def configure():
-                _native.py_set_output_flags(int(self.options.writevolumesolution or self.options.writeflowsolution))
+                # Internal checkpoint I/O is independent of visualization output flags.
+                _native.py_set_output_flags(1)
                 status = _native.py_configure(**arrays)
                 if status:
                     raise RuntimeError(f"Native configuration failed ({status}); start a fresh interpreter")
@@ -846,6 +1092,10 @@ class CFL3D:
             wall_force_values = _native.py_get_wall_forces(int(wall_counts.sum()))
             # CL control can update final_alpha after force evaluation: use the force-time angles.
             force_angles = _native.py_get_force_angles()
+            checkpoint = self._checked(lambda: checkpoint_path.read_bytes() if rank == 0 else None)
+            if self.comm is not None:
+                checkpoint = self.comm.bcast(checkpoint, root=0)
+            self._checked(lambda: checkpoint_path.unlink(missing_ok=True) if rank == 0 else None)
         finally:
             os.chdir(old_directory)
             if native_comm is not None:
@@ -886,12 +1136,17 @@ class CFL3D:
         self._last_fields = {name: value.copy() for name, value in fields.items()}
         self._last_mesh = deepcopy(self.mesh)
         self._last_final_alpha, self._last_output_directory = final_alpha, output_directory
-        self._last_base_groups, self._last_options = base_groups, self.options
+        self._last_base_groups, self._last_options = base_groups, self.options.snapshot()
         self._last_result = result
+        from .restart import FlowState, metadata
+        self._flow_state = FlowState(checkpoint, metadata(self.mesh,self.options),
+                                    {name:value.copy() for name,value in fields.items()})
         def write_outputs():
             if rank != 0:
                 return
             result.save(output_directory / "solution.npz", include_volume=self.options.writevolumesolution)
+            if self.options.writevolumesolution or self.options.writeflowsolution:
+                (output_directory / "restart.bin").write_bytes(checkpoint)
             if self.options.writevolumesolution:
                 self.writeVolumeSolution()
             if self.options.writeTecplotSurfaceSolution:

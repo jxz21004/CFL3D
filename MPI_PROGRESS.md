@@ -1,6 +1,6 @@
-# CFL3D Python/MPI 第七轮检查点（升力分布与截面 Cp）— 2026-10-15
+# CFL3D Python/MPI 第八轮检查点（自动 MPI、可修改参数与接续）— 2026-10-16
 
-最新升力分布及截面 Cp 接口和验证见文末“第七轮”；前面保留此前各轮记录。
+最新自动 MPI、参数更新与接续验证见文末“第八轮”；前面保留此前各轮记录。
 
 本轮在 `CFL3D/` 修改；旧的 `CFL3D-f2py-CGNS-source/` 保留作为参考。
 MPI 已通过下述内存网格验收；本轮又补齐 CGNS/ADF 文件入口的串行和 MPI 验收。
@@ -349,3 +349,54 @@ GNU debug 串行/MPI 扩展及 CGNS 桥已通过实际构建并写入新位置�
 重新执行 editable 安装，没有下载或更新依赖。在仓库外且不将仓库加入 PYTHONPATH 时，
 确认导入来自根目录 cfl3d/，串行/MPI API 均为 5，CGNS 桥可加载；
 原生载荷回积分、截面、延迟输出和网格追踪的集成测试通过。
+
+
+## 第八轮：自动 MPI、rank-local options 与完整状态接续
+
+- 省略 comm 时，检测 MPI 启动环境或已初始化的 mpi4py，多个 WORLD rank 自动使用 MPI 扩展；
+  普通 Python 使用串行，显式 comm=None 强制串行。单 rank 通信器使用串行核心。
+  显式子通信器的所有集体操作仅发生在该 comm 内；成员检查使用本地 MPI group 映射，
+  不对 WORLD 做集体通信。仍采用一个 host、其余进程按完整 zone 分配。
+- 每个 rank 的显式 options 独立拷贝并校验，不用 root 的值覆盖。为兼容旧脚本，
+  非 root options=None 可继承 root 初始配置。构造及 solve 前检查当前 comm 内参数一致性，
+  网格/边界生成的原生数组和缓存状态也分别检查。
+- solver.options 为可修改 RuntimeOptions，key 大小写无关，支持属性和字典访问，
+  setOption/getOption/setOptions；多参数修改整体校验，失败时不部分写入。
+  solver.options.check() 与 solver.checkOptions() 在当前 comm 内集体检查。
+  新参数于下一次 solve 入口整体传入 Fortran，支持追加迭代和修改 CFL。
+  input_grid 在构造时加载，后续切换文件须建立新对象。
+- 每个对象缓存完整原生 restart 载荷及 primitive fields，不依赖旧输出目录或活跃 COMMON。
+  重复 solve 默认接续；getFlowState/setFlowState 读取和恢复完整快照，resetFlow 重新冷启动。
+  当前每段仍通过内部 .cfl3d-state.bin 文件与 Fortran 交换，成功后清理；尚未实现无文件的内存传递。
+- writeRestartFile 默认写 restart.npz（全状态、元数据、校验和、primitive fields）；
+  options.restartFile 可读该文件或原生 real64/int32/原生端序/含 ghost 的 restart.bin。
+  Python 检查点检查拓扑、模型、gamma、y-up；原生文件检查块尺寸、模型、记录格式、
+  历史/流场/ghost 记录长度及主流场有限性、密度/压力正值。
+  visualization solution.npz 不用于接续。模型/坐标约定等不兼容时需 resetFlow。
+- 接续时只使用最终网格序列阶段，返回本段历史。每段重新应用其 CFL 渐增、
+  一阶迭代和定升反馈计数，所以启用这些控制时分段点可能影响计算路径。
+- 修正 rrest.F 在 Python 负 IREST 重启中，用旧历史长度发送新 MPI 数组的潜在越界；
+  Python 分段历史独立保存，旧 ntt 在 MPI 发送前置零，完整湍流/ghost 状态仍通过原生读取。
+  原生 API 升到 6，已重建 GNU debug 串行及 MPI 扩展。
+
+验证：41 项单元测试中 38 项通过，3 项可选 HDF5 测试跳过。新增 4 项覆盖参数大小写、
+独立副本、原子修改，五种模型的 5+2 步接续与连续 7 步比较，CFL 修改、完整文件与原生文件
+恢复、快照安装、冷启动重置、模型不兼容/截断/误用后处理文件，以及多重网格序列不重复。
+三进程自动 MPI、四进程中仅 WORLD rank 1/2/3 参与、四进程两个独立子通信器均通过；
+覆盖参数不一致/状态不一致的集体报错、较短迭代段、文件跨串行/MPI 接续。
+流场、历史和逐面载荷与串行基准逐元素一致。既有三进程升力分布/截面/延迟输出回归也通过。
+三进程自动 MPI 续算 Valgrind 各 rank 零错误，未做泄漏扫描。
+
+```bash
+python -m unittest discover -s tests/python -v
+PYTHONPATH=tests/python mpirun -np 3 python tests/python/validate_runtime_mpi.py --auto --directory build/mpi-runtime-validation
+PYTHONPATH=tests/python mpirun -np 4 python tests/python/validate_runtime_mpi.py --exclude --directory build/mpi-runtime-validation
+PYTHONPATH=tests/python mpirun -np 4 python tests/python/validate_runtime_mpi.py --split --directory build/mpi-runtime-validation
+```
+
+测试源为 tests/python/test_runtime.py、tests/python/validate_runtime_mpi.py；
+日志在 build/mpi-runtime-validation/logs/，现有 I/O 回归结果在 build/mpi-runtime-io-validation/。
+新增行为和状态交换限制已写入 README.md / docs/python-wrapper.md；标准模板默认支持自动 MPI。
+本轮未下载依赖。
+
+标准 standard_case.py 未提前导入 mpi4py、未传 --mpi 的三进程启动也已通过，确认自动识别 MPI 启动环境的分支可用。

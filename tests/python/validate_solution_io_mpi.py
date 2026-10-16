@@ -30,7 +30,7 @@ def main():
         try:
             root.mkdir(parents=True,exist_ok=True)
             write_adf(grouped_plate(),options['input_grid'])
-            serial = CFL3D(options={**options,'output_directory':root/'serial'})
+            serial = CFL3D(options={**options,'output_directory':root/'serial'}, comm=None)
             serial.addLiftDistribution(args.segments,'y','Wing')
             serial.addSlices('y',[-.25,-.5],groupName='Wing')
             serial.addSlices('y',-.5,'absolute','Wing')

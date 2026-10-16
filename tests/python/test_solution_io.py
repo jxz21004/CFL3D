@@ -30,7 +30,7 @@ class OptionsDictionaryTests(unittest.TestCase):
         self.assertEqual(options.limiter, (0,2,4))
         self.assertEqual(values['limiter'], [0,2,4])
         self.assertEqual(options.multigrid_stages[0].smoothing_steps, (1,2))
-        for opts in ({'writeVolumeSolution': False}, {'writevolumesolution': 'false'},
+        for opts in ({'unknownOption': False}, {'writevolumesolution': 'false'},
                      {'writeTecplotSurfaceSolution': 0}, {'writeflowsolution': None}):
             with self.subTest(options=opts), self.assertRaises(ValueError):
                 CFL3D(box_mesh(), opts)

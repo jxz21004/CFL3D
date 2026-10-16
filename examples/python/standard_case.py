@@ -1,7 +1,7 @@
 """CGNS case template: edit the physical/reference values for your own model.
 
 Serial: python examples/python/standard_case.py mesh.cgns
-MPI:    mpirun -np 3 python examples/python/standard_case.py mesh.cgns --mpi
+MPI:    mpirun -np 3 python examples/python/standard_case.py mesh.cgns
 """
 import argparse
 import json
@@ -68,12 +68,13 @@ def main():
 
     # 可改为 {"Aircraft": ["Wing", "Tail"]}，成员须为网格中已有的 CGNS 名称。
     groups = {}
-    # MPI 下所有 rank 参与构造和求解，网格及配置以 rank 0 为准。
+    # MPI 下各 rank 提供自己的 options，构造/求解时在当前 comm 内检查一致。
     solver = CFL3D(
-        options=options if rank == 0 else None,
-        groups=groups if rank == 0 else None,
-        comm=comm,
+        options=options,
+        groups=groups,
+        **({"comm": comm} if args.mpi else {}),
     )
+    rank = 0 if solver.comm is None else solver.comm.Get_rank()
     result = solver.solve()
     if rank == 0:
         print("Available groups:", solver.getGroupNames())

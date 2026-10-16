@@ -122,7 +122,7 @@ options = SolverOptions(
 二维两平面网格的 i 方向关闭黏性，其他方向按所选模型设置。
 Euler 自动关闭 full_navier_stokes。湍流 CFL 统一设置核心的七个 CFLTURB 槽位。
 `eddy_viscosity_limit`、`gamma`、`kappa` 和参考参数也可以在 SolverOptions 中配置。
-参数对象不可变；修改工况时可使用 `dataclasses.replace` 创建新的 options，再创建 solver。
+SolverOptions 是不可变配置模板；solver.options 可通过字典、属性或 setOptions() 原地修改，下一次 solve() 同步传入 Fortran。
 
 本轮新增稳态计算控制参数：
 
@@ -135,7 +135,7 @@ Euler 自动关闭 full_navier_stokes。湍流 CFL 统一设置核心的七个 C
 | `restart_interval` | None | NWREST；None 使用总迭代数 |
 
 这几个选项已在双块 SA/SST 平板串行和 MPI 计算中确认传入核心并正常完成。
-`restart_interval` 只控制原生 restart 文件写出频率，不提供 restart 读入接续接口。
+`restart_interval` 控制段内原生 checkpoint 写出频率；每段结束缓存完整状态，restartFile 支持文件接续。
 一阶迭代数不得超过相应阶段迭代数；CFL 渐增步数须非负，倍数须至少为 1。
 
 ## 定升计算与最终攻角
@@ -209,7 +209,7 @@ MIT 须为 1..20 的整数，MTT 非负，接口检查 MIT+MTT 不超过原生�
 阶段表及 MIT 使用不可变 tuple，可通过 dataclasses.replace 创建修改后的配置。
 embedded 网格尚未接入，NEMGL/ICONSF 仍没有可用的 embedded 计算接口。
 
-本版原生接口版本为 5，新增逐面积分载荷缓存后必须重建串行和 MPI 扩展并重启 Python：
+本版原生接口版本为 6，新增完整状态接续及 MPI 历史长度修正后必须重建串行和 MPI 扩展并重启 Python：
 
 ```bash
 python tools/build_python.py --debug --jobs 8
@@ -238,7 +238,7 @@ if comm.rank == 0:
     print(result.coefficients)
 ```
 
-配置、网格和边界覆盖以 communicator 的 rank 0 为准，并广播到其他 rank。
+每个 rank 保留并校验自己的 options，构造/求解前在当前 communicator 内检查一致；网格由其 rank 0 读取广播。
 原生 rank 0 专用于主控，其他 rank 按完整 zone 分配；这版不自动切分单个 zone，
 要求 `2 <= 进程数 <= zone数+1`。一个 zone 使用两个进程，两个 zone 最多三个进程。
 Python 管理 MPI 初始化和结束；求解期间使用复制的 communicator，结束后释放副本。
@@ -322,9 +322,9 @@ result = solver.solve()
 
 也可使用 `CFL3D(options_dict)`。原有 `CFL3D(mesh, SolverOptions(...))` 保持可用。
 `input_grid` 与 mesh 参数不能同时设置；`solve(output_directory=...)` 仍可覆盖本次输出目录。
-字典在构造时复制并转换为不可变 SolverOptions，修改原字典不会影响已有 solver。
+字典在构造时复制为可修改 RuntimeOptions，修改原字典不会影响已有 solver；运行时修改 solver.options。
 标量/方向参数支持三元 list，`multigrid_stages` 支持字典列表，内部统一成 tuple 和 MultigridStage。
-未知键和非布尔输出开关会报错，输出开关键名须按上例大小写书写。
+未知键和非布尔输出开关会报错；options 和阶段字典 key 不区分大小写，同一字典的大小写重复键会报错。
 
 自动输出文件和独立补写方法：
 
@@ -335,7 +335,7 @@ result = solver.solve()
 | `writeflowsolution` | False | `flow.x`、`flow.q` | `writeFlowSolution(prefix=None)` |
 
 文件名分别可通过 `volume_filename`、`surface_filename`、`flow_prefix` 设置。
-三个开关全关时不写体/表面解和原生 restart 数据，但仍保存历史、积分元数据和原生日志。
+三个开关全关时不保留体/表面解和原生 restart 文件，但仍保存历史、积分元数据和原生日志；完整接续状态缓存在 Python 内存。
 场数据仍保留在本 solver 的 Python 快照中，补写方法不受开关限制，也不再进入原生 CFD 计算。
 补写以最近一次成功计算为准，不依赖输入文件继续存在，也不受另一个 solver 重用 Fortran 状态影响。
 尚未提供从只含历史的 NPZ 恢复整个快照的接口。
@@ -388,7 +388,7 @@ residual, CL, CD, CX, CY, CMX, CMY, CMZ
 输出文件不代表已收敛；迭代次数由配置决定，本版不实现 Python 收敛停止判据。
 关闭 `writevolumesolution` 后，自动 NPZ 不包含 `zone_<name>` 体流场数组。
 
-同一进程可以连续求解多个工况，每次重新传入配置和网格、从自由来流初始化。
+同一对象重复 solve() 从 Python 缓存的完整状态接续；resetFlow() 后从自由来流初始化，新对象也可用 restartFile 或 setFlowState() 接续。
 核心使用 COMMON 全局状态，禁止并发 solve；计算期间输出目录通过进程 cwd 切换，
 请勿在其他线程中依赖相对文件路径。
 原生错误通过 C 守卫返回 Python RuntimeError，不会用 STOP 终止解释器。
@@ -518,12 +518,82 @@ MPI 注册、查询、补写均无需集体通信，可仅在 rank 0 调用；`s
 Cp 保留面中心值，截线恰好沿共享边时使用相邻面的面积加权值；与平面完全共面的壁面
 不生成截线。`clearSurfaceAnalysis()` 清除全部请求，`nLiftDist/nSlice` 返回已注册数量。
 
+## 自动 MPI、可修改 options 与接续计算
+
+省略 `comm` 时，普通 `python case.py` 使用串行扩展，`mpirun -np N python case.py`
+自动使用 MPI 扩展。`comm=None` 显式选择串行；传入单 rank 通信器也走串行。
+需要其他 rank 做优化、其他算例或其他工作时，必须显式传入本算例的子通信器；
+构造、检查和求解只涉及该通信器，不会对 `COMM_WORLD` 做集体通信。
+例如在四进程作业中排除 WORLD rank 0：
+
+```python
+from mpi4py import MPI
+from cfl3d import CFL3D
+
+world = MPI.COMM_WORLD
+case_comm = world.Split(0 if world.rank in (1, 2, 3) else MPI.UNDEFINED, world.rank)
+if case_comm != MPI.COMM_NULL:
+    # 每个参与 rank 都构造并保留自己的 options 副本。
+    solver = CFL3D(options=options, comm=case_comm)
+    solver.solve()
+    case_comm.Free()
+```
+
+字典 key 不区分大小写：`CFL/cfl/CfL`、`writeVolumeSolution/writevolumesolution` 均可。
+下划线仍属于参数名称；同一字典中出现大小写重复键会报错。
+各 rank 的显式 options 会分别校验并保留，在构造和每次 `solve()` 前检查一致性；
+不会用 root 配置静默覆盖其他 rank 的显式设置。为兼容旧脚本，非 root 的
+`options=None` 可继承 root 的初始配置。
+
+`solver.options` 是可修改的 `RuntimeOptions`，支持字典及属性访问：
+
+```python
+solver = CFL3D(options=options)     # 自动识别串行/MPI
+solver.solve()                     # 第一次从自由来流或 restartFile 初始化
+
+# MPI 下所有参与 rank 执行相同更新；多参数更新会整体校验，失败时不部分修改。
+solver.setOptions({"CFL": 3.0, "ITERATIONS": 100})
+solver.options["WriteVolumeSolution"] = False
+# 等价写法：solver.setOption("cfl", 3.0) 或 solver.options.cfl = 3.0
+solver.checkOptions()              # comm 内集体检查；solve() 也会自动检查
+solver.solve()                     # 从上一次完整状态继续，再执行本段 100 步
+
+if solver.comm is None or solver.comm.rank == 0:
+    solver.writeRestartFile("checkpoint.npz")  # root 本地调用，无需其他 rank 配合
+
+# 新对象从文件接续；也支持原生 restart.bin（下述格式）。
+continued = CFL3D(options={**options, "restartFile": "checkpoint.npz"})
+continued.solve()
+```
+
+修改值在下一次 `solve()` 开始时统一传入 Fortran；当前不支持计算执行中的线程热更新。
+`solver.options.check()` 与 `solver.checkOptions()` 等价。`getOption(name)` 读取当前值，`getFlowState()` 返回完整 Python 状态副本，
+`setFlowState(state)` 恢复此前保存的完整状态；其中 `fields` 是读取用的 primitive 流场，
+恢复以 `native` 完整状态为准。`resetFlow()` 清除内存状态和 restartFile 设置，下次从自由来流开始。
+`SolverOptions` 仍可作为不可变配置模板传入，运行时修改使用 `solver.options`。
+`input_grid` 在构造时加载，切换输入网格文件应创建新对象。
+
+接续状态包含主流场、湍流变量、涡黏性及 ghost/壁面状态，缓存在各 rank 的 Python 内存中，
+不依赖旧输出目录或另一个 solver 的 Fortran 全局状态。
+当前每段通过内部临时原生 restart 文件与 Fortran 交换状态，结束即清理；尚未实现无文件的状态数组传递。
+体/表面输出开关全关仍可继续计算及手动保存检查点。
+`writeRestartFile()` 默认写本次输出目录下的 `restart.npz`，包含完整原生载荷、校验和、
+兼容性元数据和 primitive 流场；它与后处理 `solution.npz` 用途不同。
+
+`restartFile` 默认 None；支持上述检查点和原生 real64、int32 记录标记、原生端序且含 ghost 数据的
+`restart.bin`。读入前检查记录完整性、块尺寸及湍流模型；Python 检查点还检查模型、gamma、
+y-up 和网格拓扑。原生文件不包含完整 Python 元数据，坐标约定和物理参考量须由使用者匹配。
+当前接续使用最后一级网格，不重复已完成的粗网格序列；`iterations` / 显式阶段表的最终阶段
+迭代数表示本段追加步数，返回 history 也仅包含本段。
+每段重新使用所设的 CFL 渐增、一阶迭代和定升反馈计数；启用这些控制时，分段点会影响计算路径。
+原生 checkpoint 与当前数值精度、记录格式和模型相关，跨平台或更换编译配置需另行验证。
+
 ## 当前明确范围
 
 本版已验证稳态、实数、串行求解；包含多块一对一连接和多重网格。
 MPI/f2py communicator 为实验性实现，验证状态见上文。
 尚未实现非定常、overset、非匹配 patch、周期连接、
-移动网格、气动弹性、Python restart/continuation、伴随及 OpenMDAO 接口。
+移动网格、气动弹性、伴随及 OpenMDAO 接口。
 不支持真正的二维 base、PointList、非零坐标 rind、非 Vertex 边界，
 或多个时刻的 GridCoordinates。读取到不支持的数据会报错。
 二维计算需使用三维 base 中 i 方向有两个平面的结构化网格。

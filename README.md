@@ -5,7 +5,7 @@
 收敛历史及按部件积分的气动力。支持串行和原生主控/计算进程 MPI 路径。
 Python 求解不依赖 `.inp` 模板，也不把 CGNS 网格转换为 PLOT3D。
 
-当前 Python 包版本为 `0.1.0`，原生接口版本为 **5**。
+当前 Python 包版本为 `0.1.0`，原生接口版本为 **6**。
 完整参数说明见 [Python 接口文档](docs/python-wrapper.md)，
 各轮验证结果见 [MPI_PROGRESS.md](MPI_PROGRESS.md)，
 原始 CFL3D 文档见 [NASA CFL3D](https://nasa.github.io/CFL3D/)。
@@ -86,7 +86,7 @@ python -c "from cfl3d import CFL3D, SolverOptions, _native; print('native API:',
 python -c "from cfl3d._cgns_native import library; print('CGNS has HDF5:', library().has_hdf5)"
 ```
 
-第一条应输出接口版本 `5`。第二条输出 `False` 时仍可正常读取 CGNS/ADF；
+第一条应输出接口版本 `6`。第二条输出 `False` 时仍可正常读取 CGNS/ADF；
 若要读取 HDF5，需使用支持 HDF5 的 CGNS 库或可选 h5py。
 
 ## 3. 输入网格与量纲
@@ -176,7 +176,7 @@ from mpi4py import MPI
 
 comm = MPI.COMM_WORLD
 solver = CFL3D(
-    options=options if comm.rank == 0 else None,
+    options=options,
     comm=comm,
 )
 result = solver.solve()  # 使用 options["output_directory"]
@@ -187,15 +187,85 @@ if comm.rank == 0:
 保存后用 `mpirun -np 3 python case.py` 运行。也可以直接运行完整模板：
 
 ```bash
-mpirun -np 3 python examples/python/standard_case.py mesh.cgns --mpi --output mpi-results
+mpirun -np 3 python examples/python/standard_case.py mesh.cgns --output mpi-results
 ```
 
 rank 0 只做主控，其余 rank 按完整 zone 分配，**不会自动切分一个 zone**。
 进程数必须满足 `2 <= 进程数 <= zone 数 + 1`：单 zone 用 2 进程，双 zone 可用 2 或 3 进程。
-配置和文件读取以 communicator 的 rank 0 为准。求解后可仅在 rank 0 调用 `getSolution()`；
+各 rank 的配置独立保存并在 communicator 内检查一致，网格文件由其 rank 0 读取并广播。求解后可仅在 rank 0 调用 `getSolution()`；
 结果已汇总缓存，不要求其他 rank 参与查询。只有 rank 0 写 `solution.npz`，
 各 worker 的原生临时输出位于 `rank-0001/` 等子目录。
 单机 Intel MPI 可设置 `I_MPI_FABRICS=shm`；多节点通信需按集群实际网络配置 MPI。
+
+### 自动 MPI、可修改 options 与接续计算
+
+省略 `comm` 时，普通 `python case.py` 使用串行扩展，`mpirun -np N python case.py`
+自动使用 MPI 扩展。`comm=None` 显式选择串行；传入单 rank 通信器也走串行。
+需要其他 rank 做优化、其他算例或其他工作时，必须显式传入本算例的子通信器；
+构造、检查和求解只涉及该通信器，不会对 `COMM_WORLD` 做集体通信。
+例如在四进程作业中排除 WORLD rank 0：
+
+```python
+from mpi4py import MPI
+from cfl3d import CFL3D
+
+world = MPI.COMM_WORLD
+case_comm = world.Split(0 if world.rank in (1, 2, 3) else MPI.UNDEFINED, world.rank)
+if case_comm != MPI.COMM_NULL:
+    # 每个参与 rank 都构造并保留自己的 options 副本。
+    solver = CFL3D(options=options, comm=case_comm)
+    solver.solve()
+    case_comm.Free()
+```
+
+字典 key 不区分大小写：`CFL/cfl/CfL`、`writeVolumeSolution/writevolumesolution` 均可。
+下划线仍属于参数名称；同一字典中出现大小写重复键会报错。
+各 rank 的显式 options 会分别校验并保留，在构造和每次 `solve()` 前检查一致性；
+不会用 root 配置静默覆盖其他 rank 的显式设置。为兼容旧脚本，非 root 的
+`options=None` 可继承 root 的初始配置。
+
+`solver.options` 是可修改的 `RuntimeOptions`，支持字典及属性访问：
+
+```python
+solver = CFL3D(options=options)     # 自动识别串行/MPI
+solver.solve()                     # 第一次从自由来流或 restartFile 初始化
+
+# MPI 下所有参与 rank 执行相同更新；多参数更新会整体校验，失败时不部分修改。
+solver.setOptions({"CFL": 3.0, "ITERATIONS": 100})
+solver.options["WriteVolumeSolution"] = False
+# 等价写法：solver.setOption("cfl", 3.0) 或 solver.options.cfl = 3.0
+solver.checkOptions()              # comm 内集体检查；solve() 也会自动检查
+solver.solve()                     # 从上一次完整状态继续，再执行本段 100 步
+
+if solver.comm is None or solver.comm.rank == 0:
+    solver.writeRestartFile("checkpoint.npz")  # root 本地调用，无需其他 rank 配合
+
+# 新对象从文件接续；也支持原生 restart.bin（下述格式）。
+continued = CFL3D(options={**options, "restartFile": "checkpoint.npz"})
+continued.solve()
+```
+
+修改值在下一次 `solve()` 开始时统一传入 Fortran；当前不支持计算执行中的线程热更新。
+`solver.options.check()` 与 `solver.checkOptions()` 等价。`getOption(name)` 读取当前值，`getFlowState()` 返回完整 Python 状态副本，
+`setFlowState(state)` 恢复此前保存的完整状态；其中 `fields` 是读取用的 primitive 流场，
+恢复以 `native` 完整状态为准。`resetFlow()` 清除内存状态和 restartFile 设置，下次从自由来流开始。
+`SolverOptions` 仍可作为不可变配置模板传入，运行时修改使用 `solver.options`。
+`input_grid` 在构造时加载，切换输入网格文件应创建新对象。
+
+接续状态包含主流场、湍流变量、涡黏性及 ghost/壁面状态，缓存在各 rank 的 Python 内存中，
+不依赖旧输出目录或另一个 solver 的 Fortran 全局状态。
+当前每段通过内部临时原生 restart 文件与 Fortran 交换状态，结束即清理；尚未实现无文件的状态数组传递。
+体/表面输出开关全关仍可继续计算及手动保存检查点。
+`writeRestartFile()` 默认写本次输出目录下的 `restart.npz`，包含完整原生载荷、校验和、
+兼容性元数据和 primitive 流场；它与后处理 `solution.npz` 用途不同。
+
+`restartFile` 默认 None；支持上述检查点和原生 real64、int32 记录标记、原生端序且含 ghost 数据的
+`restart.bin`。读入前检查记录完整性、块尺寸及湍流模型；Python 检查点还检查模型、gamma、
+y-up 和网格拓扑。原生文件不包含完整 Python 元数据，坐标约定和物理参考量须由使用者匹配。
+当前接续使用最后一级网格，不重复已完成的粗网格序列；`iterations` / 显式阶段表的最终阶段
+迭代数表示本段追加步数，返回 history 也仅包含本段。
+每段重新使用所设的 CFL 渐增、一阶迭代和定升反馈计数；启用这些控制时，分段点会影响计算路径。
+原生 checkpoint 与当前数值精度、记录格式和模型相关，跨平台或更换编译配置需另行验证。
 
 ## 6. 分组气动力与输出
 
@@ -253,7 +323,7 @@ CL/CD/CDp/CDv 使用 CFL3D 原生风轴定义；CY 和力矩使用输入网格�
 | `surface_filename` | `surface.dat` | 自动 Tecplot 文件名 |
 | `flow_prefix` | `flow` | 自动 PLOT3D 文件名前缀，对应 `flow.x`、`flow.q` |
 
-开关须为 Python `True/False`，不是字符串。键名区分大小写，未知键会报错。
+开关须为 Python `True/False`，不是字符串。options 键名不区分大小写，未知键会报错。
 关闭输出只影响文件写出，流场、壁面数据和载荷仍缓存在对象中：
 
 ```python
@@ -275,7 +345,8 @@ solver.writeTecplotSurfaceSolution("wing.dat", groupName="Wing")
 显式传入的文件路径相对于调用时工作目录；省略路径则使用本次计算输出目录及 options 文件名。
 MPI 下自动输出只由 rank 0 执行；补写方法也是本地调用，在其他 rank 上调用会返回 None。
 补写基于本对象最近一次成功计算的快照，不受其他 solver 后续计算或原始网格变动影响。
-三个开关全关时只保留历史、积分元数据和原生日志，不写流场数组、体/表面解或 restart 数据。
+三个开关全关时只自动保留历史、积分元数据和原生日志，不保留体/表面解或原生 restart 文件；
+完整流场仍缓存在 Python 中供接续计算，内部临时 checkpoint 在每段结束时清理。
 补写要求保留当前 Python 对象；没有实现从仅含历史的文件重建整个解。
 
 表面默认选择求解器实际使用的 wall 边界（含 CGNS FamilySpecified 解析及壁面覆盖），不输出远场、
@@ -401,7 +472,7 @@ CFL3D_VALIDATION_DIRECTORY=build/mpi-forces-validation bash tools/validate_mpi.s
 
 MPI 回归脚本需要 `bash`、`timeout`、`rg`；若检测到 Valgrind，会额外检查非法访问和未初始化值，
 不进行泄漏扫描。测试自己生成真实 ADF 文件，不需要用户提供网格。
-当前版本包含 37 项单元测试，其中 3 项可选 HDF5 测试因环境无 h5py 跳过；
+当前版本包含 41 项单元测试，其中 3 项可选 HDF5 测试因环境无 h5py 跳过；
 ADF 串行、2/3 进程、两个独立子通信器的比较项与串行基准一致。
 分组与 I/O 测试覆盖 CDp/CDv、集合去重、有量纲换算、三维力矩中心、壁面 y+、恒温壁面、三个索引方向的壁面、y-up 旋转和延迟输出。
 新增标准模板也已使用双块 CGNS/ADF 网格完成串行与三进程运行，覆盖定升、多重网格和
@@ -411,7 +482,7 @@ ADF 串行、2/3 进程、两个独立子通信器的比较项与串行基准一
 这是接口一致性与短程计算验证，尚无生产规模或长期收敛保证。
 
 Python 接口目前支持稳态、实数、结构网格、一对一多块连接和多重网格。
-尚未接入非定常、overset、非匹配 patch、周期连接、移动网格、伴随或 Python restart 接续。
+尚未接入非定常、overset、非匹配 patch、周期连接、移动网格、伴随。
 `restart_interval` 只控制写出频率。原始 CFL3D 的完整能力不等同于 Python 接口已支持的范围。
 内核使用进程全局状态，不支持同一 Python 进程内并发 `solve()`；MPI 并行按上述独立进程运行。
 原生错误后应启动新 Python 进程；MPI 原生错误会终止当前作业。

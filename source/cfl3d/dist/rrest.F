@@ -292,6 +292,11 @@ c     real(reuew),ntr,real(time)
 c     100 format(20a4/1x,e12.5,3i5,2e12.5,i5,e12.5)
 c
          ntt = ntr
+#ifdef PYTHON_API
+c     A Python continuation owns history separately. Do not send old history
+c     lengths into newly sized MPI arrays when a smaller chunk is requested.
+         if (irest2.eq.1) ntt=0
+#endif
 c
 c     use previous alpha as starting point if alpha-iteration is used
 c

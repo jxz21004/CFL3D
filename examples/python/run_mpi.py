@@ -24,7 +24,7 @@ def main():
     options = dict(input_grid=args.mesh, output_directory=args.output,
                             mach=args.mach, alpha=args.alpha, turbulence=args.model,
                             iterations=args.iterations, cfl=args.cfl, **numerical_options(parser, args))
-    solver = CFL3D(options=options if comm.rank == 0 else None, comm=comm)
+    solver = CFL3D(options=options, comm=comm)
     result = solver.solve()
     if comm.rank == 0:
         print(result.coefficients)

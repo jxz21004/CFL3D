@@ -493,7 +493,7 @@ c
       pplunge = 'cfl3d.out20'
       ovrlap = 'ovrlp.bin'
       patch = 'patch.bin'
-      restrt = 'restart.bin'
+      restrt = '.cfl3d-state.bin'
 
 #else
       iunit5 = 32
