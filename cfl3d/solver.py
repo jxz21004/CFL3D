@@ -127,6 +127,7 @@ class SolverOptions:
     surface_filename: str | Path | None = None
     flow_prefix: str | Path | None = None
     restartFile: str | Path | None = None
+    flow_mode: str = "steady"  # Implicit steady solve; time-accurate Python support is not implemented.
 
     def __setattr__(self, key, value):
         name = _OPTION_NAMES.get(key.casefold()) if isinstance(key, str) else None
@@ -201,7 +202,7 @@ _OPTION_DEFAULTS = {name: definition.default for name, definition in SolverOptio
 # 这里只规定默认接续策略，并不禁止修改。物理/网格变化在 solve 前重新初始化；
 # 数值控制、积分参考量和输出设置不丢弃流场。比较基准是上次成功计算的独立副本。
 _OPTION_CATEGORIES = {
-    "physics": frozenset(("mach", "reynolds", "temperature", "gamma", "turbulence",
+    "physics": frozenset(("flow_mode", "mach", "reynolds", "temperature", "gamma", "turbulence",
                           "full_navier_stokes", "y_up")),
     "operating_point": frozenset(("alpha", "beta", "target_cl", "alpha_relaxation",
                                   "alpha_step_limit", "alpha_update_interval")),
@@ -216,6 +217,15 @@ _OPTION_CATEGORIES["numerical"] = frozenset(_OPTION_DEFAULTS) - frozenset().unio
 
 
 def _validate_options(values):
+    mode = values["flow_mode"]
+    if not isinstance(mode, str) or mode not in ("steady", "unsteady"):
+        raise ValueError("flow_mode must be 'steady' or 'unsteady'")
+    if mode == "unsteady":
+        raise NotImplementedError(
+            "flow_mode='unsteady' is not implemented by the Python interface: "
+            "physical time steps, inner iterations, and time-history restart state are not exposed. "
+            "Use flow_mode='steady' with a positive cfl."
+        )
     if (not isinstance(values["name"], str) or not values["name"].strip() or not values["name"].isprintable()
             or values["name"] in (".", "..") or "/" in values["name"] or "\\" in values["name"]):
         raise ValueError("name must be a nonempty case name without path separators")
@@ -1241,6 +1251,8 @@ class CFL3D:
         xyz = np.asfortranarray(np.concatenate([z.coordinates.reshape(-1, 3, order="F") for z in zones]))
         conn = np.asarray(connections, dtype=np.int32).transpose(2, 1, 0).copy(order="F") if connections else np.zeros((10, 2, 0), dtype=np.int32, order="F")
         # 原生 REUE 使用百万 Reynolds 数、温度使用 Rankine；负 DT 表示按 CFL 选步长。
+        # flow_mode is validated as steady before reaching here. Positive native
+        # DT is a fixed physical time step, not a positive CFL or an explicit scheme.
         return dict(dims=dims, counts=counts, bcs=np.array(bc_rows, dtype=np.int32).T.copy(order="F"),
                     bcdata=np.array(data_rows, dtype=np.float64).T.copy(order="F"), blocks=blocks,
                     connections=conn, flow=np.array([o.mach, o.alpha, o.beta, o.reynolds/1e6, o.temperature*1.8, int(o.y_up), 0.]),

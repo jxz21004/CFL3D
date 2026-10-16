@@ -4,13 +4,56 @@ import tempfile
 import unittest
 
 import numpy as np
-from cfl3d import CFL3D, SolverOptions
+from cfl3d import CFL3D, RuntimeOptions, SolverOptions
 from cgns_fixtures import write_adf
 from fixtures import box_mesh
 from test_surface_forces import grouped_plate
 
 
 class DynamicOptionsTests(unittest.TestCase):
+    def test_flow_mode_validation_and_atomic_updates(self):
+        self.assertEqual(SolverOptions().flow_mode, 'steady')
+        self.assertIn('flow_mode', CFL3D.getOptionCategories()['physics'])
+        for source in ({'FLOW_MODE': 'unsteady'}, SolverOptions(flow_mode='unsteady')):
+            with self.subTest(source=source), self.assertRaisesRegex(NotImplementedError, 'physical time steps'):
+                CFL3D(box_mesh(), source, comm=None)
+        for value in ('transient', '', None, True, 1, ['steady']):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, 'flow_mode'):
+                RuntimeOptions({'flow_mode': value})
+        for config in (SolverOptions(), RuntimeOptions()):
+            before = dict(vars(config)) if isinstance(config, SolverOptions) else dict(config)
+            with self.assertRaises(NotImplementedError):
+                config.update({'FLOW_MODE': 'unsteady', 'CFL': 3., 'ITERATIONS': 7})
+            after = dict(vars(config)) if isinstance(config, SolverOptions) else dict(config)
+            self.assertEqual(after, before)
+            with self.assertRaises(NotImplementedError):
+                config.flow_mode = 'unsteady'
+            self.assertEqual(config.flow_mode, 'steady')
+
+    def test_explicit_steady_matches_default_and_preserves_continuation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            options = dict(turbulence='euler', iterations=2, cfl=2.,
+                           writevolumesolution=False, writeTecplotSurfaceSolution=False)
+            default = CFL3D(box_mesh(), options, comm=None)
+            expected = default.solve(output_directory=root/'default')
+            solver = CFL3D(box_mesh(), {**options, 'FlOw_MoDe': 'steady'}, comm=None)
+            arrays, _ = solver._arrays()
+            self.assertEqual(arrays['time_control'][0], -2.)
+            np.testing.assert_array_equal(arrays['run_control'][-2:], [1, 1])
+            actual = solver.solve(output_directory=root/'explicit')
+            for zone in actual.fields:
+                np.testing.assert_array_equal(actual.fields[zone], expected.fields[zone])
+            before = dict(solver.options)
+            with self.assertRaises(NotImplementedError):
+                solver.setOptions({'flow_mode': 'unsteady', 'cfl': 5., 'iterations': 9})
+            self.assertEqual(dict(solver.options), before)
+            continued = solver.solve(output_directory=root/'explicit')
+            reference = default.solve(output_directory=root/'default')
+            self.assertEqual(continued.start_mode, 'restart')
+            for zone in continued.fields:
+                np.testing.assert_array_equal(continued.fields[zone], reference.fields[zone])
+
     def test_typed_options_are_mutable_and_updates_are_atomic(self):
         config = SolverOptions(iterations=4, first_order_iterations=2)
         config.CFL = 3.0

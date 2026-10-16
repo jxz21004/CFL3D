@@ -24,6 +24,7 @@ options = {
     "input_grid": "mesh.cgns",
     "output_directory": "cruise-results",
     "name": "cruise",
+    "flow_mode": "steady",              # Implicit steady solve (the default)
     "mach": 0.85,
     "alpha": 2.0,
     "beta": 0.0,
@@ -126,6 +127,7 @@ a `SolverOptions` object. `snapshot()` makes an independent copy when needed.
 
 | Option | Default | Meaning |
 | --- | --- | --- |
+| `flow_mode` | `"steady"` | Implicit steady solve; `"unsteady"` raises `NotImplementedError` |
 | `mach` | `0.5` | Positive freestream Mach number |
 | `reynolds` | `1e6` | Reynolds number per mesh length unit; per metre for metre-based grids |
 | `temperature` | `288.15` | Positive freestream static temperature, K |
@@ -137,6 +139,17 @@ a `SolverOptions` object. `snapshot()` makes an independent copy when needed.
 Viscous models require a positive Reynolds number. The interface converts Reynolds
 number to the native REUE value in millions and Kelvin to Rankine. If a Reynolds
 number is specified using a reference chord, pass `Re_chord / cref`.
+
+`flow_mode` makes the requested temporal mode explicit. Currently only `"steady"`
+is implemented in the Python interface. Selecting `"unsteady"` raises
+`NotImplementedError` during option validation, before calling Fortran; other
+values raise `ValueError`. Rejected updates leave all existing options intact.
+
+Keep `cfl` positive in Python. The steady solver passes `DT=-cfl` to Fortran for
+local time stepping. Native `DT > 0` specifies a fixed time step, not a positive
+CFL or an explicit integration scheme. Changing the sign of `cfl` does not enable
+unsteady computation. Physical time steps, inner iterations, and the restart state
+needed for time-accurate continuation are not yet exposed.
 
 | Model | Native IVISC |
 | --- | --- |

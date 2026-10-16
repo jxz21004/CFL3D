@@ -35,6 +35,7 @@ def main():
         "input_grid": args.mesh,
         "output_directory": args.output,
         "name": args.name,
+        "flow_mode": "steady",             # Implicit steady solve; unsteady is not yet exposed.
         "numberSolutions": True,           # False: 缓存续算时沿用上一编号，追加日志/历史
         "writevolumesolution": args.write_volume,
         "writeTecplotSurfaceSolution": args.write_surface,
