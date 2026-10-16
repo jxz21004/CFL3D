@@ -5,7 +5,7 @@
 收敛历史及按部件积分的气动力。支持串行和原生主控/计算进程 MPI 路径。
 Python 求解不依赖 `.inp` 模板，也不把 CGNS 网格转换为 PLOT3D。
 
-当前 Python 包版本为 `0.1.0`，原生接口版本为 **6**。
+当前 Python 包版本为 `0.1.0`，原生接口版本为 **7**。
 完整参数说明见 [Python 接口文档](docs/python-wrapper.md)，
 各轮验证结果见 [MPI_PROGRESS.md](MPI_PROGRESS.md)，
 原始 CFL3D 文档见 [NASA CFL3D](https://nasa.github.io/CFL3D/)。
@@ -86,7 +86,7 @@ python -c "from cfl3d import CFL3D, SolverOptions, _native; print('native API:',
 python -c "from cfl3d._cgns_native import library; print('CGNS has HDF5:', library().has_hdf5)"
 ```
 
-第一条应输出接口版本 `6`。第二条输出 `False` 时仍可正常读取 CGNS/ADF；
+第一条应输出接口版本 `7`。第二条输出 `False` 时仍可正常读取 CGNS/ADF；
 若要读取 HDF5，需使用支持 HDF5 的 CGNS 库或可选 h5py。
 
 ## 3. 输入网格与量纲
@@ -311,8 +311,8 @@ CL/CD/CDp/CDv 使用 CFL3D 原生风轴定义；CY 和力矩使用输入网格�
 ### 算例名称、逐次编号与自动分析输出
 
 `CFL3D(..., name="out")` 设置算例名称，默认 `out`；也可通过 options 的 `name` 或
-`solver.name` 设置。名称不得包含路径分隔符。每个对象从 `_000` 开始为完成的计算编号，
-后续为 `_001`、`_002`，超过三位时自然扩展。
+`solver.name` 设置。名称和编号合计须为不超过 50 字符的 ASCII，且名称不得包含路径分隔符。
+默认从 `_000` 开始，后续为 `_001`、`_002`，跳过已存在的编号，超过三位时自然扩展。
 `result.solve_index`、`result.name` 记录本次编号和名称，`solver.nSolve` 为已完成计算次数；
 `result.output_paths` 给出该次各类文件的目标路径，关闭的输出文件可以不存在。
 
@@ -344,7 +344,35 @@ solver.solve()      # 重新冷启动，输出 out_002_*.dat
 | 原生 restart，启用体或 PLOT3D 输出时保存 | `out_000_restart.bin` |
 | 手动 `writeRestartFile()` 的默认目标 | `out_000_restart.npz` |
 
-非空原生日志也会保存带编号的副本，例如 `out_000_cfl3d.out`；旧固定日志路径保留最新内容。
+原生求解器从计算开始就直接写 `out_000.out`、`out_000.res`、`out_000.turres`，
+预处理日志为 `out_000_precfl3d.out`，状态文件为 `out_000.error`。
+不再生成固定名 `cfl3d.out` 后复制，也不生成两份日志；已有旧版日志不会被删除。
+
+`options["numberSolutions"]` 默认 True，控制文件编号，和流场是否续算无关：
+
+```python
+solver.solve()  # 000，默认冷启动
+solver.options["numberSolutions"] = False
+solver.options["iterations"] = 200
+continued = solver.solve()  # 从缓存再算 200 步，沿用 000
+solver.options["numberSolutions"] = True
+solver.solve()  # 继续计算，分配 001
+```
+
+False 时只有同一对象、同一算例名/输出目录/文件标签、且有续算流场时才复用上一编号。
+`.out`、预处理日志、`.res`、`.turres` 和攻角历史追加到原文件；`.res/.turres` 的迭代号
+从上一段末尾继续。日志保留每段参数和表头。体流场、壁面、截面、升力分布、restart 和
+NPZ 更新为该编号的最新状态，不将多个流场快照拼接到同一个 CGNS 或 PLOT3D 文件。
+状态 `.error` 表示最近一段的退出状态。
+
+`continued.history` 仍是本次计算段；`continued.cumulative_history` 是当前编号的累计历史，
+`continued.iteration_offset` 是本段开始前的累计步数。NPZ 的 `history` 保存累计历史，
+`chunk_history` 保存本段，`iteration_offset` 保存偏移。
+`solver.nSolve` 始终计已完成的 solve 次数，不能当作文件编号。
+
+`resetFlow()` 后、切换算例名/输出目录/文件标签后，会新建编号，不把冷启动历史接入旧流场。
+新建对象会跳过已有编号，避免覆盖历史结果；仅设置 restartFile 不会自动认领磁盘上的旧日志。
+同一输出目录不支持多个独立对象同时竞争同一算例名称。
 指定 `volume_filename="grid.cgns"` 时自动输出 `out_000_grid.cgns`；
 `surface_filename="plots/wall.dat"` 输出 `plots/out_000_wall.dat`，分析也写在该 plots 目录。
 这些选项默认 None，使用上表命名；`flow_prefix` 同样作为编号后的自定义标签。
@@ -357,7 +385,7 @@ solver.solve()      # 重新冷启动，输出 out_002_*.dat
 首次冷启动启用网格序列时，粗网格准备步数由相应阶段参数控制，history 包含这些步骤。
 `resetFlow()` 同时清除 restartFile 设置，下一次重走冷启动流程；输出编号不会重置，旧文件不删除。
 配置检查失败不占编号；原生计算已经完成而输出失败时，该次编号保留，可以补写文件。
-编号以 Python 对象为单位，新对象从 `_000` 开始；不同对象应使用不同 name 或输出目录。
+编号由 Python 对象管理，新对象从 `_000` 起寻找空闲编号；不同算例建议使用不同 name 或输出目录。
 
 
 
@@ -370,6 +398,7 @@ solver.solve()      # 重新冷启动，输出 out_002_*.dat
 | `input_grid` | None | 输入 CGNS 路径；使用 options 入口时必填 |
 | `output_directory` | `cfl3d-output` | 本次计算及自动输出目录 |
 | `name` | `out` | 算例名称，自动文件的共同前缀 |
+| `numberSolutions` | True | 新建编号；False 时同一对象的续算沿用上一编号并追加历史 |
 | `writevolumesolution` | True | 写 CGNS/ADF 体结果，并在 `out_000_solution.npz` 中保存流场 |
 | `writeTecplotSurfaceSolution` | True | 写 Tecplot ASCII 壁面网格和解 |
 | `writeflowsolution` | False | 写与原生 CFL3D IPTYPE=1 兼容的 PLOT3D `.x/.q` |

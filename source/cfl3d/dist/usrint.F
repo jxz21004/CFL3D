@@ -21,6 +21,9 @@ c  under the License.
 c  ---------------------------------------------------------------------------
 c
       subroutine usrint
+#ifdef PYTHON_API
+      use cfl3d_python_state, only: py_output_name
+#endif
 c
 c     $Id$
 c
@@ -42,6 +45,9 @@ c
       common /mydist2/ nnodes,myhost,myid,mycomm
 c
       errfile = 'cfl3d.error'
+#ifdef PYTHON_API
+      errfile=py_output_name(errfile)
+#endif
       open(unit=99,file=errfile,form='formatted',status='unknown')
 c
       ierrflg = -999

@@ -40,6 +40,20 @@ class MeshTests(unittest.TestCase):
         mesh = box_mesh(True); mesh.zones[1].coordinates += .01
         with self.assertRaises(ValueError): CFL3D(mesh)._arrays()
 
+    def test_reciprocal_interface_with_reversed_endpoints(self):
+        mesh = box_mesh(True)
+        expected, _ = CFL3D(mesh, comm=None)._arrays()
+        reciprocal = mesh.zones[1].connections[0]
+        reciprocal.point_range = reciprocal.point_range[:, ::-1].copy()
+        reciprocal.donor_range = reciprocal.donor_range[:, ::-1].copy()
+        actual, _ = CFL3D(mesh, comm=None)._arrays()
+        np.testing.assert_array_equal(actual['connections'], expected['connections'])
+        np.testing.assert_array_equal(actual['counts'], expected['counts'])
+        # Even a redundant reciprocal declaration must have a valid mapping.
+        reciprocal.transform[2] = -3
+        with self.assertRaisesRegex(ValueError, 'Transform and donor range disagree'):
+            CFL3D(mesh, comm=None)._arrays()
+
 
 @unittest.skipUnless(importlib.util.find_spec("cfl3d._native"), "Build the native extension first")
 class NativeTests(unittest.TestCase):

@@ -114,9 +114,36 @@ def main():
                 assert (second.output_directory/name).read_bytes()==(root/'serial'/name).read_bytes(),name
             assert not (second.output_directory/'out_001_surf.dat').exists()
     solver._checked(check_second)
+    # Keep this output number for a shorter continuation chunk on all ranks.
+    append_reference = None
+    before_append = None
+    if comm.rank == 0:
+        before_append = {key:second.output_paths[key].read_bytes() for key in
+                         ('log','residual','turbulence_history')}
+        serial.setOptions({'numberSolutions':False, 'iterations':1})
+        append_reference = serial.solve()
+    append_reference = comm.bcast(append_reference,root=0)
+    solver.setOptions({'NUMBERSOLUTIONS':False, 'iterations':1})
+    appended = solver.solve()
+    def check_appended():
+        assert appended.solve_index == 1 and solver.nSolve == 3
+        assert appended.iteration_offset == 2
+        np.testing.assert_array_equal(appended.history,append_reference.history)
+        np.testing.assert_array_equal(appended.cumulative_history,append_reference.cumulative_history)
+        for name in appended.fields:
+            np.testing.assert_array_equal(appended.fields[name],append_reference.fields[name])
+        if comm.rank == 0:
+            for key,content in before_append.items():
+                assert appended.output_paths[key].read_bytes().startswith(content),key
+            for key in ('residual','turbulence_history'):
+                np.testing.assert_array_equal(np.loadtxt(appended.output_paths[key])[:,0],np.arange(1,4))
+            for name in ('out_001_slices.dat','out_001_lift.dat','out_001_solution.npz'):
+                assert (appended.output_directory/name).read_bytes()==(root/'serial'/name).read_bytes(),name
+            assert not (appended.output_directory/'cfl3d.out').exists()
+    solver._checked(check_appended)
     comm.Barrier()
     if comm.rank == 0:
-        print(f'IO_PASS world={world.size} group={color} local={comm.size}: fields, wall loads, lift strips, tracked/absolute Cp cuts and numbered repeated outputs match serial',flush=True)
+        print(f'IO_PASS world={world.size} group={color} local={comm.size}: fields, wall loads, analyses, numbered outputs and same-number appended histories match serial',flush=True)
     if args.split:
         comm.Free()
     world.Barrier()

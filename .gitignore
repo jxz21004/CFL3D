@@ -65,5 +65,6 @@ build/python-standalone*/
 build/mpi-*/
 build/cgns-validation*/
 build/serial-smoke/
+build/native-output-*
 core
 core.*

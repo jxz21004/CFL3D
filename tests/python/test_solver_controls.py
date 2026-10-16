@@ -42,7 +42,7 @@ class NativeControlTests(unittest.TestCase):
                                     alpha_step_limit=.02, alpha_update_interval=2)
             result = CFL3D(box_mesh(True), options).solve(output_directory=root / "lift")
             self.assertAlmostEqual(result.final_alpha, 1.06, places=12)
-            updates = np.loadtxt(root / "lift/cfl3d.alpha", skiprows=1, ndmin=2)
+            updates = np.loadtxt(result.output_paths["alpha_history"], skiprows=1, ndmin=2)
             np.testing.assert_array_equal(updates[:, 0], [2, 4, 6])
             np.testing.assert_allclose(updates[:, 4], .02, atol=1e-12)
             with np.load(root / "lift/out_000_solution.npz") as saved:
@@ -50,7 +50,9 @@ class NativeControlTests(unittest.TestCase):
             fixed = CFL3D(box_mesh(), replace(options, target_cl=None, alpha=2.)).solve(
                 output_directory=root / "lift")
             self.assertAlmostEqual(fixed.final_alpha, 2., places=12)
-            self.assertEqual((root / "lift/cfl3d.alpha").read_text(), "")
+            self.assertEqual(fixed.output_paths["alpha_history"].read_text(), "")
+            self.assertEqual(fixed.solve_index, 1)  # Existing 000 is retained by the new object.
+            np.testing.assert_array_equal(np.loadtxt(result.output_paths["alpha_history"], skiprows=1)[:, 0], [2, 4, 6])
 
     def test_scalar_and_directional_forms_give_same_solution(self):
         with tempfile.TemporaryDirectory() as directory:

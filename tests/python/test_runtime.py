@@ -117,7 +117,7 @@ class ContinuationTests(unittest.TestCase):
             updated = solver.solve(output_directory=root / "updated")
             self.assertEqual(first.history.shape, (5, 8))
             self.assertEqual(solver._last_options.cfl, 2.0)
-            self.assertIn("2.000", (root / "updated/cfl3d.out").read_text())
+            self.assertIn("2.000", updated.output_paths["log"].read_text())
             for file in (path, native):
                 resumed = CFL3D(deepcopy(mesh), {**opts, "cfl": 2.0, "iterations": 2, "RESTARTFILE": file}, comm=None)
                 result = resumed.solve(output_directory=root / file.stem)

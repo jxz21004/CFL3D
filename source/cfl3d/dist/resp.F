@@ -44,6 +44,9 @@ c
      .                bou,nbuf,ibufdim,ncycmax,maxcs,thetay,iadvance,
      .                idefrm,igridg,nummem)
 #ifdef PYTHON_API
+      use cfl3d_python_state, only: py_iteration_offset
+#endif
+#ifdef PYTHON_API
       use cfl3d_python_state, only: py_select_force_zone
 #endif
 c
@@ -153,6 +156,10 @@ c
      .        cfttotsub
       common /igrdtyp/ ip3dgrd,ialph
 c
+      ioffset=0
+#ifdef PYTHON_API
+      ioffset=py_iteration_offset
+#endif
       jdim1 = jdim-1
       kdim1 = kdim-1
       idim1 = idim-1
@@ -658,11 +665,11 @@ c
      .         iflag = 1
             if (iflag.gt.0) then
                if (ialph .ne. 0) then
-                  write(11,2000) level,nbl,nres,real(rmst),
+                  write(11,2000) level,nbl,nres+ioffset,real(rmst),
      .            real(rms(nres)),real(clw(nres)),real(cdw(nres)),
      .            real(czw(nres))
                else
-                  write(11,2000) level,nbl,nres,real(rmst),
+                  write(11,2000) level,nbl,nres+ioffset,real(rmst),
      .            real(rms(nres)),real(clw(nres)),real(cdw(nres)),
      .            real(cyw(nres))
                end if
@@ -714,22 +721,22 @@ c
             if (iflag.gt.0) then
                if (iunst .eq. 0) then
                   if (ialph .ne. 0) then
-                     write(11,2000) level,nbl,nres,real(rmst),
+                     write(11,2000) level,nbl,nres+ioffset,real(rmst),
      .               real(rms(nres)),real(clw(nres)),real(cdw(nres)),
      .               real(czw(nres))
                   else
-                     write(11,2000) level,nbl,nres,real(rmst),
+                     write(11,2000) level,nbl,nres+ioffset,real(rmst),
      .               real(rms(nres)),real(clw(nres)),real(cdw(nres)),
      .               real(cyw(nres))
                   end if
                else
                   alot = (alpha+thetay(nbl))*radtodeg
                   if (ialph .ne. 0) then
-                     write(11,2000) level,nbl,nres,real(rmst),
+                     write(11,2000) level,nbl,nres+ioffset,real(rmst),
      .               real(rms(nres)),real(clw(nres)),real(cdw(nres)),
      .               real(czw(nres)),real(time),real(alot)
                   else
-                     write(11,2000) level,nbl,nres,real(rmst),
+                     write(11,2000) level,nbl,nres+ioffset,real(rmst),
      .               real(rms(nres)),real(clw(nres)),real(cdw(nres)),
      .               real(cyw(nres)),real(time),real(alot)
                   end if

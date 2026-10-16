@@ -16,7 +16,38 @@ module cfl3d_python_state
   integer :: py_status=0, py_used=0
   integer :: py_comm=-1, py_force_zone=0
   logical :: py_write_restart=.true.
+  character(len=60) :: py_output_stem=''
+  logical :: py_append_output=.false.
+  integer :: py_iteration_offset=0
 contains
+  function py_output_name(legacy) result(name)
+    character(len=*), intent(in) :: legacy
+    character(len=80) :: name
+    name=legacy
+    if (len_trim(py_output_stem)==0) return
+    if (index(legacy,'cfl3d.')==1) then
+      name=trim(py_output_stem)//legacy(6:)
+    else
+      name=trim(py_output_stem)//'_'//trim(legacy)
+    end if
+  end function
+
+  subroutine py_open_text(unit,name)
+    integer, intent(in) :: unit
+    character(len=*), intent(in) :: name
+    logical :: connected
+    ! A few legacy diagnostic units survive a solve. Close them explicitly before
+    ! reopening the same filename with a different STATUS/POSITION on continuation.
+    inquire(unit=unit,opened=connected)
+    if (connected) close(unit)
+    ! Open the final name before computing, so live logs need no later copy.
+    if (py_append_output) then
+      open(unit=unit,file=name,form='formatted',status='unknown',position='append')
+    else
+      open(unit=unit,file=name,form='formatted',status='replace')
+    end if
+  end subroutine
+
   integer function py_bcindex(grid,face,seg) result(idx)
     integer, intent(in) :: grid,face,seg
     integer :: f,g
@@ -147,7 +178,17 @@ end module
 subroutine py_api_version(version)
   implicit none
   integer, intent(out) :: version
-  version=6
+  version=7
+end subroutine
+
+subroutine py_set_output_names(stem,append_output,iteration_offset)
+  use cfl3d_python_state, only: py_output_stem,py_append_output,py_iteration_offset
+  implicit none
+  character(len=*), intent(in) :: stem
+  integer, intent(in) :: append_output,iteration_offset
+  py_output_stem=stem
+  py_append_output=append_output/=0
+  py_iteration_offset=iteration_offset
 end subroutine
 
 subroutine py_get_force_angles(angles)

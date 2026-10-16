@@ -9,7 +9,6 @@ import threading
 import sys
 import json
 import hashlib
-import shutil
 from numbers import Real
 import numpy as np
 from .cgns import CGNSMesh
@@ -115,6 +114,7 @@ class SolverOptions:
     input_grid: str | Path | None = None
     output_directory: str | Path = "cfl3d-output"
     name: str = "out"
+    numberSolutions: bool = True
     writevolumesolution: bool = True
     writeTecplotSurfaceSolution: bool = True
     writeflowsolution: bool = False
@@ -167,7 +167,7 @@ class SolverOptions:
                 continue
             if not isinstance(value, (str, Path)) or not str(value).strip():
                 raise ValueError(f"{name} must be a nonempty path")
-        for name in ("writevolumesolution", "writeTecplotSurfaceSolution", "writeflowsolution"):
+        for name in ("writevolumesolution", "writeTecplotSurfaceSolution", "writeflowsolution", "numberSolutions"):
             if not isinstance(getattr(self, name), bool):
                 raise ValueError(f"{name} must be a boolean")
         ints = ("iterations", "multigrid_levels", "coarse_iterations", "multigrid_cycle",
@@ -375,6 +375,8 @@ class SolverResult:
     solve_index: int = 0
     name: str = "out"
     output_paths: dict[str, Path] = field(default_factory=dict)
+    iteration_offset: int = 0
+    cumulative_history: np.ndarray | None = None
 
     @property
     def coefficients(self):
@@ -387,7 +389,9 @@ class SolverResult:
         return coefficients
 
     def save(self, filename, *, include_volume=True):
-        values = {"history": self.history, "final_alpha": np.asarray(self.final_alpha),
+        values = {"history": self.history if self.cumulative_history is None else self.cumulative_history,
+                  "chunk_history": self.history, "iteration_offset": np.asarray(self.iteration_offset),
+                  "final_alpha": np.asarray(self.final_alpha),
                   "solve_index": np.asarray(self.solve_index), "name": np.asarray(self.name)}
         if include_volume:
             values.update({f"zone_{name}": field for name, field in self.fields.items()})
@@ -418,6 +422,9 @@ class CFL3D:
         self.comm = comm
         self._last_result = None
         self._solve_counter = 0
+        self._next_output_index = 0
+        self._output_session = None
+        self._output_session_history = None
         self._group_definitions = {}
         self._lift_distributions = []
         self._slice_requests = []
@@ -491,7 +498,35 @@ class CFL3D:
                 "flow_prefix": filename(self.options.flow_prefix, "_flow"),
                 "solution": Path(stem+"_solution.npz"),
                 "restart": Path(stem+"_restart.bin"),
-                "checkpoint": Path(stem+"_restart.npz")}
+                "checkpoint": Path(stem+"_restart.npz"),
+                "log": Path(stem+".out"),
+                "residual": Path(stem+".res"),
+                "turbulence_history": Path(stem+".turres"),
+                "alpha_history": Path(stem+".alpha"),
+                "preprocess_log": Path(stem+"_precfl3d.out"),
+                "error": Path(stem+".error"),
+                "preprocess_error": Path(stem+"_precfl3d.error")}
+
+    def _select_output(self, directory, continuing):
+        """Reuse only this object's active output stream; new streams avoid existing files."""
+        labels = tuple(str(getattr(self.options, name)) for name in
+                       ("volume_filename", "surface_filename", "flow_prefix"))
+        identity = (str(directory), self.name, labels)
+        session = self._output_session
+        if (not self.options.numberSolutions and continuing and session is not None
+                and session[0] == identity):
+            return session[1], True, len(self._output_session_history), identity
+        index = self._next_output_index
+        while True:
+            names = self._numbered_output_names(index)
+            stem = f"{self.name}_{index:03d}"
+            # A fresh object must not silently overwrite another object's files, including
+            # a native failure that already wrote its numbered live log.
+            occupied = any(directory.glob(stem+".*")) or any(directory.glob(stem+"_*"))
+            occupied = occupied or any((directory / name).exists() for name in names.values())
+            if not occupied:
+                return index, False, 0, identity
+            index += 1
 
     @property
     def options(self):
@@ -992,11 +1027,6 @@ class CFL3D:
                     expected[abs(t)-1] += np.sign(t) * (cn.point_range[a, 1] - cn.point_range[a, 0])
                 if not np.array_equal(expected, cn.donor_range[:, 1]):
                     raise ValueError("Connection Transform and donor range disagree")
-                akey = (g, tuple(cn.point_range.flat)); bkey = (donor, tuple(cn.donor_range.flat))
-                canonical = tuple(sorted((akey, bkey)))
-                if canonical in seen:
-                    continue
-                seen.add(canonical)
                 # Verify paired vertices, including permutation/reversal.
                 ranges = [range(min(r), max(r)+1) for r in cn.point_range]
                 for point in np.ndindex(*(len(r) for r in ranges)):
@@ -1006,6 +1036,14 @@ class CFL3D:
                         t = int(cn.transform[a]); q[abs(t)-1] += np.sign(t) * (p[a] - cn.point_range[a, 0])
                     if not np.allclose(z.coordinates[tuple(p-1)], zones[donor].coordinates[tuple(q-1)], rtol=1e-10, atol=1e-10):
                         raise ValueError("One-to-one interface coordinates do not coincide")
+                # CGNS 两侧可用相反的端点顺序描述同一接口。先校验映射，再按
+                # 几何范围去重，避免把合法的反向声明重复登记为重叠边界。
+                akey = (g, tuple(np.sort(cn.point_range, axis=1).flat))
+                bkey = (donor, tuple(np.sort(cn.donor_range, axis=1).flat))
+                canonical = tuple(sorted((akey, bkey)))
+                if canonical in seen:
+                    continue
+                seen.add(canonical)
                 add(g, cn.point_range, 0, ())
                 add(donor, cn.donor_range, 0, ())
                 vary = [a+1 for a in axes]
@@ -1069,12 +1107,23 @@ class CFL3D:
         self._last_result = None  # Failed solves must not expose an older run's loads.
         self._surface_analysis_mesh = None
         self.checkOptions()
-        solve_index = self._solve_counter
-        if self.comm is not None and len(set(self.comm.allgather(solve_index))) != 1:
+        if self.comm is not None and len(set(self.comm.allgather(self._solve_counter))) != 1:
             raise RuntimeError("CFL3D solve counters differ within comm")
-        output_names = self._checked(lambda: self._numbered_output_names(solve_index))
         state = self._prepare_flow_state()
         self._continuing = state is not None
+        rank = self.comm.Get_rank() if self.comm is not None else 0
+        output_directory = self._checked(lambda: Path(
+            self.options.output_directory if output_directory is None else output_directory).resolve())
+        if self.comm is not None:
+            output_directory = self.comm.bcast(output_directory if rank == 0 else None, root=0)
+        selected = self._checked(lambda: self._select_output(output_directory, self._continuing) if rank == 0 else None)
+        if self.comm is not None:
+            selected = self.comm.bcast(selected, root=0)
+        solve_index, append_output, iteration_offset, output_identity = selected
+        output_names = self._checked(lambda: self._numbered_output_names(solve_index))
+        stem = f"{self.name}_{solve_index:03d}"
+        # Legacy filename fields are 80 bytes; reserve room for auxiliary suffixes.
+        self._checked(lambda: self._validate_native_stem(stem))
         arrays, xyz = self._checked(self._arrays)
         if state is not None:
             arrays["time_control"][1] = -1  # Native full-state restart, without old convergence history.
@@ -1097,17 +1146,12 @@ class CFL3D:
                                    + (" --mpi" if self.comm is not None else "")) from exc
             if bool(module.py_build_info()) != (self.comm is not None):
                 raise RuntimeError("Native extension MPI mode does not match the solver")
-            if getattr(module, "py_api_version", lambda: 0)() != 6:
+            if getattr(module, "py_api_version", lambda: 0)() != 7:
                 raise RuntimeError("Native interface changed; rebuild with python tools/build_python.py"
                                    + (" --mpi" if self.comm is not None else "") + " and restart Python")
             return module
         _native = self._checked(native_module)
-        rank = self.comm.Get_rank() if self.comm is not None else 0
-        output_directory = self._checked(lambda: Path(
-            self.options.output_directory if output_directory is None else output_directory).resolve())
-        if self.comm is not None:
-            output_directory = self.comm.bcast(output_directory if rank == 0 else None, root=0)
-        # 旧核心按固定文件名写输出，计算进程必须使用独立目录，避免互相覆盖。
+        # Native ranks retain independent work directories while using the same case/index.
         local_directory = output_directory if rank == 0 else output_directory / f"rank-{rank:04d}"
         self._checked(lambda: local_directory.mkdir(parents=True, exist_ok=True))
         checkpoint_path = output_directory / ".cfl3d-state.bin"
@@ -1139,6 +1183,7 @@ class CFL3D:
             def configure():
                 # Internal checkpoint I/O is independent of visualization output flags.
                 _native.py_set_output_flags(1)
+                _native.py_set_output_names(stem, int(append_output), iteration_offset)
                 status = _native.py_configure(**arrays)
                 if status:
                     raise RuntimeError(f"Native configuration failed ({status}); start a fresh interpreter")
@@ -1147,8 +1192,8 @@ class CFL3D:
             self._checked(configure)
             status, nrows = _native.py_solve()
             if status:
-                error_file = "precfl3d.error" if status == -99 else "cfl3d.error"
-                raise RuntimeError(f"CFL3D failed with status {status}; inspect {output_directory / error_file}")
+                error_file = output_names["preprocess_error" if status == -99 else "error"]
+                raise RuntimeError(f"CFL3D failed with status {status}; inspect {local_directory / error_file}")
             q = _native.py_get_solution(arrays["ncells"])
             history = _native.py_get_history(nrows)
             final_alpha = float(_native.py_get_final_alpha())
@@ -1196,7 +1241,10 @@ class CFL3D:
             offset += count
         result = SolverResult(fields, history, output_directory, final_alpha, surfaces, walls, wall_forces,
                               solve_index=solve_index, name=self.name,
-                              output_paths={key: output_directory/value for key,value in output_names.items()})
+                              output_paths={key: output_directory/value for key,value in output_names.items()},
+                              iteration_offset=iteration_offset,
+                              cumulative_history=(np.concatenate([self._output_session_history, history])
+                                                  if append_output else history.copy()))
         self._last_surface_coefficients = {key: value.copy() for key, value in surfaces.items()}
         self._last_wall_fields = {key: value.copy() for key, value in walls.items()}
         self._last_wall_forces = {key: value.copy() for key, value in wall_forces.items()}
@@ -1209,16 +1257,13 @@ class CFL3D:
         self._last_output_names = output_names
         # Consume an index once native computation succeeds, even if a later write needs retrying.
         self._solve_counter += 1
+        self._next_output_index = solve_index + 1
+        self._output_session = (output_identity, solve_index)
+        self._output_session_history = result.cumulative_history.copy()
         from .restart import FlowState, metadata
         self._flow_state = FlowState(checkpoint, metadata(self.mesh,self.options),
                                     {name:value.copy() for name,value in fields.items()})
         def write_outputs():
-            # Keep per-solve copies of nonempty native logs while retaining legacy latest-log paths.
-            stem = f"{result.name}_{solve_index:03d}"
-            for log in ("cfl3d.out", "cfl3d.res", "cfl3d.turres", "precfl3d.out", "cfl3d.error", "precfl3d.error"):
-                source = local_directory/log
-                if source.is_file() and source.stat().st_size:
-                    shutil.copyfile(source, local_directory/(stem+"_"+log))
             if rank != 0:
                 return
             result.save(self._output_path(None, output_names["solution"]), include_volume=self.options.writevolumesolution)
@@ -1234,3 +1279,8 @@ class CFL3D:
                 self.writeFlowSolution()
         self._checked(write_outputs)
         return result
+
+    @staticmethod
+    def _validate_native_stem(stem):
+        if not stem.isascii() or len(stem) > 50:
+            raise ValueError("Native output case name/index must be ASCII and at most 50 characters combined")

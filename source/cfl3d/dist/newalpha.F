@@ -22,7 +22,7 @@ c  ---------------------------------------------------------------------------
 c
       subroutine newalpha(ncycmax,rms,clw,myid,myhost,mycomm)
 #ifdef PYTHON_API
-      use cfl3d_python_state, only: py_final_alpha
+      use cfl3d_python_state, only: py_final_alpha,py_iteration_offset
 #endif
 c
 c     $Id$
@@ -76,6 +76,10 @@ c     rlxalph..relaxation parameter for updating alpha (default = 1)
 c     dalim....limit on magnitude of alpha change (default = 0.2 deg)
 c     dalpha...alpha change
 c     ioalph...if > 0, output alpha history to cfl3d.alpha
+      ioffset=0
+#ifdef PYTHON_API
+      ioffset=py_iteration_offset
+#endif
       ioalph = 1
 c
 c     update alpha based on error in cl;
@@ -90,7 +94,7 @@ c     update alpha based on error in cl;
 c
 c        output to cfl3d.alpha
          if (ioalph .gt. 0) then
-            write(27,'(3x,i6,4e16.8)') ntt,log10(real(rms(ntt))),
+            write(27,'(3x,i6,4e16.8)') ntt+ioffset,log10(real(rms(ntt))),
      .                                 real(clw(ntt)),
      .                                 real(alpha)*real(radtodeg),
      .                                 real(dalpha)*real(radtodeg)

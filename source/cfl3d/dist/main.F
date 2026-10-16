@@ -483,16 +483,49 @@ c
       output_dir = '.'
       grid = 'memory'
       plt3dg = 'plot3dg.bin'
+#ifdef PYTHON_API
+      plt3dg=py_output_name(plt3dg)
+#endif
       plt3dq = 'plot3dq.bin'
+#ifdef PYTHON_API
+      plt3dq=py_output_name(plt3dq)
+#endif
       output = 'cfl3d.out'
+#ifdef PYTHON_API
+      output=py_output_name(output)
+#endif
       residual = 'cfl3d.res'
+#ifdef PYTHON_API
+      residual=py_output_name(residual)
+#endif
       turbres = 'cfl3d.turres'
+#ifdef PYTHON_API
+      turbres=py_output_name(turbres)
+#endif
       blomx = 'cfl3d.blomax'
+#ifdef PYTHON_API
+      blomx=py_output_name(blomx)
+#endif
       output2 = 'cfl3d.out15'
+#ifdef PYTHON_API
+      output2=py_output_name(output2)
+#endif
       printout = 'cfl3d.prout'
+#ifdef PYTHON_API
+      printout=py_output_name(printout)
+#endif
       pplunge = 'cfl3d.out20'
+#ifdef PYTHON_API
+      pplunge=py_output_name(pplunge)
+#endif
       ovrlap = 'ovrlp.bin'
+#ifdef PYTHON_API
+      ovrlap=py_output_name(ovrlap)
+#endif
       patch = 'patch.bin'
+#ifdef PYTHON_API
+      patch=py_output_name(patch)
+#endif
       restrt = '.cfl3d-state.bin'
 
 #else
@@ -561,15 +594,47 @@ c
       call asnfile(plt3dq, '-F f77 -N ieee', IER)
 #endif
 c
+#ifdef PYTHON_API
+      call py_open_text(11,output)
+      if (py_append_output) write(11,'(/,a,i12)')
+     . 'Python continuation; previous iterations: ',py_iteration_offset
+#else
       open(unit=11,file=output,form='formatted',status='unknown')
+#endif
+#ifdef PYTHON_API
+      call py_open_text(15,output2)
+#else
       open(unit=15,file=output2,form='formatted',status='unknown')
+#endif
       preout    = 'precfl3d.out'
+#ifdef PYTHON_API
+      preout=py_output_name(preout)
+#endif
       errfile   = 'precfl3d.error'
+#ifdef PYTHON_API
+      errfile=py_output_name(errfile)
+#endif
+#ifdef PYTHON_API
+      call py_open_text(66,preout)
+#else
       open(unit=66,file=preout,form='formatted',status='unknown')
+#endif
       open(unit=99,file=errfile,form='formatted',status='unknown')
+#ifdef PYTHON_API
+      if (.not.py_append_output) rewind(11)
+#else
       rewind(11)
+#endif
+#ifdef PYTHON_API
+      if (.not.py_append_output) rewind(15)
+#else
       rewind(15)
+#endif
+#ifdef PYTHON_API
+      if (.not.py_append_output) rewind(66)
+#else
       rewind(66)
+#endif
       rewind(99)
 
 #ifndef PYTHON_API
@@ -584,7 +649,11 @@ c
 #ifdef PYTHON_API
       end if
 #endif
+#ifdef PYTHON_API
+      call py_open_text(20,pplunge)
+#else
       open(unit=20,file=pplunge,form='formatted',status='unknown')
+#endif
       open(unit=21,file=ovrlap,form='unformatted',status='unknown')
       open(unit=22,file=patch,form='unformatted',status='unknown')
 
@@ -641,21 +710,54 @@ c
 c
 c
 
+#ifdef PYTHON_API
+      call py_open_text(12,residual)
+#else
       open(unit=12,file=residual,form='formatted',status='unknown')
+#endif
+#ifdef PYTHON_API
+      call py_open_text(13,turbres)
+#else
       open(unit=13,file=turbres,form='formatted',status='unknown')
+#endif
+#ifdef PYTHON_API
+      call py_open_text(14,blomx)
+#else
       open(unit=14,file=blomx,form='formatted',status='unknown')
+#endif
 c
 c     the following file names are not set from the input deck
 c     NOTE: unit 26 is reserved for boundary condition data files,
 c     the name(s) of which are read in via the input deck
 c
       subres    = 'cfl3d.subit_res'
+#ifdef PYTHON_API
+      subres=py_output_name(subres)
+#endif
       subtur    = 'cfl3d.subit_turres'
+#ifdef PYTHON_API
+      subtur=py_output_name(subtur)
+#endif
       grdmov    = 'cfl3d.dynamic_patch'
+#ifdef PYTHON_API
+      grdmov=py_output_name(grdmov)
+#endif
       alphahist = 'cfl3d.alpha'
+#ifdef PYTHON_API
+      alphahist=py_output_name(alphahist)
+#endif
       aeinp     = 'aesurf.dat'
+#ifdef PYTHON_API
+      aeinp=py_output_name(aeinp)
+#endif
       aeout     = 'genforce.dat'
+#ifdef PYTHON_API
+      aeout=py_output_name(aeout)
+#endif
       sdhist    = 'cfl3d.sd_res'
+#ifdef PYTHON_API
+      sdhist=py_output_name(sdhist)
+#endif
 
       if (ipertavg == 0) then
          avgg      = 'cfl3d_avgg.p3d'
@@ -666,13 +768,37 @@ c
       end if
 
       avgq2     = 'cfl3d_avg_ruvwp2.p3d'
+#ifdef PYTHON_API
+      avgq2=py_output_name(avgq2)
+#endif
       avgq2pert = 'cfl3d_avg_ruvwp2_pert.p3d'
+#ifdef PYTHON_API
+      avgq2pert=py_output_name(avgq2pert)
+#endif
       movcrsg   = 'movie_coarse.g'
+#ifdef PYTHON_API
+      movcrsg=py_output_name(movcrsg)
+#endif
       movcrsq   = 'movie_coarse.q'
+#ifdef PYTHON_API
+      movcrsq=py_output_name(movcrsq)
+#endif
       mov2dg    = 'movie_2d.g'
+#ifdef PYTHON_API
+      mov2dg=py_output_name(mov2dg)
+#endif
       mov2dq    = 'movie_2d.q'
+#ifdef PYTHON_API
+      mov2dq=py_output_name(mov2dq)
+#endif
       clcds     = 'clcd.bin'
+#ifdef PYTHON_API
+      clcds=py_output_name(clcds)
+#endif
       clcdp     = 'ClCd_'
+#ifdef PYTHON_API
+      clcdp=py_output_name(clcdp)
+#endif
 c
       subres =
      $     output_dir(1:len_trim(output_dir)) // "/" // subres
@@ -704,16 +830,32 @@ c
       avgq =
      $     output_dir(1:len_trim(output_dir)) // "/" // avgq
 
-      open(unit=23,file=subres,form='formatted',status='unknown')
-      open(unit=24,file=subtur,form='formatted',status='unknown')
-      open(unit=25,file=grdmov,form='formatted',status='unknown')
 #ifdef PYTHON_API
-      open(unit=27,file=alphahist,form='formatted',status='replace')
+      call py_open_text(23,subres)
+#else
+      open(unit=23,file=subres,form='formatted',status='unknown')
+#endif
+#ifdef PYTHON_API
+      call py_open_text(24,subtur)
+#else
+      open(unit=24,file=subtur,form='formatted',status='unknown')
+#endif
+#ifdef PYTHON_API
+      call py_open_text(25,grdmov)
+#else
+      open(unit=25,file=grdmov,form='formatted',status='unknown')
+#endif
+#ifdef PYTHON_API
+      call py_open_text(27,alphahist)
 #else
       open(unit=27,file=alphahist,form='formatted',status='unknown')
 #endif
       open(unit=33,file=aeinp,form='formatted',status='unknown')
+#ifdef PYTHON_API
+      call py_open_text(34,aeout)
+#else
       open(unit=34,file=aeout,form='formatted',status='unknown')
+#endif
 #   ifdef CMPLX
       open(unit=35,file=sdhist,form='formatted',status='unknown')
 #   endif
@@ -804,19 +946,55 @@ c
       rewind( 2)
       rewind( 3)
       rewind( 4)
+#ifdef PYTHON_API
+      if (.not.py_append_output) rewind(12)
+#else
       rewind(12)
+#endif
+#ifdef PYTHON_API
+      if (.not.py_append_output) rewind(13)
+#else
       rewind(13)
+#endif
+#ifdef PYTHON_API
+      if (.not.py_append_output) rewind(14)
+#else
       rewind(14)
+#endif
       rewind(17)
+#ifdef PYTHON_API
+      if (.not.py_append_output) rewind(20)
+#else
       rewind(20)
+#endif
       rewind(21)
       rewind(22)
+#ifdef PYTHON_API
+      if (.not.py_append_output) rewind(23)
+#else
       rewind(23)
+#endif
+#ifdef PYTHON_API
+      if (.not.py_append_output) rewind(24)
+#else
       rewind(24)
+#endif
+#ifdef PYTHON_API
+      if (.not.py_append_output) rewind(25)
+#else
       rewind(25)
+#endif
+#ifdef PYTHON_API
+      if (.not.py_append_output) rewind(27)
+#else
       rewind(27)
+#endif
       rewind(33)
+#ifdef PYTHON_API
+      if (.not.py_append_output) rewind(34)
+#else
       rewind(34)
+#endif
 c
 c
 #if defined DIST_MPI
@@ -919,6 +1097,9 @@ c     close/delete precfl3d error file, and reopen as cfl3d error file
 c
       close(99,status='delete')
       errfile   = 'cfl3d.error'
+#ifdef PYTHON_API
+      errfile=py_output_name(errfile)
+#endif
       open(unit=99,file=errfile,form='formatted',status='unknown')
 c
 c***********************************************************************

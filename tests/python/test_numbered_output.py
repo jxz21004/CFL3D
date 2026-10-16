@@ -10,6 +10,71 @@ from test_surface_forces import grouped_plate
 
 
 class NumberedOutputTests(unittest.TestCase):
+    def test_lift_matching_history_continues_iteration_numbers(self):
+        with tempfile.TemporaryDirectory() as directory:
+            solver = CFL3D(grouped_plate(), dict(turbulence="sst", mach=.2,
+                            iterations=2, cfl=1., target_cl=.01, numberSolutions=False,
+                            output_directory=directory, writevolumesolution=False,
+                            writeTecplotSurfaceSolution=False), comm=None)
+            first = solver.solve()
+            previous = first.output_paths["alpha_history"].read_bytes()
+            second = solver.solve()
+            self.assertTrue(second.output_paths["alpha_history"].read_bytes().startswith(previous))
+            rows = [line.split() for line in second.output_paths["alpha_history"].read_text().splitlines()
+                    if line.split() and line.split()[0].isdigit()]
+            self.assertEqual([int(row[0]) for row in rows], [1, 2, 3, 4])
+
+    def test_same_number_appends_logs_and_history(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            options = dict(turbulence="sst", mach=.2, alpha=2., iterations=3, cfl=1.,
+                           numberSolutions=False, output_directory=root,
+                           writevolumesolution=True, writeTecplotSurfaceSolution=True)
+            solver = CFL3D(grouped_plate(), options, name="cruise", comm=None)
+            solver.addSlices("y", -.5, "absolute", "Wing")
+            first = solver.solve()
+            saved = {name: first.output_paths[name].read_bytes() for name in
+                     ("log", "residual", "turbulence_history", "preprocess_log")}
+            surface = first.output_paths["surface"].read_bytes()
+            solver.setOptions({"NUMBERSOLUTIONS": False, "iterations": 2})
+            second = solver.solve()
+            self.assertEqual((second.solve_index, solver.nSolve, second.iteration_offset), (0, 2, 3))
+            self.assertEqual(second.history.shape, (2, 8))
+            np.testing.assert_array_equal(second.cumulative_history, np.concatenate([first.history, second.history]))
+            for name, content in saved.items():
+                self.assertTrue(second.output_paths[name].read_bytes().startswith(content), name)
+                self.assertGreater(second.output_paths[name].stat().st_size, len(content), name)
+            for name in ("residual", "turbulence_history"):
+                rows = np.loadtxt(second.output_paths[name])
+                np.testing.assert_array_equal(rows[:, 0], np.arange(1, 6))
+            self.assertNotEqual(second.output_paths["surface"].read_bytes(), surface)
+            self.assertFalse((root / "cfl3d.out").exists())
+            self.assertFalse((root / "cfl3d.res").exists())
+            self.assertFalse((root / "precfl3d.out").exists())
+            self.assertFalse((root / "cruise_000_cfl3d.out").exists())
+            with np.load(second.output_paths["solution"]) as data:
+                np.testing.assert_array_equal(data["history"], second.cumulative_history)
+                np.testing.assert_array_equal(data["chunk_history"], second.history)
+                self.assertEqual(int(data["iteration_offset"]), 3)
+            full = CFL3D(grouped_plate(), {**options, "iterations": 5}, comm=None).solve(output_directory=root / "full")
+            for zone in second.fields:
+                np.testing.assert_array_equal(second.fields[zone], full.fields[zone])
+            saved = second.output_paths["residual"].read_bytes()
+            solver.setOption("numberSolutions", True)
+            third = solver.solve()
+            self.assertEqual((third.solve_index, solver.nSolve, third.iteration_offset), (1, 3, 0))
+            self.assertEqual(first.output_paths["residual"].read_bytes(), saved)
+            solver.setOption("numberSolutions", False)
+            fourth = solver.solve()
+            self.assertEqual((fourth.solve_index, fourth.iteration_offset), (1, 2))
+            # Clearing state starts a fresh stream, even if numbering is disabled.
+            solver.resetFlow()
+            fifth = solver.solve()
+            self.assertEqual((fifth.solve_index, fifth.iteration_offset, solver.nSolve), (2, 0, 5))
+            # Another object does not claim an existing stream by filename alone.
+            another = CFL3D(grouped_plate(), options, name="cruise", comm=None).solve()
+            self.assertEqual(another.solve_index, 3)
+
     def test_analyses_auto_output_numbering_and_reset(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

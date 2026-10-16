@@ -27,6 +27,9 @@ c
      .                   cftmomw,cftpw,cftvw,rmstr,nneg,
      .                   ncycmax,aehist,aesrfdat,nmds,maxaes,timekeep,
      .                   nummem)
+#ifdef PYTHON_API
+      use cfl3d_python_state, only: py_iteration_offset
+#endif
 c
 c     $Id$
 c
@@ -42,6 +45,7 @@ c
 c
       character*80 filename, num
       character*241 avgq2,avgq2pert,clcds,clcdp,output_dir
+      integer ioffset
       integer blocks_clcd
       dimension rms(ncycmax),clw(ncycmax),
      .          cdw(ncycmax),cdpw(ncycmax),cdvw(ncycmax),
@@ -67,6 +71,10 @@ c
       common /reyue/ reue,tinf,ivisc(3)
       common /avgdata/ xnumavg,iteravg,xnumavg2,ipertavg,iclcd,isubit_r
 c
+      ioffset=0
+#ifdef PYTHON_API
+      ioffset=py_iteration_offset
+#endif
       alphw = radtodeg*alpha
 c
 c     output convergence history for mean-flow equations
@@ -108,8 +116,8 @@ c
             end if
             do 3000 n=1,ntt
             if(real(rms(n)) .le. 0.) rms(n)=1.
-c           write(12,'(3x,i6,5e14.5)') n,log10(real(rms(n))),
-            write(12,'(3x,i6,6e15.7)') n,log10(real(rms(n))),
+c           write(12,'(3x,i6,5e14.5)') n+ioffset,log10(real(rms(n))),
+            write(12,'(3x,i6,6e15.7)') n+ioffset,log10(real(rms(n))),
      .      real(clw(n)),real(cdw(n)),real(cyw(n)),real(cmyw(n))
  3000       continue
          else
@@ -125,8 +133,8 @@ c           write(12,'(3x,i6,5e14.5)') n,log10(real(rms(n))),
             end if
             do 3001 n=1,ntt
             if(real(rms(n)) .le. 0.) rms(n)=1.
-c           write(12,'(3x,i6,5e14.5)') n,log10(real(rms(n))),
-            write(12,'(3x,i6,6e15.7)') n,log10(real(rms(n))),
+c           write(12,'(3x,i6,5e14.5)') n+ioffset,log10(real(rms(n))),
+            write(12,'(3x,i6,6e15.7)') n+ioffset,log10(real(rms(n))),
      .      real(clw(n)),real(cdw(n)),real(czw(n)),real(cmzw(n))
  3001       continue
          end if
@@ -142,7 +150,7 @@ c           write(12,'(3x,i6,5e14.5)') n,log10(real(rms(n))),
                   write(151,'(''variables=it,Cl,Cd,Clt,Cdt,Cdp,Cdv'')')
                   do n=1,ntt
                      if (real(clcd(1,nn,n)) < 1e20) then
-                        write(151,'(3x,i6,6e15.7)') n,
+                        write(151,'(3x,i6,6e15.7)') n+ioffset,
      .                       real(clcd(1,nn,n)), real(clcd(2,nn,n)),
      .                       real(clw(n)), real(cdw(n)),
      .                       real(cdpw(n)), real(cdvw(n))
@@ -164,8 +172,8 @@ c           write(12,'(3x,i6,5e14.5)') n,log10(real(rms(n))),
          end if
          do 3100 n=1,ntt
          if(real(rms(n)) .le. 0.) rms(n)=1.
-c        write(12,'(3x,i6,5e14.5)') n,log10(real(rms(n))),
-         write(12,'(3x,i6,6e15.7)') n,log10(real(rms(n))),
+c        write(12,'(3x,i6,5e14.5)') n+ioffset,log10(real(rms(n))),
+         write(12,'(3x,i6,6e15.7)') n+ioffset,log10(real(rms(n))),
      .   real(fmdotw(n)),real(cftpw(n)),real(cftvw(n)),real(cftmomw(n))
  3100    continue
       else
@@ -183,7 +191,7 @@ c        write(12,'(3x,i6,5e14.5)') n,log10(real(rms(n))),
          write(12,*)
          do n=1,ntt
             if(real(rms(n)) .le. 0.) rms(n)=1.
-            write(12,'(i6,9e13.5)') n,log10(real(rms(n))),
+            write(12,'(i6,9e13.5)') n+ioffset,log10(real(rms(n))),
      .      real(clw(n)),real(cdw(n)),real(cxw(n)),real(cyw(n)),
      .      real(czw(n)),real(cmxw(n)),real(cmyw(n)),real(cmzw(n))
          end do
@@ -244,22 +252,22 @@ c
              if(real(rmstr(n,l)) .le. 0.) rmstr(n,l)=1.
            enddo
          if (nummem .eq. 2) then
-         write(13,'(3x,i6,2e14.5,1x,i6,1x,i6)') n,
+         write(13,'(3x,i6,2e14.5,1x,i6,1x,i6)') n+ioffset,
      .   log10(real(rmstr(n,1))),log10(real(rmstr(n,2))),nneg(n,1),
      .   nneg(n,2)
          else if (nummem .eq. 3) then
-         write(13,'(3x,i6,3e14.5,1x,i6,1x,i6,1x,i6)') n,
+         write(13,'(3x,i6,3e14.5,1x,i6,1x,i6,1x,i6)') n+ioffset,
      .   log10(real(rmstr(n,1))),log10(real(rmstr(n,2))),
      .   log10(real(rmstr(n,3))),nneg(n,1),
      .   nneg(n,2),nneg(n,3)
          else if (nummem .eq. 4) then
-         write(13,'(3x,i6,4e14.5,1x,i6,1x,i6,1x,i6,1x,i6)') n,
+         write(13,'(3x,i6,4e14.5,1x,i6,1x,i6,1x,i6,1x,i6)') n+ioffset,
      .   log10(real(rmstr(n,1))),log10(real(rmstr(n,2))),
      .   log10(real(rmstr(n,3))),log10(real(rmstr(n,4))),
      .   nneg(n,1),nneg(n,2),nneg(n,3),nneg(n,4)
          else
          write(13,'(3x,i6,7e14.5,1x,i6,1x,i6,1x,i6,
-     .   1x,i6,1x,i6,1x,i6,1x,i6)') n,
+     .   1x,i6,1x,i6,1x,i6,1x,i6)') n+ioffset,
      .   log10(real(rmstr(n,1))),log10(real(rmstr(n,2))),
      .   log10(real(rmstr(n,3))),log10(real(rmstr(n,4))),
      .   log10(real(rmstr(n,5))),log10(real(rmstr(n,6))),

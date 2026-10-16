@@ -1,5 +1,9 @@
 python module _native
     interface
+        subroutine py_set_output_names(stem,append_output,iteration_offset)
+            character*(*) intent(in) :: stem
+            integer intent(in) :: append_output,iteration_offset
+        end subroutine py_set_output_names
         subroutine py_get_force_angles(angles)
             real(kind=8) dimension(2),intent(out) :: angles
         end subroutine py_get_force_angles

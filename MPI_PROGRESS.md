@@ -1,6 +1,6 @@
-# CFL3D Python/MPI 第九轮检查点（逐次编号与分析自动输出）— 2026-10-16
+# CFL3D Python/MPI 第十轮检查点（原生日志直接命名与同编号追加）— 2026-10-16
 
-最新编号输出、分析自动输出与续算规则见文末“第九轮”；前面保留此前各轮记录。
+最新日志命名及同编号续算规则见文末“第十轮”；前面保留此前各轮记录。
 
 本轮在 `CFL3D/` 修改；旧的 `CFL3D-f2py-CGNS-source/` 保留作为参考。
 MPI 已通过下述内存网格验收；本轮又补齐 CGNS/ADF 文件入口的串行和 MPI 验收。
@@ -438,3 +438,23 @@ PYTHONPATH=tests/python mpirun -np 4 python tests/python/validate_solution_io_mp
 
 日志在 build/mpi-numbered-validation/logs/，规则和示例见 README.md / docs/python-wrapper.md。
 本轮只修改 Python、测试及文档，未修改 Fortran 或下载依赖；原生 API 仍为 6。
+
+## 第十轮：原生日志直接命名与同编号追加（2026-10-16）
+
+- 原生 API 7，GNU debug 串行及 Intel MPI 扩展均已重建。计算从开始即写
+  `<name>_<index>.out/.res/.turres/.alpha`，预处理日志为 `<name>_<index>_precfl3d.out`。
+  取消固定名日志的事后复制，保留原有后缀；MPI 各 rank 的工作目录仍独立。
+- 新增大小写无关的 options.numberSolutions（默认 True）。False 时同一对象的缓存续算
+  沿用上一输出编号：日志及收敛历史追加，显示迭代号连续；流场/分析/restart 更新为最新状态。
+  result.history 保留当前段，cumulative_history 为本编号累计历史，iteration_offset 表示起点。
+  NPZ 保存累计 history 和本段 chunk_history。nSolve 独立统计完成的调用次数。
+- 新流场、切换输出身份、新建对象都避免认领旧文件；分配新编号时跳过已存在文件。
+  resetFlow 后即使关闭编号递增，也不会把冷启动接入旧日志。restartFile 不自动附加磁盘旧日志。
+- 修复 CGNS 互为反向端点的连接声明被重复计数的问题；先校验映射和坐标，再按几何范围去重。
+- 全套 Python 测试 46 项，43 项通过、3 项可选 HDF5 测试跳过。三进程 MPI 和两个独立
+  双进程通信器的流场、分析文件、编号和追加历史与串行一致。
+- 用户 L2 半翼（9 块、24,192 单元）完成两个 50 步求解，共用 cruise_000，日志/历史延续到 100。
+  此前 1000 步单层结果未改动；原始网格未改动。review 文件保存在 ../case_test/。
+
+验证日志：build/native-output-full-tests.log、build/native-output-mpi3.log、
+build/native-output-mpi-split.log。源码与说明已更新，未下载依赖。
