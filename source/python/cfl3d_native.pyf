@@ -1,5 +1,8 @@
 python module _native
     interface
+        subroutine py_set_restart_controls(override_alpha)
+            integer intent(in) :: override_alpha
+        end subroutine py_set_restart_controls
         subroutine py_set_output_names(stem,append_output,iteration_offset)
             character*(*) intent(in) :: stem
             integer intent(in) :: append_output,iteration_offset

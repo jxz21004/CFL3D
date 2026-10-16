@@ -6,12 +6,37 @@ import tempfile
 import unittest
 
 import numpy as np
-from cfl3d import CFL3D, SolverOptions
+from cfl3d import CFL3D, RuntimeOptions, SolverOptions
 from fixtures import flatplate_mesh, box_mesh
 from test_surface_forces import grouped_plate
 
 
 class RuntimeOptionsTests(unittest.TestCase):
+    def test_dictionary_updates_preserve_snapshots_and_coupled_rules(self):
+        source = {"iterations": 4, "first_order_iterations": 2,
+                  "multigrid_levels": 2, "multigrid_smoothing": [1, 2]}
+        live = RuntimeOptions(source)
+        saved = live.snapshot()
+        separate = RuntimeOptions(live)
+        source["multigrid_smoothing"][0] = 99
+        self.assertEqual(live.multigrid_smoothing, (1, 2))
+        saved.cfl = 7.0
+        self.assertEqual(live.cfl, 2.0)  # A snapshot is independent, not frozen.
+        # Related fields must validate together rather than one assignment at a time.
+        live.update({"ITERATIONS": 1, "FIRST_ORDER_ITERATIONS": 0, "CFL": 3.0})
+        self.assertEqual((live.iterations, live.first_order_iterations, live.cfl), (1, 0, 3.0))
+        self.assertEqual((saved.iterations, separate.iterations), (4, 4))
+        self.assertEqual((saved.cfl, separate.cfl), (7.0, 2.0))
+        before = dict(live)
+        for changes in ({"iterations": 1, "first_order_iterations": 2},
+                        {"multigrid_levels": 1}, {"CFL": 1., "cfl": 2.}, {"unknown": 1}):
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                live.update(changes)
+            self.assertEqual(dict(live), before)
+        self.assertEqual(live.stage_schedule()[0].iterations, 1)
+        self.assertEqual(live.stage_smoothing(live.stage_schedule()[0], 2), (1, 2))
+        self.assertTrue(live.check())
+
     def test_case_insensitive_atomic_updates_and_snapshots(self):
         source = {
             "CFL": 1.0,

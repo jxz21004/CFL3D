@@ -11,6 +11,8 @@ from test_surface_forces import grouped_plate
 
 
 def compare(result, reference):
+    assert result.start_mode == reference.start_mode
+    assert result.reset_reasons == reference.reset_reasons
     for name in result.fields:
         np.testing.assert_array_equal(result.fields[name], reference.fields[name])
     np.testing.assert_array_equal(result.history, reference.history)
@@ -72,6 +74,37 @@ def run(comm, root, automatic):
     other = CFL3D(options={**options, "cfl": 2.0, "iterations": 2, "restartFile": root / "checkpoint.npz"}, comm=comm)
     result = other.solve(output_directory=root / "file-next")
     solver._checked(lambda: compare(result, reference))
+    # Explicit angle edits must override the old trim angle, including on workers.
+    updates = {'alpha': 4., 'beta': 1., 'target_cl': .01, 'iterations': 2}
+    solver.setOptions(updates)
+    if comm.rank == 0:
+        serial.setOptions(updates)
+        reference = serial.solve(output_directory=root/'serial-angle')
+    reference = comm.bcast(reference if comm.rank == 0 else None,root=0)
+    angle = solver.solve(output_directory=root/'mpi-angle')
+    assert angle.start_mode == 'restart'
+    solver._checked(lambda: compare(angle,reference))
+    solver.setOption('mach', .25)
+    if comm.rank == 0:
+        serial.setOption('mach', .25)
+        reference = serial.solve(output_directory=root/'serial-reset')
+    reference = comm.bcast(reference if comm.rank == 0 else None,root=0)
+    cold = solver.solve(output_directory=root/'mpi-reset')
+    assert cold.start_mode == 'cold' and cold.reset_reasons == ('mach',)
+    solver._checked(lambda: compare(cold,reference))
+    new_input = root/'new-mesh.cgns'
+    if comm.rank == 0:
+        changed_mesh = grouped_plate()
+        for zone in changed_mesh.zones:
+            zone.coordinates[...,0] *= 1.01
+        write_adf(changed_mesh,new_input)
+        serial.setOption('input_grid',new_input)
+        reference = serial.solve(output_directory=root/'serial-new-mesh')
+    reference = comm.bcast(reference if comm.rank == 0 else None,root=0)
+    solver.setOption('INPUT_GRID',new_input)
+    new_grid = solver.solve(output_directory=root/'mpi-new-mesh')
+    assert new_grid.start_mode == 'cold' and 'input_grid' in new_grid.reset_reasons
+    solver._checked(lambda: compare(new_grid,reference))
     # Cached states are also checked before native collectives.
     if comm.rank == comm.size - 1:
         other._flow_state = None
@@ -83,7 +116,7 @@ def run(comm, root, automatic):
         raise AssertionError("Expected cached flow state mismatch")
     comm.Barrier()
     if comm.rank == 0:
-        print(f"RUNTIME_PASS world_rank={MPI.COMM_WORLD.rank} comm_size={comm.size} auto={automatic}", flush=True)
+        print(f"RUNTIME_PASS world_rank={MPI.COMM_WORLD.rank} comm_size={comm.size} auto={automatic}: mutable controls, explicit trim angles, physical resets and mesh reloads match serial", flush=True)
 
 
 def main():

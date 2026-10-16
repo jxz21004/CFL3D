@@ -122,7 +122,7 @@ options = SolverOptions(
 二维两平面网格的 i 方向关闭黏性，其他方向按所选模型设置。
 Euler 自动关闭 full_navier_stokes。湍流 CFL 统一设置核心的七个 CFLTURB 槽位。
 `eddy_viscosity_limit`、`gamma`、`kappa` 和参考参数也可以在 SolverOptions 中配置。
-SolverOptions 是不可变配置模板；solver.options 可通过字典、属性或 setOptions() 原地修改，下一次 solve() 同步传入 Fortran。
+SolverOptions 和 solver.options 均支持动态修改；下一次 solve() 按参数分类选择接续或重新初始化，并同步传入 Fortran。
 
 本轮新增稳态计算控制参数：
 
@@ -209,7 +209,7 @@ MIT 须为 1..20 的整数，MTT 非负，接口检查 MIT+MTT 不超过原生�
 阶段表及 MIT 使用不可变 tuple，可通过 dataclasses.replace 创建修改后的配置。
 embedded 网格尚未接入，NEMGL/ICONSF 仍没有可用的 embedded 计算接口。
 
-本版原生接口版本为 7，新增原生日志命名和同编号追加接口，必须重建串行和 MPI 扩展并重启 Python：
+本版原生接口版本为 8，新增显式攻角覆盖 restart 定升攻角的控制，必须重建串行和 MPI 扩展并重启 Python：
 
 ```bash
 python tools/build_python.py --debug --jobs 8
@@ -649,8 +649,48 @@ continued.solve()
 `solver.options.check()` 与 `solver.checkOptions()` 等价。`getOption(name)` 读取当前值，`getFlowState()` 返回完整 Python 状态副本，
 `setFlowState(state)` 恢复此前保存的完整状态；其中 `fields` 是读取用的 primitive 流场，
 恢复以 `native` 完整状态为准。`resetFlow()` 清除内存状态和 restartFile 设置，下次从自由来流开始。
-`SolverOptions` 仍可作为不可变配置模板传入，运行时修改使用 `solver.options`。
-`input_grid` 在构造时加载，切换输入网格文件应创建新对象。
+`SolverOptions` 本身也是动态参数对象，允许属性赋值及 `config.update({...})`；
+相关参数应通过一次 update 同时更新，校验失败时不会部分修改。
+`CFL3D` 构造时复制输入配置，各 rank 的 `solver.options` 独立保存运行参数字典。
+之后修改原 config/原字典不会自动修改 solver，运行时请改 `solver.options`。
+参数更新不重复构造 `SolverOptions`；仅请求/保存配置快照时创建独立副本。
+快照通过复制保证与运行参数隔离，不再使用 frozen=True。
+
+### 修改参数后的自动接续策略
+
+每次 `solve()` 对比**最后一次成功计算**的配置，按下表选择初始化方式。
+赋值时不会立即丢弃流场；改了又改回不触发重置。所有参数仍须通过自身合法性和 MPI 一致性检查。
+
+| 类别 | 参数示例 | 下一次 solve 的处理 |
+| --- | --- | --- |
+| `physics` | Mach、Re、温度、gamma、湍流模型、full_navier_stokes、y_up | 默认从自由来流重新初始化 |
+| `numerical` | CFL、迭代步数、限制器、通量、多重网格层数/循环/平滑 | 保留最细层流场，应用新控制参数 |
+| `operating_point` | alpha、beta、target_cl 及定升调节参数 | 保留流场；显式修改 alpha 时优先新值，否则延续定升攻角 |
+| `reference` | sref、cref、bref、moment_center、freestream_pressure | 保留流场，新计算按新参考量积分；旧结果仍使用旧参考量 |
+| `io` | name、输出目录/开关、numberSolutions、文件标签 | 保留流场，仅调整输出 |
+| `mesh` | input_grid、内存网格的坐标/维数/边界/连接 | 重新加载或使用当前网格，重建计算数据并重新初始化 |
+| `restart` | restartFile | 显式改为新文件时加载并校验新状态 |
+
+`CFL3D.getOptionCategories()` 返回完整参数分类。
+`result.start_mode` 为 `cold` 或 `restart`；`changed_options` 记录变化的 options，
+`reset_reasons` 记录导致重置的关键参数/mesh。自动重置时仅 root 打印原因，NPZ 也保存这些信息。
+即使 `numberSolutions=False`，重新初始化也会使用新输出编号，保留旧结果。
+
+```python
+solver.setOptions({"cfl": 3., "iterations": 100})
+result = solver.solve()                 # 从缓存续算
+solver.options.mach = 0.9
+result = solver.solve()                 # Mach 改变，自动重新初始化
+print(result.start_mode, result.reset_reasons)
+solver.options.input_grid = "new.cgns"
+result = solver.solve()                 # root 读新网格、广播、重新初始化
+```
+
+input_grid 指定文件的尺寸/修改时间变化也会重新读取；设为 None 则沿用当前内存网格。
+更换离散网格时，relative slices 会按原请求位置重新附着；原有分组名称必须在新网格中有效。
+显式提供新的 restartFile 时，它作为新的初始状态；未修改的旧 restartFile 不会被重新加载来
+抵消物理参数变化触发的重置。此默认策略暂不提供跨物理模型的强制热启动。
+
 
 接续状态包含主流场、湍流变量、涡黏性及 ghost/壁面状态，缓存在各 rank 的 Python 内存中，
 不依赖旧输出目录或另一个 solver 的 Fortran 全局状态。

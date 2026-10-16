@@ -69,9 +69,14 @@ class MultigridStage:
             _smoothing(self.smoothing_steps, self.levels, "stage.smoothing_steps")
 
 
-@dataclass(frozen=True)
+@dataclass
 class SolverOptions:
-    """Python 工况与迭代控制；单位换算和原生数组布局集中在 _arrays()。"""
+    """Dynamic typed settings; validated assignments do not rebuild this object.
+
+    Use update() for related parameters that must change together. CFL3D keeps
+    its own rank-local copy in solver.options; snapshots are independent copies,
+    not frozen settings. Reset/continuation decisions are made at the next solve.
+    """
     mach: float = 0.5
     alpha: float = 0.0
     beta: float = 0.0
@@ -123,10 +128,26 @@ class SolverOptions:
     flow_prefix: str | Path | None = None
     restartFile: str | Path | None = None
 
+    def __setattr__(self, key, value):
+        name = _OPTION_NAMES.get(key.casefold()) if isinstance(key, str) else None
+        if name is None:
+            raise AttributeError(f"Unknown CFL3D option: {key!r}")
+        if len(vars(self)) < len(_OPTION_NAMES):
+            object.__setattr__(self, name, value)  # Dataclass construction, before full validation.
+        else:
+            self.update({key: value})
+
+    def update(self, options=None, **kwargs):
+        """Validate related changes together, then update this configuration in place."""
+        changes = self._normalize_values({**({} if options is None else dict(options)), **kwargs})
+        _validate_options({**vars(self), **changes})
+        vars(self).update(changes)
+        return self
+
     @classmethod
-    def from_dict(cls, options):
-        """Normalize a user dictionary without mutating it; reject misspelled keys."""
-        names = {name.casefold(): name for name in cls.__dataclass_fields__}
+    def _normalize_values(cls, options):
+        """Normalize only supplied values, without constructing a configuration."""
+        names = _OPTION_NAMES
         values = {}
         for key, value in dict(options).items():
             name = names.get(key.casefold()) if isinstance(key, str) else None
@@ -155,134 +176,176 @@ class SolverOptions:
                     stage = MultigridStage(**stage)
                 stages.append(stage)
             values["multigrid_stages"] = tuple(stages)
-        return cls(**values)
+        return values
+
+    @classmethod
+    def from_dict(cls, options):
+        """Build dynamic typed settings; solver.options updates use dictionaries."""
+        return cls(**cls._normalize_values(options))
 
     def validate(self):
-        if (not isinstance(self.name, str) or not self.name.strip() or not self.name.isprintable()
-                or self.name in (".", "..") or "/" in self.name or "\\" in self.name):
-            raise ValueError("name must be a nonempty case name without path separators")
-        for name in ("input_grid", "output_directory", "volume_filename", "surface_filename", "flow_prefix", "restartFile"):
-            value = getattr(self, name)
-            if value is None and name in ("input_grid", "restartFile", "volume_filename", "surface_filename", "flow_prefix"):
-                continue
-            if not isinstance(value, (str, Path)) or not str(value).strip():
-                raise ValueError(f"{name} must be a nonempty path")
-        for name in ("writevolumesolution", "writeTecplotSurfaceSolution", "writeflowsolution", "numberSolutions"):
-            if not isinstance(getattr(self, name), bool):
-                raise ValueError(f"{name} must be a boolean")
-        ints = ("iterations", "multigrid_levels", "coarse_iterations", "multigrid_cycle",
-                "turbulence_subiterations", "cfl_ramp_steps",
-                "first_order_iterations", "coarse_first_order_iterations")
-        for name in ints:
-            value = getattr(self, name)
-            if isinstance(value, bool) or not isinstance(value, int):
-                raise ValueError(f"{name} must be an integer")
-        if self.iterations < 1 or self.coarse_iterations < 0 or self.turbulence_subiterations < 1:
-            raise ValueError("Invalid iteration count")
-        if self.cfl_ramp_steps < 0 or not 0 <= self.first_order_iterations <= self.iterations:
-            raise ValueError("Require nonnegative CFL ramp steps and first_order_iterations <= iterations")
-        if not 0 <= self.coarse_first_order_iterations <= self.coarse_iterations:
-            raise ValueError("coarse_first_order_iterations must be within coarse_iterations")
-        if self.restart_interval is not None and (isinstance(self.restart_interval, bool)
-                or not isinstance(self.restart_interval, int) or self.restart_interval < 1):
-            raise ValueError("restart_interval must be a positive integer or None")
-        if not 1 <= self.multigrid_levels <= 5 or self.multigrid_cycle not in (1, 2):
-            raise ValueError("multigrid_levels must be 1..5; cycle must be 1 (V) or 2 (W)")
-        if self.turbulence.lower() not in _MODELS:
-            raise ValueError(f"Supported models: {', '.join(_MODELS)}")
-        for name in ("mach", "alpha", "beta", "reynolds", "temperature", "cfl", "turbulence_cfl",
-                     "eddy_viscosity_limit", "gamma", "sref", "cref", "bref", "cfl_ramp_factor",
-                     "alpha_relaxation", "alpha_step_limit"):
-            value = getattr(self, name)
-            _finite(value, name)
-        if self.mach <= 0 or self.temperature <= 0 or self.cfl <= 0 or self.gamma <= 1:
-            raise ValueError("Require positive Mach, temperature, CFL and gamma > 1")
-        if self.cfl_ramp_factor < 1:
-            raise ValueError("cfl_ramp_factor must be >= 1")
-        for name in ("mesh_sequence", "full_navier_stokes", "y_up"):
-            if not isinstance(getattr(self, name), bool):
-                raise ValueError(f"{name} must be a boolean")
-        if min(self.sref, self.cref, self.bref, self.turbulence_cfl, self.eddy_viscosity_limit) <= 0:
-            raise ValueError("Reference scales and turbulence controls must be positive")
-        if self.reynolds <= 0 and self.turbulence.lower() != "euler":
-            raise ValueError("Viscous models require positive Reynolds number")
-        if len(self.moment_center) != 3 or not np.isfinite(self.moment_center).all():
-            raise ValueError("moment_center must contain three finite coordinates")
-        _directions(self.limiter, "limiter", (0, 1, 2, 3, 4))
-        _directions(self.flux, "flux", (0, 1))
-        _directions(self.inversion, "inversion", (0, 1))
-        _directions(self.kappa, "kappa")
-        _integer(self.alpha_update_interval, "alpha_update_interval", 1)
-        if min(self.alpha_relaxation, self.alpha_step_limit) <= 0:
-            raise ValueError("Alpha relaxation and step limit must be positive")
-        if self.target_cl is not None:
-            _finite(self.target_cl, "target_cl")
-            if self.target_cl == 99999.0:
-                raise ValueError("99999 is the native disabled-CL sentinel; use target_cl=None")
-        if self.freestream_pressure is not None:
-            _finite(self.freestream_pressure, "freestream_pressure")
-            if self.freestream_pressure <= 0:
-                raise ValueError("freestream_pressure must be positive (Pa)")
-        _integer(self.multigrid_up_iterations, "multigrid_up_iterations", 0, 19)
-        if self.multigrid_smoothing is not None:
-            _smoothing(self.multigrid_smoothing, self.multigrid_levels, "multigrid_smoothing")
-        schedule = self.stage_schedule()
-        if not 1 <= len(schedule) <= self.multigrid_levels:
-            raise ValueError("Use between one and multigrid_levels mesh-sequence stages")
-        for index, stage in enumerate(schedule):
-            if not isinstance(stage, MultigridStage):
-                raise ValueError("multigrid_stages must contain MultigridStage objects")
-            # 原生序列每阶段细化一次；阶段数决定从哪一级网格开始。
-            available = self.multigrid_levels - len(schedule) + index + 1
-            stage.validate(available)
-            if max(self.stage_smoothing(stage, available)) + self.multigrid_up_iterations > 20:
-                raise ValueError("MIT + MTT must not exceed the native limit of 20")
+        _validate_options(vars(self))
 
     def stage_schedule(self):
-        if self.multigrid_stages is not None:
-            if not isinstance(self.multigrid_stages, tuple):
-                raise ValueError("multigrid_stages must be an immutable tuple")
-            return self.multigrid_stages
-        if self.mesh_sequence:
-            return tuple(MultigridStage(self.coarse_iterations, level,
-                                       self.coarse_first_order_iterations)
-                         for level in range(1, self.multigrid_levels)) + (
-                MultigridStage(self.iterations, self.multigrid_levels, self.first_order_iterations),)
-        return (MultigridStage(self.iterations, self.multigrid_levels, self.first_order_iterations),)
+        return _stage_schedule(vars(self))
 
     def stage_smoothing(self, stage, available_levels):
-        # 默认 MIT 按全局粗到细编号；只取本阶段实际参与循环的网格层。
-        template = self.multigrid_smoothing or (1,) * self.multigrid_levels
-        return stage.smoothing_steps or template[available_levels-stage.levels:available_levels]
+        return _stage_smoothing(vars(self), stage, available_levels)
 
+
+# The schema/defaults are read once. Live updates operate on dictionaries; only
+# explicit snapshot requests construct a SolverOptions instance.
+_OPTION_NAMES = {name.casefold(): name for name in SolverOptions.__dataclass_fields__}
+_OPTION_DEFAULTS = {name: definition.default for name, definition in SolverOptions.__dataclass_fields__.items()}
+
+# 这里只规定默认接续策略，并不禁止修改。物理/网格变化在 solve 前重新初始化；
+# 数值控制、积分参考量和输出设置不丢弃流场。比较基准是上次成功计算的独立副本。
+_OPTION_CATEGORIES = {
+    "physics": frozenset(("mach", "reynolds", "temperature", "gamma", "turbulence",
+                          "full_navier_stokes", "y_up")),
+    "operating_point": frozenset(("alpha", "beta", "target_cl", "alpha_relaxation",
+                                  "alpha_step_limit", "alpha_update_interval")),
+    "reference": frozenset(("sref", "cref", "bref", "moment_center", "freestream_pressure")),
+    "mesh": frozenset(("input_grid",)),
+    "restart": frozenset(("restartFile",)),
+    "io": frozenset(("name", "output_directory", "numberSolutions", "writevolumesolution",
+                     "writeTecplotSurfaceSolution", "writeflowsolution", "volume_filename",
+                     "surface_filename", "flow_prefix")),
+}
+_OPTION_CATEGORIES["numerical"] = frozenset(_OPTION_DEFAULTS) - frozenset().union(*_OPTION_CATEGORIES.values())
+
+
+def _validate_options(values):
+    if (not isinstance(values["name"], str) or not values["name"].strip() or not values["name"].isprintable()
+            or values["name"] in (".", "..") or "/" in values["name"] or "\\" in values["name"]):
+        raise ValueError("name must be a nonempty case name without path separators")
+    for name in ("input_grid", "output_directory", "volume_filename", "surface_filename", "flow_prefix", "restartFile"):
+        value = values[name]
+        if value is None and name in ("input_grid", "restartFile", "volume_filename", "surface_filename", "flow_prefix"):
+            continue
+        if not isinstance(value, (str, Path)) or not str(value).strip():
+            raise ValueError(f"{name} must be a nonempty path")
+    for name in ("writevolumesolution", "writeTecplotSurfaceSolution", "writeflowsolution", "numberSolutions"):
+        if not isinstance(values[name], bool):
+            raise ValueError(f"{name} must be a boolean")
+    ints = ("iterations", "multigrid_levels", "coarse_iterations", "multigrid_cycle",
+            "turbulence_subiterations", "cfl_ramp_steps",
+            "first_order_iterations", "coarse_first_order_iterations")
+    for name in ints:
+        value = values[name]
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError(f"{name} must be an integer")
+    if values["iterations"] < 1 or values["coarse_iterations"] < 0 or values["turbulence_subiterations"] < 1:
+        raise ValueError("Invalid iteration count")
+    if values["cfl_ramp_steps"] < 0 or not 0 <= values["first_order_iterations"] <= values["iterations"]:
+        raise ValueError("Require nonnegative CFL ramp steps and first_order_iterations <= iterations")
+    if not 0 <= values["coarse_first_order_iterations"] <= values["coarse_iterations"]:
+        raise ValueError("coarse_first_order_iterations must be within coarse_iterations")
+    if values["restart_interval"] is not None and (isinstance(values["restart_interval"], bool)
+            or not isinstance(values["restart_interval"], int) or values["restart_interval"] < 1):
+        raise ValueError("restart_interval must be a positive integer or None")
+    if not 1 <= values["multigrid_levels"] <= 5 or values["multigrid_cycle"] not in (1, 2):
+        raise ValueError("multigrid_levels must be 1..5; cycle must be 1 (V) or 2 (W)")
+    if values["turbulence"].lower() not in _MODELS:
+        raise ValueError(f"Supported models: {', '.join(_MODELS)}")
+    for name in ("mach", "alpha", "beta", "reynolds", "temperature", "cfl", "turbulence_cfl",
+                 "eddy_viscosity_limit", "gamma", "sref", "cref", "bref", "cfl_ramp_factor",
+                 "alpha_relaxation", "alpha_step_limit"):
+        value = values[name]
+        _finite(value, name)
+    if values["mach"] <= 0 or values["temperature"] <= 0 or values["cfl"] <= 0 or values["gamma"] <= 1:
+        raise ValueError("Require positive Mach, temperature, CFL and gamma > 1")
+    if values["cfl_ramp_factor"] < 1:
+        raise ValueError("cfl_ramp_factor must be >= 1")
+    for name in ("mesh_sequence", "full_navier_stokes", "y_up"):
+        if not isinstance(values[name], bool):
+            raise ValueError(f"{name} must be a boolean")
+    if min(values["sref"], values["cref"], values["bref"], values["turbulence_cfl"], values["eddy_viscosity_limit"]) <= 0:
+        raise ValueError("Reference scales and turbulence controls must be positive")
+    if values["reynolds"] <= 0 and values["turbulence"].lower() != "euler":
+        raise ValueError("Viscous models require positive Reynolds number")
+    if len(values["moment_center"]) != 3 or not np.isfinite(values["moment_center"]).all():
+        raise ValueError("moment_center must contain three finite coordinates")
+    _directions(values["limiter"], "limiter", (0, 1, 2, 3, 4))
+    _directions(values["flux"], "flux", (0, 1))
+    _directions(values["inversion"], "inversion", (0, 1))
+    _directions(values["kappa"], "kappa")
+    _integer(values["alpha_update_interval"], "alpha_update_interval", 1)
+    if min(values["alpha_relaxation"], values["alpha_step_limit"]) <= 0:
+        raise ValueError("Alpha relaxation and step limit must be positive")
+    if values["target_cl"] is not None:
+        _finite(values["target_cl"], "target_cl")
+        if values["target_cl"] == 99999.0:
+            raise ValueError("99999 is the native disabled-CL sentinel; use target_cl=None")
+    if values["freestream_pressure"] is not None:
+        _finite(values["freestream_pressure"], "freestream_pressure")
+        if values["freestream_pressure"] <= 0:
+            raise ValueError("freestream_pressure must be positive (Pa)")
+    _integer(values["multigrid_up_iterations"], "multigrid_up_iterations", 0, 19)
+    if values["multigrid_smoothing"] is not None:
+        _smoothing(values["multigrid_smoothing"], values["multigrid_levels"], "multigrid_smoothing")
+    schedule = _stage_schedule(values)
+    if not 1 <= len(schedule) <= values["multigrid_levels"]:
+        raise ValueError("Use between one and multigrid_levels mesh-sequence stages")
+    for index, stage in enumerate(schedule):
+        if not isinstance(stage, MultigridStage):
+            raise ValueError("multigrid_stages must contain MultigridStage objects")
+        # 原生序列每阶段细化一次；阶段数决定从哪一级网格开始。
+        available = values["multigrid_levels"] - len(schedule) + index + 1
+        stage.validate(available)
+        if max(_stage_smoothing(values, stage, available)) + values["multigrid_up_iterations"] > 20:
+            raise ValueError("MIT + MTT must not exceed the native limit of 20")
+
+
+def _stage_schedule(values):
+    if values["multigrid_stages"] is not None:
+        if not isinstance(values["multigrid_stages"], tuple):
+            raise ValueError("multigrid_stages must be an immutable tuple")
+        return values["multigrid_stages"]
+    if values["mesh_sequence"]:
+        return tuple(MultigridStage(values["coarse_iterations"], level,
+                                   values["coarse_first_order_iterations"])
+                     for level in range(1, values["multigrid_levels"])) + (
+            MultigridStage(values["iterations"], values["multigrid_levels"], values["first_order_iterations"]),)
+    return (MultigridStage(values["iterations"], values["multigrid_levels"], values["first_order_iterations"]),)
+
+
+def _stage_smoothing(values, stage, available_levels):
+    # 默认 MIT 按全局粗到细编号；只取本阶段实际参与循环的网格层。
+    template = values["multigrid_smoothing"] or (1,) * values["multigrid_levels"]
+    return stage.smoothing_steps or template[available_levels-stage.levels:available_levels]
 
 
 class RuntimeOptions(MutableMapping):
-    """Rank-local, case-insensitive options with validated atomic updates.
+    """Mutable rank-local parameter dictionary with validated atomic updates.
 
     Changes remain local until checkOptions()/solve() verifies the object's
     communicator. Native controls are installed together at the next solve.
+    SolverOptions is used only for typed input/snapshots, not as live storage.
     """
 
     def __init__(self, options=None):
         if isinstance(options, RuntimeOptions):
-            options = options.snapshot()
-        value = (deepcopy(options) if isinstance(options, SolverOptions)
-                 else SolverOptions.from_dict({} if options is None else options))
-        value.validate()
-        object.__setattr__(self, "_value", value)
+            values = deepcopy(options._values)
+        elif isinstance(options, SolverOptions):
+            # Typed inputs retain their stricter tuple/type requirements.
+            values = deepcopy(vars(options))
+        else:
+            values = deepcopy(_OPTION_DEFAULTS)
+            values.update(SolverOptions._normalize_values({} if options is None else options))
+        _validate_options(values)
+        object.__setattr__(self, "_values", values)
         object.__setattr__(self, "_check_callback", None)
 
     @staticmethod
     def _name(key):
-        names = {name.casefold(): name for name in SolverOptions.__dataclass_fields__}
-        name = names.get(key.casefold()) if isinstance(key, str) else None
+        name = _OPTION_NAMES.get(key.casefold()) if isinstance(key, str) else None
         if name is None:
             raise KeyError(f"Unknown CFL3D option: {key!r}")
         return name
 
     def __getitem__(self, key):
-        return deepcopy(getattr(self._value, self._name(key)))
+        return deepcopy(self._values[self._name(key)])
 
     def __setitem__(self, key, value):
         self.update({key: value})
@@ -291,42 +354,49 @@ class RuntimeOptions(MutableMapping):
         raise TypeError("Options cannot be deleted; assign a default value explicitly")
 
     def __iter__(self):
-        return iter(SolverOptions.__dataclass_fields__)
+        return iter(_OPTION_DEFAULTS)
 
     def __len__(self):
-        return len(SolverOptions.__dataclass_fields__)
+        return len(_OPTION_DEFAULTS)
 
     def __getattr__(self, key):
         try:
             name = self._name(key)
-        except KeyError:
-            return getattr(self._value, key)
-        return deepcopy(getattr(self._value, name))
+        except KeyError as exc:
+            raise AttributeError(key) from exc
+        return deepcopy(self._values[name])
 
     def __setattr__(self, key, value):
         self[key] = value
 
     def update(self, *args, **kwargs):
         provided = dict(*args, **kwargs)
-        changes = SolverOptions.from_dict(provided)
-        # Normalize provided names separately so unspecified defaults never replace existing values.
-        values = {name: getattr(self._value, name) for name in self}
-        for key in provided:
-            name = self._name(key)
-            values[name] = getattr(changes, name)
-        candidate = SolverOptions(**values)
-        candidate.validate()
-        object.__setattr__(self, "_value", candidate)
+        changes = SolverOptions._normalize_values(provided)
+        # 校验候选字典后一次替换；不改动现值，也不反复创建 SolverOptions。
+        # 只规范化传入项，未修改参数和已保存的历史快照保持原值。
+        candidate = {**self._values, **changes}
+        _validate_options(candidate)
+        object.__setattr__(self, "_values", candidate)
+
+    def validate(self):
+        _validate_options(self._values)
+
+    def stage_schedule(self):
+        return _stage_schedule(self._values)
+
+    def stage_smoothing(self, stage, available_levels):
+        return _stage_smoothing(self._values, stage, available_levels)
 
     def check(self):
         """Check locally when standalone, or collectively when owned by a CFL3D object."""
         if self._check_callback is not None:
             return self._check_callback()
-        self._value.validate()
+        self.validate()
         return True
 
     def snapshot(self):
-        return deepcopy(self._value)
+        """Create independent dynamic settings; later edits cannot change the live dictionary."""
+        return SolverOptions(**deepcopy(self._values))
 
 
 def _automatic_comm(comm):
@@ -377,6 +447,9 @@ class SolverResult:
     output_paths: dict[str, Path] = field(default_factory=dict)
     iteration_offset: int = 0
     cumulative_history: np.ndarray | None = None
+    start_mode: str = "cold"
+    changed_options: tuple[str, ...] = ()
+    reset_reasons: tuple[str, ...] = ()
 
     @property
     def coefficients(self):
@@ -392,7 +465,10 @@ class SolverResult:
         values = {"history": self.history if self.cumulative_history is None else self.cumulative_history,
                   "chunk_history": self.history, "iteration_offset": np.asarray(self.iteration_offset),
                   "final_alpha": np.asarray(self.final_alpha),
-                  "solve_index": np.asarray(self.solve_index), "name": np.asarray(self.name)}
+                  "solve_index": np.asarray(self.solve_index), "name": np.asarray(self.name),
+                  "start_mode": np.asarray(self.start_mode),
+                  "changed_options": np.asarray(self.changed_options, dtype=str),
+                  "reset_reasons": np.asarray(self.reset_reasons, dtype=str)}
         if include_volume:
             values.update({f"zone_{name}": field for name, field in self.fields.items()})
         keys = sorted(self.surface_coefficients)
@@ -431,6 +507,8 @@ class CFL3D:
         self._surface_analysis_mesh = None
         self._flow_state = None
         self._loaded_restart_file = None
+        self._successful_options = None
+        self._successful_mesh_signature = None
         self._comm_members = self._current_comm_members()
 
         def parse():
@@ -468,7 +546,9 @@ class CFL3D:
             if comm.size - 1 > len(self.mesh.zones):
                 raise ValueError("This MPI interface currently requires at least one zone per worker")
         self.addGroups(group_definitions)
-        self._input_grid_at_construction = self.options.input_grid
+        stamp = self._checked(lambda: self._grid_stamp(self.options.input_grid)
+                              if self.comm is None or self.comm.rank == 0 else None)
+        self._loaded_grid_stamp = self.comm.bcast(stamp, root=0) if self.comm is not None else stamp
 
     @property
     def name(self):
@@ -563,13 +643,6 @@ class CFL3D:
         """Collectively validate rank-local options within this object's comm only."""
         def validate():
             self.options.validate()
-            if hasattr(self, "_input_grid_at_construction"):
-                old = self._input_grid_at_construction
-                current = self.options.input_grid
-                old_path = None if old is None else Path(old).resolve()
-                current_path = None if current is None else Path(current).resolve()
-                if old_path != current_path:
-                    raise ValueError("input_grid selects the mesh at construction; create a new CFL3D object to change it")
         self._checked(validate)
         if self.comm is None:
             return True
@@ -583,6 +656,82 @@ class CFL3D:
             differing = [key for key in decoded[0] if any(d[key] != decoded[0][key] for d in decoded[1:])]
             raise RuntimeError(f"CFL3D options differ within comm on {differing}; update every participating rank")
         return True
+
+    @staticmethod
+    def getOptionCategories():
+        """Return parameter groups used by the automatic restart policy."""
+        return {name: tuple(sorted(members)) for name, members in _OPTION_CATEGORIES.items()}
+
+    @staticmethod
+    def _grid_stamp(path):
+        if path is None:
+            return None
+        path = Path(path).resolve()
+        info = path.stat()
+        return str(path), info.st_size, info.st_mtime_ns
+
+    def _refresh_grid(self):
+        stamp = self._checked(lambda: self._grid_stamp(self.options.input_grid)
+                              if self.comm is None or self.comm.rank == 0 else None)
+        if self.comm is not None:
+            stamp = self.comm.bcast(stamp if self.comm.rank == 0 else None, root=0)
+        if stamp == self._loaded_grid_stamp:
+            return False
+        if stamp is not None:
+            mesh = self._checked(lambda: CGNSMesh.from_file(stamp[0])
+                                 if self.comm is None or self.comm.rank == 0 else None)
+            self.mesh = self.comm.bcast(mesh, root=0) if self.comm is not None else mesh
+            if self.comm is not None and self.comm.size-1 > len(self.mesh.zones):
+                raise ValueError("The new mesh needs at least one zone per MPI worker")
+            # Relative slices belonged to the old discretization. Reattach them to the new mesh.
+            from .surface_analysis import direction_index, slice_references
+            surface = self._analysis_surface()
+            for request in self._slice_requests:
+                if request["sliceType"] == "relative":
+                    members = self._analysis_members(request["groupName"], surface)
+                    request["members"] = members
+                    request["references"] = slice_references(
+                        surface, members, direction_index(request["direction"]), request["position"])
+        self._loaded_grid_stamp = stamp
+        return True
+
+    def _mesh_signature(self):
+        """Detect in-memory geometry, topology and boundary changes, including 1-to-1 maps."""
+        digest = hashlib.sha256()
+        for zone in self.mesh.zones:
+            digest.update(zone.name.encode())
+            digest.update(np.asarray(zone.dimensions, dtype=np.int64).tobytes())
+            digest.update(np.ascontiguousarray(zone.coordinates, dtype=np.float64).tobytes())
+            for bc in zone.boundaries:
+                digest.update(json.dumps((bc.name, bc.bc_type)).encode())
+                digest.update(np.asarray(bc.point_range, dtype=np.int64).tobytes())
+                for name, data in sorted(bc.data.items()):
+                    digest.update(name.encode())
+                    digest.update(np.asarray(data).tobytes())
+            for cn in zone.connections:
+                digest.update(cn.donor.encode())
+                for value in (cn.point_range, cn.donor_range, cn.transform):
+                    digest.update(np.asarray(value, dtype=np.int64).tobytes())
+        digest.update(json.dumps(sorted((str(key), value) for key, value in self.boundary_overrides.items()),
+                                 default=str).encode())
+        return digest.hexdigest()
+
+    def _configuration_changes(self, mesh_signature):
+        previous = self._successful_options
+        if previous is None:
+            return (), ()
+        def token(key, value):
+            if key == "turbulence":
+                value = value.lower()
+            elif key in ("input_grid", "restartFile") and value is not None:
+                value = str(Path(value).resolve())
+            return json.dumps(value, default=str)
+        changed = tuple(sorted(key for key in self.options if
+                               token(key, self.options[key]) != token(key, previous[key])))
+        reset = set(changed) & (_OPTION_CATEGORIES["physics"] | _OPTION_CATEGORIES["mesh"])
+        if mesh_signature != self._successful_mesh_signature:
+            reset.add("mesh")
+        return changed, tuple(sorted(reset))
 
     def getFlowState(self):
         """Return an independent Python snapshot, including native turbulence/ghost state."""
@@ -618,12 +767,13 @@ class CFL3D:
         write_restart(path, self._flow_state)
         return path
 
-    def _prepare_flow_state(self):
+    def _prepare_flow_state(self, discard_cached=False):
         from .restart import read_restart
         restart_file = str(Path(self.options.restartFile).resolve()) if self.options.restartFile is not None else None
         reload_file = restart_file is not None and restart_file != self._loaded_restart_file
         if self.comm is not None:
             reload_file = any(self.comm.allgather(reload_file))
+        state = None if discard_cached else self._flow_state
         if reload_file:
             state = self._checked(lambda: read_restart(restart_file,self.mesh,self.options)
                                   if self.comm is None or self.comm.rank == 0 else None)
@@ -631,13 +781,12 @@ class CFL3D:
                 state = self.comm.bcast(state,root=0)
             self._flow_state = state
             self._loaded_restart_file = restart_file
-        self._checked(lambda: self._flow_state.validate(self.mesh,self.options)
-                      if self._flow_state is not None else None)
+        self._checked(lambda: state.validate(self.mesh,self.options) if state is not None else None)
         if self.comm is not None:
-            hashes = self.comm.allgather(None if self._flow_state is None else self._flow_state.digest)
+            hashes = self.comm.allgather(None if state is None else state.digest)
             if len(set(hashes))!=1:
                 raise RuntimeError("CFL3D cached flow states differ within comm")
-        return self._flow_state
+        return state
 
     def _output_path(self, filename, default):
         if self._last_result is None:
@@ -1107,10 +1256,21 @@ class CFL3D:
         self._last_result = None  # Failed solves must not expose an older run's loads.
         self._surface_analysis_mesh = None
         self.checkOptions()
+        self._refresh_grid()
+        mesh_signature = self._checked(self._mesh_signature)
+        changed_options, reset_reasons = self._checked(
+            lambda: self._configuration_changes(mesh_signature))
+        if self.comm is not None:
+            decisions = self.comm.allgather((changed_options, reset_reasons, mesh_signature))
+            if len(set(decisions)) != 1:
+                raise RuntimeError("CFL3D configuration/mesh change decisions differ within comm")
         if self.comm is not None and len(set(self.comm.allgather(self._solve_counter))) != 1:
             raise RuntimeError("CFL3D solve counters differ within comm")
-        state = self._prepare_flow_state()
+        state = self._prepare_flow_state(discard_cached=bool(reset_reasons))
         self._continuing = state is not None
+        if reset_reasons and (self.comm is None or self.comm.rank == 0):
+            print("CFL3D: reinitializing after changes to " + ", ".join(reset_reasons)
+                  + ("; loading requested restartFile" if self._continuing else "; starting from freestream"), flush=True)
         rank = self.comm.Get_rank() if self.comm is not None else 0
         output_directory = self._checked(lambda: Path(
             self.options.output_directory if output_directory is None else output_directory).resolve())
@@ -1146,7 +1306,7 @@ class CFL3D:
                                    + (" --mpi" if self.comm is not None else "")) from exc
             if bool(module.py_build_info()) != (self.comm is not None):
                 raise RuntimeError("Native extension MPI mode does not match the solver")
-            if getattr(module, "py_api_version", lambda: 0)() != 7:
+            if getattr(module, "py_api_version", lambda: 0)() != 8:
                 raise RuntimeError("Native interface changed; rebuild with python tools/build_python.py"
                                    + (" --mpi" if self.comm is not None else "") + " and restart Python")
             return module
@@ -1184,6 +1344,7 @@ class CFL3D:
                 # Internal checkpoint I/O is independent of visualization output flags.
                 _native.py_set_output_flags(1)
                 _native.py_set_output_names(stem, int(append_output), iteration_offset)
+                _native.py_set_restart_controls(int("alpha" in changed_options))
                 status = _native.py_configure(**arrays)
                 if status:
                     raise RuntimeError(f"Native configuration failed ({status}); start a fresh interpreter")
@@ -1244,7 +1405,9 @@ class CFL3D:
                               output_paths={key: output_directory/value for key,value in output_names.items()},
                               iteration_offset=iteration_offset,
                               cumulative_history=(np.concatenate([self._output_session_history, history])
-                                                  if append_output else history.copy()))
+                                                  if append_output else history.copy()),
+                              start_mode="restart" if self._continuing else "cold",
+                              changed_options=changed_options, reset_reasons=reset_reasons)
         self._last_surface_coefficients = {key: value.copy() for key, value in surfaces.items()}
         self._last_wall_fields = {key: value.copy() for key, value in walls.items()}
         self._last_wall_forces = {key: value.copy() for key, value in wall_forces.items()}
@@ -1260,6 +1423,8 @@ class CFL3D:
         self._next_output_index = solve_index + 1
         self._output_session = (output_identity, solve_index)
         self._output_session_history = result.cumulative_history.copy()
+        self._successful_options = dict(self.options)
+        self._successful_mesh_signature = mesh_signature
         from .restart import FlowState, metadata
         self._flow_state = FlowState(checkpoint, metadata(self.mesh,self.options),
                                     {name:value.copy() for name,value in fields.items()})

@@ -18,6 +18,7 @@ module cfl3d_python_state
   logical :: py_write_restart=.true.
   character(len=60) :: py_output_stem=''
   logical :: py_append_output=.false.
+  logical :: py_override_restart_alpha=.false.
   integer :: py_iteration_offset=0
 contains
   function py_output_name(legacy) result(name)
@@ -178,7 +179,14 @@ end module
 subroutine py_api_version(version)
   implicit none
   integer, intent(out) :: version
-  version=7
+  version=8
+end subroutine
+
+subroutine py_set_restart_controls(override_alpha)
+  use cfl3d_python_state, only: py_override_restart_alpha
+  implicit none
+  integer, intent(in) :: override_alpha
+  py_override_restart_alpha=override_alpha/=0
 end subroutine
 
 subroutine py_set_output_names(stem,append_output,iteration_offset)

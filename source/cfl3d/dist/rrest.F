@@ -29,6 +29,9 @@ c
      .     myid,myhost,mycomm,nou,bou,nbuf,ibufdim,
      .     igrid,wk,idima,jdima,kdima,vj0,vk0,vi0,
      .     tj0,tk0,ti0,qavg,q2avg,nummem)
+#ifdef PYTHON_API
+      use cfl3d_python_state, only: py_override_restart_alpha
+#endif
 c
 c     $Id$
 c
@@ -301,7 +304,12 @@ c
 c     use previous alpha as starting point if alpha-iteration is used
 c
          if (ialphit.gt.0) then
+#ifdef PYTHON_API
+c     Preserve trim continuation unless Python explicitly changed the starting angle.
+            if (.not.py_override_restart_alpha) alpha=alphw/radtodeg
+#else
             alpha = alphw/radtodeg
+#endif
 c     reset freestream for new alpha on host
             call init_mast
          end if

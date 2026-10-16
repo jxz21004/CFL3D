@@ -1,6 +1,6 @@
-# CFL3D Python/MPI 第十轮检查点（原生日志直接命名与同编号追加）— 2026-10-16
+# CFL3D Python/MPI 第十一轮检查点（动态参数与分类初始化策略）— 2026-10-16
 
-最新日志命名及同编号续算规则见文末“第十轮”；前面保留此前各轮记录。
+最新动态参数及自动初始化策略见文末“第十一轮”；前面保留此前各轮记录。
 
 本轮在 `CFL3D/` 修改；旧的 `CFL3D-f2py-CGNS-source/` 保留作为参考。
 MPI 已通过下述内存网格验收；本轮又补齐 CGNS/ADF 文件入口的串行和 MPI 验收。
@@ -458,3 +458,23 @@ PYTHONPATH=tests/python mpirun -np 4 python tests/python/validate_solution_io_mp
 
 验证日志：build/native-output-full-tests.log、build/native-output-mpi3.log、
 build/native-output-mpi-split.log。源码与说明已更新，未下载依赖。
+
+## 第十一轮：动态参数与分类初始化策略（2026-10-16）
+
+- SolverOptions 移除 frozen=True，支持校验后的属性赋值和多参数 update。
+  RuntimeOptions 直接保存运行参数字典，校验候选值后整体替换，不在更新时重建 SolverOptions。
+  历史配置通过独立副本隔离；修改已返回快照不会改变运行参数或旧结果。
+- 新增 getOptionCategories()，物理模型/尺度和网格改变默认重新初始化；数值控制、积分参考量、
+  输出和可调工况保留最细层流场。判断在 solve 前进行，以最后成功配置为基准，改了又改回不重置。
+  input_grid 支持重新加载及 MPI root 广播，内存几何/边界/连接改变也会触发初始化。
+- 原生 API 8，显式修改 alpha 时覆盖 restart 中旧的定升攻角；未修改时保留原生定升接续。
+  GNU debug 串行与 MPI 扩展均已重建。beta 和参考量更新也通过续算回归验证。
+- result/NPZ 新增 start_mode、changed_options、reset_reasons。自动重置打印原因，使用新编号，
+  不把冷启动接入旧日志。原有 restartFile 未变时不会重新载入来抵消物理参数重置。
+- 完整回归 52 项，49 项通过、3 项可选 HDF5 跳过；最终 8 项针对性检查通过，包含新增的
+  旧 restartFile 不抵消重置的测试。三进程自动 MPI 和两个独立双进程算例的参数更新、
+  显式定升攻角、物理重置及网格重载与串行一致。
+
+日志：build/native-output-dynamic-full.log、build/native-output-dynamic-final-targeted.log、
+build/native-output-dynamic-mpi3.log、build/native-output-dynamic-mpi-split.log。
+本轮未下载依赖。

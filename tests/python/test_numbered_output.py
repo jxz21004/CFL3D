@@ -144,7 +144,7 @@ class NumberedOutputTests(unittest.TestCase):
             self.assertTrue((root / "nextcase_003_surf.dat").exists())
             # Configuration errors do not consume an output index.
             solver.setOption("input_grid", "another.cgns")
-            with self.assertRaises(ValueError):
+            with self.assertRaises(FileNotFoundError):
                 solver.solve()
             self.assertEqual(solver.nSolve, 4)
 
