@@ -150,8 +150,8 @@ class NativeAnalysisTests(unittest.TestCase):
                             self.assertAlmostEqual(cp, result.wall_fields[(zone.name, "plate")][0, j, 0], places=13)
             path = solver.writeTecplotSurfaceSolution()
             self.assertTrue(path.exists())
-            self.assertIn("dCDp/ds", path.with_name("surface_lift.dat").read_text())
-            self.assertIn("FELINESEG", path.with_name("surface_slices.dat").read_text())
+            self.assertIn("dCDp/ds", path.with_name("out_000_lift.dat").read_text())
+            self.assertIn("FELINESEG", path.with_name("out_000_slices.dat").read_text())
             # Snapshot must survive modification of the publicly returned result arrays.
             for value in result.wall_forces.values():
                 value[:] = 0
@@ -218,8 +218,8 @@ class NativeAnalysisTests(unittest.TestCase):
             solver.addSlices("y", -0.5, "absolute", "Wing")
             solver.solve(output_directory=directory)
             self.assertNotIn("dL_ds", solver.getLiftDistribution())
-            self.assertTrue((Path(directory) / "surface_lift.dat").exists())
-            self.assertTrue((Path(directory) / "surface_slices.dat").exists())
+            self.assertTrue((Path(directory) / "out_000_lift.dat").exists())
+            self.assertTrue((Path(directory) / "out_000_slices.dat").exists())
 
 
 if __name__ == "__main__":

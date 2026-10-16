@@ -14,6 +14,7 @@ def main():
     parser.add_argument("mesh", help="Structured CGNS mesh (ADF or supported HDF5)")
     parser.add_argument("--mpi", action="store_true", help="Use a host/worker MPI communicator")
     parser.add_argument("--output", default="standard-results")
+    parser.add_argument("--name", default="out", help="Case name for numbered result files")
     parser.add_argument("--iterations", type=int, default=1000)
     parser.add_argument("--multigrid-levels", type=int, default=1)
     parser.add_argument("--target-cl", type=float, help="Enable native lift matching")
@@ -33,6 +34,7 @@ def main():
     options = {
         "input_grid": args.mesh,
         "output_directory": args.output,
+        "name": args.name,
         "writevolumesolution": args.write_volume,
         "writeTecplotSurfaceSolution": args.write_surface,
         "writeflowsolution": args.write_flow,

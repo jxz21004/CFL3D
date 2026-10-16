@@ -27,7 +27,7 @@ def main():
     print(f"Final alpha: {result.final_alpha:.10g} degrees")
     if a.freestream_pressure is not None:
         print(solver.getSolution(a.group))
-    print(f"Saved fields and convergence history to {result.output_directory / 'solution.npz'}")
+    print(f"Saved fields and convergence history to {result.output_paths['solution']}")
 
 
 if __name__ == "__main__":

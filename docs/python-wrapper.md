@@ -160,7 +160,7 @@ result = CFL3D("wing.cgns", options).solve(output_directory="lift-results")
 print(result.coefficients["CL"], result.final_alpha)
 ```
 
-`result.final_alpha` 为实际最终攻角（度），并写入 `solution.npz`。
+`result.final_alpha` 为实际最终攻角（度），并写入 `out_000_solution.npz`。
 `cfl3d.alpha` 保存迭代号、log(res)、CL、更新后的攻角和攻角增量，返回 Python 前已关闭刷新。
 同目录再次求解会重置该日志，关闭定升后也不会残留旧记录。
 `options.alpha` 保持初始值不变。原生控制在力计算后更新攻角，因此最后一行 CL 来自最后一次
@@ -243,7 +243,7 @@ if comm.rank == 0:
 要求 `2 <= 进程数 <= zone数+1`。一个 zone 使用两个进程，两个 zone 最多三个进程。
 Python 管理 MPI 初始化和结束；求解期间使用复制的 communicator，结束后释放副本。
 
-返回时各 rank 均持有完整流场和历史，只有 rank 0 写 `solution.npz`。
+返回时各 rank 均持有完整流场和历史，只有 rank 0 写 `out_000_solution.npz`。
 主日志在输出根目录，计算进程的原生临时输出位于 `rank-0001` 等子目录。
 当前广播和汇总会复制完整网格/结果，尚未实现按 rank 分布的 Python 存储。
 
@@ -330,12 +330,12 @@ result = solver.solve()
 
 | options 开关 | 默认值 | 自动输出 | 补写方法 |
 | --- | --- | --- | --- |
-| `writevolumesolution` | True | `volume.cgns`，及 NPZ 中的体流场 | `writeVolumeSolution(filename=None)` |
-| `writeTecplotSurfaceSolution` | True | `surface.dat` | `writeTecplotSurfaceSolution(filename=None, groupName=None)` |
-| `writeflowsolution` | False | `flow.x`、`flow.q` | `writeFlowSolution(prefix=None)` |
+| `writevolumesolution` | True | `out_000_volume.cgns`，及 NPZ 中的体流场 | `writeVolumeSolution(filename=None)` |
+| `writeTecplotSurfaceSolution` | True | `out_000_surf.dat` | `writeTecplotSurfaceSolution(filename=None, groupName=None)` |
+| `writeflowsolution` | False | `out_000_flow.x`、`out_000_flow.q` | `writeFlowSolution(prefix=None)` |
 
 文件名分别可通过 `volume_filename`、`surface_filename`、`flow_prefix` 设置。
-三个开关全关时不保留体/表面解和原生 restart 文件，但仍保存历史、积分元数据和原生日志；完整接续状态缓存在 Python 内存。
+三个开关全关时不保留体/主表面解和原生 restart 文件；仍保存带编号的历史、积分元数据、原生日志和已注册分析，完整状态缓存于 Python。
 场数据仍保留在本 solver 的 Python 快照中，补写方法不受开关限制，也不再进入原生 CFD 计算。
 补写以最近一次成功计算为准，不依赖输入文件继续存在，也不受另一个 solver 重用 Fortran 状态影响。
 尚未提供从只含历史的 NPZ 恢复整个快照的接口。
@@ -381,7 +381,7 @@ residual, CL, CD, CX, CY, CMX, CMY, CMZ
 ```
 
 `result.coefficients` 返回最后一次迭代的系数字典，包含 `CDp`、`CDv`。
-输出目录还保存 `solution.npz`，包括 history、final_alpha、以 `zone_<name>` 命名的流场数组，
+输出目录还保存 `out_000_solution.npz`，包括 history、final_alpha、以 `zone_<name>` 命名的流场数组，
 以及逐边界的 `surface_names`、`surface_coefficients` 和 `surface_coefficient_names`。
 表面积分列依次为 `CL, CD, CX, CY, CZ, Cmx, Cmy, Cmz, CDp, CDv`；
 `surface_names` 每行是对应的 zone、BC 名称。原生 CFL3D 日志与 restart 文件也保留。
@@ -465,6 +465,57 @@ mpirun -np 3 python examples/python/run_mpi.py wing.cgns --model sst \
   --sref 93 --cref 3.88 --bref 30 --group Wing
 ```
 
+### 算例名称、逐次编号与自动分析输出
+
+`CFL3D(..., name="out")` 设置算例名称，默认 `out`；也可通过 options 的 `name` 或
+`solver.name` 设置。名称不得包含路径分隔符。每个对象从 `_000` 开始为完成的计算编号，
+后续为 `_001`、`_002`，超过三位时自然扩展。
+`result.solve_index`、`result.name` 记录本次编号和名称，`solver.nSolve` 为已完成计算次数；
+`result.output_paths` 给出该次各类文件的目标路径，关闭的输出文件可以不存在。
+
+```python
+solver = CFL3D(options=options, name="out")
+solver.addSlices("y", [-0.5], sliceType="absolute", groupName="Wing")
+solver.addLiftDistribution(200, "y", groupName="Wing")
+solver.solve()  # out_000_surf.dat / out_000_slices.dat / out_000_lift.dat
+solver.solve()  # 从缓存续算，输出 out_001_*.dat
+
+solver.resetFlow()  # 一行清除续算状态，保留分析注册和输出编号
+solver.solve()      # 重新冷启动，输出 out_002_*.dat
+```
+
+`slices/lift` 只要已经注册，每次求解后都会自动写 Tecplot ASCII `.dat`，不受
+`writeTecplotSurfaceSolution=False` 影响；该开关只控制主壁面 `*_surf.dat`。
+表面、截面和升力分布使用同一编号；每个请求分别写一个 zone，无交点的截面不写 zone。
+`clearSurfaceAnalysis()` 清除分析注册，之后的求解不再自动写这两类文件。
+
+默认文件名（以第一次求解、name=out 为例）：
+
+| 内容 | 文件名 |
+| --- | --- |
+| 主壁面 Tecplot ASCII | `out_000_surf.dat` |
+| 截面 Cp / 升力分布 Tecplot ASCII | `out_000_slices.dat` / `out_000_lift.dat` |
+| CGNS 体结果 | `out_000_volume.cgns` |
+| PLOT3D | `out_000_flow.x` / `out_000_flow.q` |
+| 本段流场、历史和积分元数据 | `out_000_solution.npz` |
+| 原生 restart，启用体或 PLOT3D 输出时保存 | `out_000_restart.bin` |
+| 手动 `writeRestartFile()` 的默认目标 | `out_000_restart.npz` |
+
+非空原生日志也会保存带编号的副本，例如 `out_000_cfl3d.out`；旧固定日志路径保留最新内容。
+指定 `volume_filename="grid.cgns"` 时自动输出 `out_000_grid.cgns`；
+`surface_filename="plots/wall.dat"` 输出 `plots/out_000_wall.dat`，分析也写在该 plots 目录。
+这些选项默认 None，使用上表命名；`flow_prefix` 同样作为编号后的自定义标签。
+显式调用 `writeTecplotSurfaceSolution("wing.dat")` 等补写方法时，文件路径由调用者控制；
+默认补写仍使用最近结果的原编号，之后修改算例 name 不会改变旧结果的补写路径。
+`writeSurfaceAnalysis(prefix=None)` 可单独补写分析，显式 prefix 生成 `<prefix>_slices.dat` 和 `<prefix>_lift.dat`。
+
+有缓存或 restartFile 时按原生 restart 接续：恢复最细层完整状态，重建粗层工作数据，
+保留已配置的 V/W 循环，跳过首次的粗到细网格序列。每次执行本次配置的迭代段；
+首次冷启动启用网格序列时，粗网格准备步数由相应阶段参数控制，history 包含这些步骤。
+`resetFlow()` 同时清除 restartFile 设置，下一次重走冷启动流程；输出编号不会重置，旧文件不删除。
+配置检查失败不占编号；原生计算已经完成而输出失败时，该次编号保留，可以补写文件。
+编号以 Python 对象为单位，新对象从 `_000` 开始；不同对象应使用不同 name 或输出目录。
+
 ## 升力分布与截面 Cp
 
 在 `solve()` 前注册，可随表面结果自动输出；也可在计算结束后注册并补写：
@@ -504,11 +555,11 @@ solver.writeTecplotSurfaceSolution() # 自动输出关闭时也可补写
 定升计算使用实际力积分时的迎角；该角度（度）记录在 `force_angles`，可能与
 `result.final_alpha` 不同。
 
-以 `surface.dat` 为表面文件名时，已注册的分析分别写入 `surface_lift.dat` 和
-`surface_slices.dat`，每个请求一个 Tecplot zone；无交点的截面不写 zone。
+第一次默认主表面为 `out_000_surf.dat` 时，已注册的分析分别写入 `out_000_lift.dat` 和
+`out_000_slices.dat`，每个请求一个 Tecplot zone；无交点的截面不写 zone。
 补写 `wing.dat` 则生成 `wing_lift.dat` / `wing_slices.dat`。
 `writeTecplotSurfaceSolution(groupName=...)` 只筛选主壁面文件；分析使用各自注册的分组。
-分析文件随 `writeTecplotSurfaceSolution` 开关一起控制，也可由上述补写方法重新生成。
+已注册的分析在每次 solve() 后自动输出，即使主壁面开关关闭；也可由补写方法重新生成。
 MPI 注册、查询、补写均无需集体通信，可仅在 rank 0 调用；`solve()` 仍须所有 rank 参与。
 
 `relative` 追踪注册时的三角面交点，`absolute` 每次按固定平面重新截取；两者的位置都以 m
@@ -577,8 +628,8 @@ continued.solve()
 不依赖旧输出目录或另一个 solver 的 Fortran 全局状态。
 当前每段通过内部临时原生 restart 文件与 Fortran 交换状态，结束即清理；尚未实现无文件的状态数组传递。
 体/表面输出开关全关仍可继续计算及手动保存检查点。
-`writeRestartFile()` 默认写本次输出目录下的 `restart.npz`，包含完整原生载荷、校验和、
-兼容性元数据和 primitive 流场；它与后处理 `solution.npz` 用途不同。
+`writeRestartFile()` 默认写本次输出目录下带编号的 `out_000_restart.npz`，包含完整原生载荷、校验和、
+兼容性元数据和 primitive 流场；它与后处理 `out_000_solution.npz` 用途不同。
 
 `restartFile` 默认 None；支持上述检查点和原生 real64、int32 记录标记、原生端序且含 ghost 数据的
 `restart.bin`。读入前检查记录完整性、块尺寸及湍流模型；Python 检查点还检查模型、gamma、

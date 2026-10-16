@@ -60,8 +60,8 @@ class NativeTests(unittest.TestCase):
                     np.testing.assert_allclose(field[..., 4], 1 / 1.4, atol=1e-12)
                 self.assertFalse(list(result.output_directory.glob("*.inp")))
                 self.assertFalse((result.output_directory / "mesh.cgns").exists())
-                self.assertTrue((result.output_directory / "volume.cgns").is_file())
-                self.assertTrue((result.output_directory / "solution.npz").is_file())
+                self.assertTrue((result.output_directory / "out_000_volume.cgns").is_file())
+                self.assertTrue((result.output_directory / "out_000_solution.npz").is_file())
 
     @unittest.skipUnless(importlib.util.find_spec("h5py"), "Optional h5py is required for this HDF5 test")
     def test_viscous_models_and_mesh_sequence(self):

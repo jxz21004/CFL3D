@@ -1,6 +1,6 @@
-# CFL3D Python/MPI 第八轮检查点（自动 MPI、可修改参数与接续）— 2026-10-16
+# CFL3D Python/MPI 第九轮检查点（逐次编号与分析自动输出）— 2026-10-16
 
-最新自动 MPI、参数更新与接续验证见文末“第八轮”；前面保留此前各轮记录。
+最新编号输出、分析自动输出与续算规则见文末“第九轮”；前面保留此前各轮记录。
 
 本轮在 `CFL3D/` 修改；旧的 `CFL3D-f2py-CGNS-source/` 保留作为参考。
 MPI 已通过下述内存网格验收；本轮又补齐 CGNS/ADF 文件入口的串行和 MPI 验收。
@@ -400,3 +400,41 @@ PYTHONPATH=tests/python mpirun -np 4 python tests/python/validate_runtime_mpi.py
 本轮未下载依赖。
 
 标准 standard_case.py 未提前导入 mpi4py、未传 --mpi 的三进程启动也已通过，确认自动识别 MPI 启动环境的分支可用。
+
+
+## 第九轮：算例名、逐次编号和 Tecplot 分析自动输出
+
+- CFL3D 增加 name 关键字和属性，options.name 也可设置，默认 out；MPI 下纳入当前 comm 的一致性检查。
+  每次完成原生求解分配一个从 000 开始的编号，result.name/solve_index、solver.nSolve
+  和 result.output_paths 可用于读取身份与输出目标路径，NPZ 中也保存 name 和 solve_index。
+- 自动文件使用同一前缀，例如 out_000_surf.dat、out_000_slices.dat、out_000_lift.dat、
+  out_000_volume.cgns、out_000_flow.x/.q、out_000_solution.npz、out_000_restart.bin。
+  writeRestartFile 默认补写 out_000_restart.npz。表面、截面、分布均使用 Tecplot ASCII，分析固定 .dat。
+- volume_filename、surface_filename、flow_prefix 默认 None，指定时作为 name_编号 后的自定义标签；
+  显式补写路径仍由调用者控制。默认补写使用最近结果的原名称和编号，不受随后修改 name 影响。
+- 只要已经 addSlices/addLiftDistribution，每次 solve 后自动写分析，即使主壁面输出开关关闭。
+  writeTecplotSurfaceSolution 仅控制主壁面自动输出；writeSurfaceAnalysis 可独立补写。
+  clearSurfaceAnalysis 清除注册，下一次不再生成对应新编号的分析文件。
+- 非空原生日志也保存编号副本，固定日志名仍提供最近一次内容。配置检查失败不占号；
+  原生计算完成但输出失败时该号保留，可补写，后续继续递增。新对象从 000 开始，
+  不同对象应使用不同 name 或输出目录，避免同名覆盖。
+- 根据用户决定继续采用原生 restart 方式：缓存最细层完整状态，续算重建粗层工作数据，
+  保留 V/W 循环，不重复首次粗到细网格序列。没有实现保存全部粗层工作数组。
+  resetFlow 一行清除续算状态及 restartFile，下一次重新冷启动/执行首次网格序列；
+  保留分析注册、已输出文件和递增编号。
+
+验证：43 项测试中 40 项通过，3 项可选 HDF5 测试跳过。新增 2 项覆盖自动分析不受主壁面
+开关影响、相同目录连续求解编号、旧结果字节不变、原生接续与连续迭代一致、
+resetFlow 冷启动且编号不重置、name 修改后的快照隔离、失败不占号、标签和独立补写。
+多重网格序列测试另外验证冷启动 7 步、续算 2 步、清空缓存后重做粗层准备共 6 步。
+三进程及两个独立二进程子通信器内，连续两次求解的结果/编号和 Tecplot 文件与串行一致，
+第二次分析文件自动生成，第一批文件保持逐字节不变。标准模板 --name wing 实测生成 wing_000_solution.npz。
+
+```bash
+python -m unittest discover -s tests/python -v
+PYTHONPATH=tests/python mpirun -np 3 python tests/python/validate_solution_io_mpi.py --directory build/mpi-numbered-validation
+PYTHONPATH=tests/python mpirun -np 4 python tests/python/validate_solution_io_mpi.py --split --directory build/mpi-numbered-validation
+```
+
+日志在 build/mpi-numbered-validation/logs/，规则和示例见 README.md / docs/python-wrapper.md。
+本轮只修改 Python、测试及文档，未修改 Fortran 或下载依赖；原生 API 仍为 6。

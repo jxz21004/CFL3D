@@ -90,7 +90,7 @@ class ContinuationTests(unittest.TestCase):
                         np.testing.assert_allclose(continued.fields[name], full.fields[name], rtol=2e-12, atol=2e-13)
                     np.testing.assert_allclose(continued.history[:, 1:], full.history[-2:, 1:], rtol=2e-11, atol=2e-13)
                     self.assertEqual(continued.history.shape, (2, 8))
-                    self.assertFalse((root / model / "continued/restart.bin").exists())
+                    self.assertFalse((root / model / "continued/out_001_restart.bin").exists())
                     self.assertFalse((root / model / "continued/.cfl3d-state.bin").exists())
 
     def test_files_changed_controls_reset_and_input_validation(self):
@@ -134,7 +134,7 @@ class ContinuationTests(unittest.TestCase):
                     output_directory=root / "invalid"
                 )
             with self.assertRaises(ValueError):
-                CFL3D(deepcopy(mesh), {**opts, "restartFile": root / "first/solution.npz"}, comm=None).solve(
+                CFL3D(deepcopy(mesh), {**opts, "restartFile": root / "first/out_000_solution.npz"}, comm=None).solve(
                     output_directory=root / "visualization"
                 )
             bad = root / "bad.bin"
@@ -165,6 +165,10 @@ class ContinuationTests(unittest.TestCase):
             second = solver.solve(output_directory=root / "second")
             self.assertEqual(len(second.history), 2)
             self.assertTrue(np.isfinite(second.fields["flatplate"]).all())
+            solver.resetFlow()
+            restarted = solver.solve(output_directory=root / "fresh-sequence")
+            self.assertEqual(len(restarted.history), 6)  # Two coarse stages + the configured two fine steps.
+            self.assertEqual(restarted.solve_index, 2)
 
 
 if __name__ == "__main__":

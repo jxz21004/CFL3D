@@ -71,7 +71,7 @@ class SurfaceForceTests(unittest.TestCase):
             self.assertAlmostEqual(total["My"], total["Cmy"]*scale*options.cref, places=12)
             self.assertEqual(total["units"]["D"], "N")
             self.assertEqual(total["units"]["My"], "N*m")
-            with np.load(root / "first/solution.npz") as saved:
+            with np.load(root / "first/out_000_solution.npz") as saved:
                 self.assertEqual(saved["surface_coefficients"].shape[1], 10)
                 self.assertEqual(saved["surface_coefficient_names"][-2:].tolist(), ["CDp", "CDv"])
             # Another solver replaces Fortran COMMON state; the first object's cache stays valid.

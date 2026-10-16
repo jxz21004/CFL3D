@@ -55,20 +55,20 @@ class SolutionIOTests(unittest.TestCase):
             solver = CFL3D(options=options)
             result = solver.solve()
             output = result.output_directory
-            for name in ('volume.cgns','surface.dat','flow.x','flow.q','restart.bin','plot3dg.bin','plot3dq.bin'):
+            for name in ('out_000_volume.cgns','out_000_surf.dat','out_000_flow.x','out_000_flow.q','out_000_restart.bin','plot3dg.bin','plot3dq.bin'):
                 self.assertFalse((output/name).exists(), name)
-            with np.load(output/'solution.npz') as saved:
+            with np.load(output/'out_000_solution.npz') as saved:
                 self.assertFalse(any(name.startswith('zone_') for name in saved.files))
                 self.assertIn('history', saved.files)
             snapshot = {k:v.copy() for k,v in result.fields.items()}
             solver.writeVolumeSolution()
             solver.writeTecplotSurfaceSolution()
             solver.writeFlowSolution()
-            self.check_volume(output/'volume.cgns', solver.mesh, snapshot, solver.options)
-            self.check_surface(output/'surface.dat', solver, result)
-            self.check_flow(output/'flow', solver.mesh, snapshot, solver.options, result.final_alpha)
-            original = (output/'surface.dat').read_bytes()
-            original_volume = (output/'flow.q').read_bytes()
+            self.check_volume(output/'out_000_volume.cgns', solver.mesh, snapshot, solver.options)
+            self.check_surface(output/'out_000_surf.dat', solver, result)
+            self.check_flow(output/'out_000_flow', solver.mesh, snapshot, solver.options, result.final_alpha)
+            original = (output/'out_000_surf.dat').read_bytes()
+            original_volume = (output/'out_000_flow.q').read_bytes()
             # A different core run and caller mutations cannot change the deferred snapshot.
             CFL3D(box_mesh(), dict(turbulence='euler', iterations=1,
                  writevolumesolution=False, writeTecplotSurfaceSolution=False)).solve(output_directory=root/'other')
@@ -79,8 +79,8 @@ class SolutionIOTests(unittest.TestCase):
             solver.mesh.zones[0].coordinates[:] = 0
             solver.writeTecplotSurfaceSolution()
             solver.writeFlowSolution()
-            self.assertEqual((output/'surface.dat').read_bytes(), original)
-            self.assertEqual((output/'flow.q').read_bytes(), original_volume)
+            self.assertEqual((output/'out_000_surf.dat').read_bytes(), original)
+            self.assertEqual((output/'out_000_flow.q').read_bytes(), original_volume)
             self.assertEqual(options['writevolumesolution'], False)
             with self.assertRaisesRegex(ValueError, 'overwrite'):
                 solver.writeVolumeSolution(path)
@@ -169,16 +169,16 @@ class SolutionIOTests(unittest.TestCase):
                 writevolumesolution=False, writeflowsolution=True, temperature=280.)
             solver = CFL3D(mesh,options,boundary_overrides={(z.name,'plate'):(2004,(1.1,0.)) for z in mesh.zones})
             result=solver.solve(output_directory=root/'flow')
-            self.assertFalse((root/'flow/volume.cgns').exists())
-            self.assertTrue((root/'flow/flow.q').exists())
-            self.assertTrue((root/'flow/surface.dat').exists())
+            self.assertFalse((root/'flow/out_000_volume.cgns').exists())
+            self.assertTrue((root/'flow/out_000_flow.q').exists())
+            self.assertTrue((root/'flow/out_000_surf.dat').exists())
             for wall in result.wall_fields.values():
                 np.testing.assert_allclose(wall[...,1],308.,atol=1e-12)
             solver=CFL3D(mesh,replace(options,writevolumesolution=True,writeflowsolution=False,writeTecplotSurfaceSolution=False))
             solver.solve(output_directory=root/'volume')
-            self.assertTrue((root/'volume/volume.cgns').exists())
-            self.assertFalse((root/'volume/surface.dat').exists())
-            self.assertFalse((root/'volume/flow.q').exists())
+            self.assertTrue((root/'volume/out_000_volume.cgns').exists())
+            self.assertFalse((root/'volume/out_000_surf.dat').exists())
+            self.assertFalse((root/'volume/out_000_flow.q').exists())
 
     def test_three_dimensional_i_j_k_wall_faces(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -205,7 +205,7 @@ class SolutionIOTests(unittest.TestCase):
                 wind=np.array([np.cos(np.deg2rad(options.alpha)),0,np.sin(np.deg2rad(options.alpha))])
                 self.assertAlmostEqual(integrated@wind,result.coefficients['CDv'],places=12)
                 s.writeFlowSolution()
-                self.check_flow(result.output_directory/'flow',mesh,result.fields,options,result.final_alpha)
+                self.check_flow(result.output_directory/'out_000_flow',mesh,result.fields,options,result.final_alpha)
 
 
 if __name__ == '__main__':

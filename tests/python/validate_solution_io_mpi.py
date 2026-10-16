@@ -74,15 +74,15 @@ def main():
                 np.testing.assert_allclose(solver.getLiftDistribution()['bin_'+name].sum(),total[name],
                                            rtol=2e-13,atol=2e-14)
             output = result.output_directory
-            for name in ('volume.cgns','surface.dat','flow.x','flow.q','restart.bin'):
+            for name in ('out_000_volume.cgns','out_000_surf.dat','out_000_flow.x','out_000_flow.q','out_000_restart.bin'):
                 assert not (output/name).exists(),name
             # Root-only deferred writes must not contain any MPI collective.
             solver.writeVolumeSolution()
             solver.writeTecplotSurfaceSolution()
             solver.writeFlowSolution()
-            for name in ('surface.dat','surface_lift.dat','surface_slices.dat','flow.x','flow.q'):
+            for name in ('out_000_surf.dat','out_000_lift.dat','out_000_slices.dat','out_000_flow.x','out_000_flow.q'):
                 assert (output/name).read_bytes()==(root/'serial'/name).read_bytes(),name
-            loaded = CGNSMesh.from_file(output/'volume.cgns')
+            loaded = CGNSMesh.from_file(output/'out_000_volume.cgns')
             for a,b in zip(loaded.zones,solver.mesh.zones):
                 np.testing.assert_array_equal(a.coordinates,b.coordinates)
         else:
@@ -90,9 +90,33 @@ def main():
             assert solver.writeTecplotSurfaceSolution() is None
             assert solver.writeFlowSolution() is None
     solver._checked(check)
+    # A second call appends the requested steps and auto-writes registered analyses,
+    # even while the main surface-output flag remains disabled.
+    first_files = None
+    second_reference = None
+    if comm.rank == 0:
+        first_files = {name:(result.output_directory/name).read_bytes() for name in
+                       ('out_000_surf.dat','out_000_slices.dat','out_000_lift.dat','out_000_solution.npz')}
+        serial.setOption('iterations',2)
+        second_reference = serial.solve()
+    second_reference = comm.bcast(second_reference,root=0)
+    solver.setOption('iterations',2)
+    second = solver.solve()
+    def check_second():
+        assert second.solve_index==1 and solver.nSolve==2
+        np.testing.assert_array_equal(second.history,second_reference.history)
+        for name in second.fields:
+            np.testing.assert_array_equal(second.fields[name],second_reference.fields[name])
+        if comm.rank==0:
+            for name,content in first_files.items():
+                assert (second.output_directory/name).read_bytes()==content,name
+            for name in ('out_001_slices.dat','out_001_lift.dat','out_001_solution.npz'):
+                assert (second.output_directory/name).read_bytes()==(root/'serial'/name).read_bytes(),name
+            assert not (second.output_directory/'out_001_surf.dat').exists()
+    solver._checked(check_second)
     comm.Barrier()
     if comm.rank == 0:
-        print(f'IO_PASS world={world.size} group={color} local={comm.size}: fields, wall loads, lift strips, tracked/absolute Cp cuts and deferred outputs match serial',flush=True)
+        print(f'IO_PASS world={world.size} group={color} local={comm.size}: fields, wall loads, lift strips, tracked/absolute Cp cuts and numbered repeated outputs match serial',flush=True)
     if args.split:
         comm.Free()
     world.Barrier()

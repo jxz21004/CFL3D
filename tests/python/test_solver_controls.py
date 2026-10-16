@@ -45,7 +45,7 @@ class NativeControlTests(unittest.TestCase):
             updates = np.loadtxt(root / "lift/cfl3d.alpha", skiprows=1, ndmin=2)
             np.testing.assert_array_equal(updates[:, 0], [2, 4, 6])
             np.testing.assert_allclose(updates[:, 4], .02, atol=1e-12)
-            with np.load(root / "lift/solution.npz") as saved:
+            with np.load(root / "lift/out_000_solution.npz") as saved:
                 self.assertAlmostEqual(float(saved["final_alpha"]), result.final_alpha)
             fixed = CFL3D(box_mesh(), replace(options, target_cl=None, alpha=2.)).solve(
                 output_directory=root / "lift")

@@ -9,6 +9,7 @@ import threading
 import sys
 import json
 import hashlib
+import shutil
 from numbers import Real
 import numpy as np
 from .cgns import CGNSMesh
@@ -113,12 +114,13 @@ class SolverOptions:
     freestream_pressure: float | None = None  # Pa; coordinates/reference lengths are metres
     input_grid: str | Path | None = None
     output_directory: str | Path = "cfl3d-output"
+    name: str = "out"
     writevolumesolution: bool = True
     writeTecplotSurfaceSolution: bool = True
     writeflowsolution: bool = False
-    volume_filename: str | Path = "volume.cgns"
-    surface_filename: str | Path = "surface.dat"
-    flow_prefix: str | Path = "flow"
+    volume_filename: str | Path | None = None
+    surface_filename: str | Path | None = None
+    flow_prefix: str | Path | None = None
     restartFile: str | Path | None = None
 
     @classmethod
@@ -156,9 +158,12 @@ class SolverOptions:
         return cls(**values)
 
     def validate(self):
+        if (not isinstance(self.name, str) or not self.name.strip() or not self.name.isprintable()
+                or self.name in (".", "..") or "/" in self.name or "\\" in self.name):
+            raise ValueError("name must be a nonempty case name without path separators")
         for name in ("input_grid", "output_directory", "volume_filename", "surface_filename", "flow_prefix", "restartFile"):
             value = getattr(self, name)
-            if value is None and name in ("input_grid", "restartFile"):
+            if value is None and name in ("input_grid", "restartFile", "volume_filename", "surface_filename", "flow_prefix"):
                 continue
             if not isinstance(value, (str, Path)) or not str(value).strip():
                 raise ValueError(f"{name} must be a nonempty path")
@@ -367,6 +372,10 @@ class SolverResult:
 
     wall_forces: dict[tuple[str, str], np.ndarray] = field(default_factory=dict)  # pressure XYZ, viscous XYZ / (q_inf*Sref)
 
+    solve_index: int = 0
+    name: str = "out"
+    output_paths: dict[str, Path] = field(default_factory=dict)
+
     @property
     def coefficients(self):
         if not len(self.history):
@@ -378,7 +387,8 @@ class SolverResult:
         return coefficients
 
     def save(self, filename, *, include_volume=True):
-        values = {"history": self.history, "final_alpha": np.asarray(self.final_alpha)}
+        values = {"history": self.history, "final_alpha": np.asarray(self.final_alpha),
+                  "solve_index": np.asarray(self.solve_index), "name": np.asarray(self.name)}
         if include_volume:
             values.update({f"zone_{name}": field for name, field in self.fields.items()})
         keys = sorted(self.surface_coefficients)
@@ -395,7 +405,7 @@ class CFL3D:
     native failure, start a fresh Python process before attempting another solve.
     """
 
-    def __init__(self, mesh=None, options=None, *, boundary_overrides=None, comm=_AUTO_COMM, groups=None):
+    def __init__(self, mesh=None, options=None, *, boundary_overrides=None, comm=_AUTO_COMM, groups=None, name=None):
         if options is None and isinstance(mesh, (Mapping, SolverOptions)):
             options, mesh = mesh, None
         comm = _automatic_comm(comm)
@@ -407,6 +417,7 @@ class CFL3D:
                 comm = None  # A one-rank communicator uses the serial core.
         self.comm = comm
         self._last_result = None
+        self._solve_counter = 0
         self._group_definitions = {}
         self._lift_distributions = []
         self._slice_requests = []
@@ -416,13 +427,19 @@ class CFL3D:
         self._comm_members = self._current_comm_members()
 
         def parse():
-            return RuntimeOptions(options) if options is not None or self.comm is None or self.comm.rank == 0 else None
+            if options is None and self.comm is not None and self.comm.rank != 0:
+                return None
+            parsed = RuntimeOptions(options)
+            if name is not None:
+                parsed["name"] = name
+            return parsed
         local_options = self._checked(parse)
         if self.comm is not None:
             root_options = self.comm.bcast(local_options.snapshot() if self.comm.rank == 0 else None, root=0)
             # Explicit rank-local settings are retained; None is a compatibility shorthand.
             if local_options is None:
                 local_options = RuntimeOptions(root_options)
+        self._checked(lambda: local_options.update({"name": name}) if name is not None else None)
         self._options = local_options
         object.__setattr__(self._options, "_check_callback", self.checkOptions)
         self.checkOptions()
@@ -445,6 +462,36 @@ class CFL3D:
                 raise ValueError("This MPI interface currently requires at least one zone per worker")
         self.addGroups(group_definitions)
         self._input_grid_at_construction = self.options.input_grid
+
+    @property
+    def name(self):
+        return self.options.name
+
+    @name.setter
+    def name(self, value):
+        self.options.name = value
+
+    @property
+    def nSolve(self):
+        """Number of completed native solves; resetFlow() preserves output numbering."""
+        return self._solve_counter
+
+    def _numbered_output_names(self, index):
+        stem = f"{self.name}_{index:03d}"
+        def filename(configured, default):
+            if configured is None:
+                return Path(stem+default)
+            path = Path(configured)
+            return path.with_name(stem+"_"+path.name)
+        surface = filename(self.options.surface_filename, "_surf.dat")
+        return {"volume": filename(self.options.volume_filename, "_volume.cgns"),
+                "surface": surface,
+                "slices": surface.parent/(stem+"_slices.dat"),
+                "lift": surface.parent/(stem+"_lift.dat"),
+                "flow_prefix": filename(self.options.flow_prefix, "_flow"),
+                "solution": Path(stem+"_solution.npz"),
+                "restart": Path(stem+"_restart.bin"),
+                "checkpoint": Path(stem+"_restart.npz")}
 
     @property
     def options(self):
@@ -520,6 +567,7 @@ class CFL3D:
     def resetFlow(self):
         """Start the next solve from freestream instead of cached state or restartFile."""
         self._flow_state = None
+        self._continuing = False
         self._loaded_restart_file = None
         self.options.restartFile = None
         return self
@@ -528,7 +576,7 @@ class CFL3D:
         """Write a complete Python checkpoint; a root-only call needs no MPI collective."""
         if self.comm is not None and self.comm.rank != 0:
             return None
-        path = self._output_path(filename, "restart.npz")
+        path = self._output_path(filename, self._last_output_names["checkpoint"] if self._last_result else "")
         from .restart import write_restart
         if self._flow_state is None:
             raise RuntimeError("No flow state is available")
@@ -569,38 +617,52 @@ class CFL3D:
         """Write cached grid + cell fields to CGNS/ADF, independently of automatic flags."""
         if self.comm is not None and self.comm.Get_rank() != 0:
             return None
-        path = self._output_path(filename, self._last_options.volume_filename if self._last_result else "volume.cgns")
+        path = self._output_path(filename, self._last_output_names["volume"] if self._last_result else "")
         from .solution_io import write_volume
         write_volume(path, self._last_mesh, self._last_fields, self._last_options)
         return path
 
-    def writeTecplotSurfaceSolution(self, filename=None, groupName=None):
-        """Write wall quads with Cp,T[K],Cf components,y+; optional group selection."""
-        if self.comm is not None and self.comm.Get_rank() != 0:
-            return None
-        path = self._output_path(filename, self._last_options.surface_filename if self._last_result else "surface.dat")
-        from .solution_io import write_surface, write_lift_distributions, write_slices
-        members = self._group_members(groupName)
-        # Validate registered analyses before writing any files. Each request uses its own group.
+    def writeSurfaceAnalysis(self, prefix=None):
+        """Write registered lift distributions and slices as Tecplot ASCII .dat files.
+
+        Automatic analyses are independent of the main wall-output flag. With no
+        prefix, use the same case name/index as the most recent completed solve.
+        This is a local root-only operation, including deferred output.
+        """
+        if self.comm is not None and self.comm.rank != 0:
+            return {}
+        if self._last_result is None:
+            raise RuntimeError("Call solve() before writing surface analysis")
+        from .solution_io import write_lift_distributions, write_slices
         distributions = [self.getLiftDistribution(i) for i in range(self.nLiftDist)]
         slices = self.getSlices()
-        companions = {}
-        for label, data in (("lift", distributions), ("slices", slices)):
+        files = {}
+        for label, data, writer in (("lift", distributions, write_lift_distributions),
+                                     ("slices", slices, write_slices)):
             if data:
-                companions[label] = self._output_path(path.with_name(
-                    path.stem+"_"+label+(path.suffix or ".dat")), "")
+                explicit = None if prefix is None else str(prefix)+"_"+label+".dat"
+                path = self._output_path(explicit, self._last_output_names[label])
+                writer(path, data)
+                files[label] = path
+        return files
+
+    def writeTecplotSurfaceSolution(self, filename=None, groupName=None):
+        """Write cached wall quads and registered analyses for the same solve index."""
+        if self.comm is not None and self.comm.Get_rank() != 0:
+            return None
+        path = self._output_path(filename, self._last_output_names["surface"] if self._last_result else "")
+        from .solution_io import write_surface
+        members = self._group_members(groupName)
+        # Analyses retain their own registered groups, independent of the wall-file selection.
+        self.writeSurfaceAnalysis(None if filename is None else path.with_suffix(""))
         write_surface(path, self._last_mesh, self._last_wall_fields, members)
-        if distributions:
-            write_lift_distributions(companions["lift"], distributions)
-        if slices:
-            write_slices(companions["slices"], slices)
         return path
 
     def writeFlowSolution(self, prefix=None):
         """Write cached cell-center PLOT3D .x/.q in CFL3D binary IPtype=1 format."""
         if self.comm is not None and self.comm.Get_rank() != 0:
             return None
-        prefix = self._output_path(prefix, self._last_options.flow_prefix if self._last_result else "flow")
+        prefix = self._output_path(prefix, self._last_output_names["flow_prefix"] if self._last_result else "")
         from .solution_io import write_flow
         for suffix in (".x", ".q"):
             self._output_path(str(prefix)+suffix, "")
@@ -1007,6 +1069,10 @@ class CFL3D:
         self._last_result = None  # Failed solves must not expose an older run's loads.
         self._surface_analysis_mesh = None
         self.checkOptions()
+        solve_index = self._solve_counter
+        if self.comm is not None and len(set(self.comm.allgather(solve_index))) != 1:
+            raise RuntimeError("CFL3D solve counters differ within comm")
+        output_names = self._checked(lambda: self._numbered_output_names(solve_index))
         state = self._prepare_flow_state()
         self._continuing = state is not None
         arrays, xyz = self._checked(self._arrays)
@@ -1128,7 +1194,9 @@ class CFL3D:
                 walls[key] = wall_values[:,offset:offset+count].T.reshape(shape, order="F").copy()
                 wall_forces[key] = wall_force_values[:,offset:offset+count].T.reshape(shape, order="F").copy()
             offset += count
-        result = SolverResult(fields, history, output_directory, final_alpha, surfaces, walls, wall_forces)
+        result = SolverResult(fields, history, output_directory, final_alpha, surfaces, walls, wall_forces,
+                              solve_index=solve_index, name=self.name,
+                              output_paths={key: output_directory/value for key,value in output_names.items()})
         self._last_surface_coefficients = {key: value.copy() for key, value in surfaces.items()}
         self._last_wall_fields = {key: value.copy() for key, value in walls.items()}
         self._last_wall_forces = {key: value.copy() for key, value in wall_forces.items()}
@@ -1138,19 +1206,30 @@ class CFL3D:
         self._last_final_alpha, self._last_output_directory = final_alpha, output_directory
         self._last_base_groups, self._last_options = base_groups, self.options.snapshot()
         self._last_result = result
+        self._last_output_names = output_names
+        # Consume an index once native computation succeeds, even if a later write needs retrying.
+        self._solve_counter += 1
         from .restart import FlowState, metadata
         self._flow_state = FlowState(checkpoint, metadata(self.mesh,self.options),
                                     {name:value.copy() for name,value in fields.items()})
         def write_outputs():
+            # Keep per-solve copies of nonempty native logs while retaining legacy latest-log paths.
+            stem = f"{result.name}_{solve_index:03d}"
+            for log in ("cfl3d.out", "cfl3d.res", "cfl3d.turres", "precfl3d.out", "cfl3d.error", "precfl3d.error"):
+                source = local_directory/log
+                if source.is_file() and source.stat().st_size:
+                    shutil.copyfile(source, local_directory/(stem+"_"+log))
             if rank != 0:
                 return
-            result.save(output_directory / "solution.npz", include_volume=self.options.writevolumesolution)
+            result.save(self._output_path(None, output_names["solution"]), include_volume=self.options.writevolumesolution)
             if self.options.writevolumesolution or self.options.writeflowsolution:
-                (output_directory / "restart.bin").write_bytes(checkpoint)
+                self._output_path(None, output_names["restart"]).write_bytes(checkpoint)
             if self.options.writevolumesolution:
                 self.writeVolumeSolution()
             if self.options.writeTecplotSurfaceSolution:
                 self.writeTecplotSurfaceSolution()
+            else:
+                self.writeSurfaceAnalysis()
             if self.options.writeflowsolution:
                 self.writeFlowSolution()
         self._checked(write_outputs)

@@ -157,7 +157,7 @@ def main():
                 from_file = file_solver.solve(output_directory=root / "serial-adf" / name)
                 if args.forces:
                     check_forces(file_solver, from_file)
-                adf_report[name] = compare_reference(from_file, root / "serial" / name / "solution.npz", name)
+                adf_report[name] = compare_reference(from_file, root / "serial" / name / "out_000_solution.npz", name)
                 adf_report[name]["mesh_input"] = "CGNS/ADF"
         if args.adf:
             (root / "serial-adf/report.json").write_text(json.dumps(adf_report, indent=2))
@@ -208,7 +208,7 @@ def main():
         result = solver.solve(output_directory=root / run_name / name)
 
         report[name] = solver._checked(lambda: compare_reference(
-            result, root / "serial" / name / "solution.npz", name))
+            result, root / "serial" / name / "out_000_solution.npz", name))
         report[name]["mesh_input"] = "CGNS/ADF" if args.adf else "memory"
         if args.forces:
             report[name]["loads"] = solver._checked(lambda: check_forces(solver, result))
