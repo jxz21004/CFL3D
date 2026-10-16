@@ -550,6 +550,13 @@ class CFL3D:
                               if self.comm is None or self.comm.rank == 0 else None)
         self._loaded_grid_stamp = self.comm.bcast(stamp, root=0) if self.comm is not None else stamp
 
+    def __call__(self, *, output_directory=None):
+        """等价于 solve()：返回 SolverResult，沿用参数更新、续算和输出编号规则。
+
+        MPI 下仍需本对象 comm 中的所有 rank 一起调用。
+        """
+        return self.solve(output_directory=output_directory)
+
     @property
     def name(self):
         return self.options.name

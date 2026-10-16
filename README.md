@@ -158,6 +158,10 @@ print(solver.getSolution())       # 全部原生积分表面的系数和有量�
 # print(solver.getSolution("Wing"))  # 将 Wing 替换为实际 CGNS 分组名
 ```
 
+对象也可以直接调用：`result = solver()` 等价于 `solver.solve()`；
+`solver(output_directory="other-results")` 可临时指定输出目录。两种入口使用相同的动态参数、
+续算和编号规则，返回相同类型的 `SolverResult`；MPI 下都须 comm 中所有 rank 参与。
+
 可直接运行的完整模板见 [examples/python/standard_case.py](examples/python/standard_case.py)。
 它将网格、工况、数值参数和输出开关集中在 options 字典中，支持串行/MPI、迭代次数、多重网格、定升和部件选择：
 
