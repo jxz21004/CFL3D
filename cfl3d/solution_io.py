@@ -122,7 +122,7 @@ def wall_vertices(zone, boundary):
     return zone.coordinates[slices]
 
 
-def write_surface(path, mesh, walls, members):
+def write_surface(path, mesh, walls, members, *, vertices=None):
     """Tecplot FEQUADRILATERAL: exact wall vertices, cell-centered native wall values."""
     with _temporary_output(path) as temporary, temporary.open("w", encoding="utf-8") as stream:
         stream.write('TITLE = "CFL3D wall solution"\n')
@@ -132,7 +132,7 @@ def write_surface(path, mesh, walls, members):
                 key = zone.name, boundary.name
                 if key not in walls or key not in members:
                     continue
-                xyz = wall_vertices(zone, boundary)
+                xyz = wall_vertices(zone, boundary) if vertices is None else vertices[key]
                 a,b = xyz.shape[:2]
                 values = walls[key]
                 # JSON string escaping is also valid for the simple CGNS names in Tecplot titles.

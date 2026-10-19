@@ -46,23 +46,27 @@ def main():
     if error:
         raise RuntimeError(error)
     solver = CFL3D(options={**options,'output_directory':root/'mpi'} if comm.rank==0 else None, comm=comm)
-    # Requests are deliberately root-only: registering/querying/output needs no collective.
-    if comm.rank == 0:
-        solver.addLiftDistribution(args.segments,'y','Wing')
-        solver.addSlices('y',[-.25,-.5],groupName='Wing')
-        solver.addSlices('y',-.5,'absolute','Wing')
+    # Surface registration, detailed queries and writers collect owned patches.
+    solver.addLiftDistribution(args.segments,'y','Wing')
+    solver.addSlices('y',[-.25,-.5],groupName='Wing')
+    solver.addSlices('y',-.5,'absolute','Wing')
     result = solver.solve()
 
+    actual_lift, actual_slices = solver.getLiftDistribution(), solver.getSlices()
     def check():
         fields,history,walls,coefficients,forces,lift,slices = reference
         np.testing.assert_array_equal(result.history,history)
-        for actual,expected in ((result.fields,fields),(result.wall_fields,walls),
-                                (result.surface_coefficients,coefficients),(result.wall_forces,forces)):
+        assert set(result.fields) == {name for name, owner in result.zone_owners.items() if owner == comm.rank}
+        local_reference = {name: fields[name] for name in result.fields}
+        owned_walls = {key: value for key,value in walls.items() if key[0] in result.fields}
+        owned_forces = {key: value for key,value in forces.items() if key[0] in result.fields}
+        for actual,expected in ((result.fields,local_reference),(result.wall_fields,owned_walls),
+                                (result.surface_coefficients,coefficients),(result.wall_forces,owned_forces)):
             assert actual.keys()==expected.keys()
             for key in actual:
                 np.testing.assert_array_equal(actual[key],expected[key])
         if comm.rank == 0:
-            for actual,expected in [(solver.getLiftDistribution(),lift),*zip(solver.getSlices(),slices)]:
+            for actual,expected in [(actual_lift,lift),*zip(actual_slices,slices)]:
                 assert actual.keys()==expected.keys()
                 for key in actual:
                     if isinstance(actual[key],np.ndarray):
@@ -71,25 +75,24 @@ def main():
                         assert actual[key]==expected[key],key
             total = solver.getSolution('Wing')
             for name in ('CL','CD','CDp','CDv'):
-                np.testing.assert_allclose(solver.getLiftDistribution()['bin_'+name].sum(),total['Wing_'+name],
+                np.testing.assert_allclose(actual_lift['bin_'+name].sum(),total['Wing_'+name],
                                            rtol=2e-13,atol=2e-14)
             output = result.output_directory
             for name in ('out_000_volume.cgns','out_000_surf.plt','out_000_flow.x','out_000_flow.q','out_000_restart.bin'):
                 assert not (output/name).exists(),name
-            # Root-only deferred writes must not contain any MPI collective.
-            solver.writeVolumeSolution()
-            solver.writeTecplotSurfaceSolution()
-            solver.writeFlowSolution()
+    solver._checked(check)
+    solver.writeTecplotSurfaceSolution()
+    solver.writeVolumeSolution()
+    solver.writeFlowSolution()
+    def check_files():
+        if comm.rank == 0:
+            output = result.output_directory
             for name in ('out_000_surf.plt','out_000_lift.dat','out_000_slices.dat','out_000_flow.x','out_000_flow.q'):
                 assert (output/name).read_bytes()==(root/'serial'/name).read_bytes(),name
             loaded = CGNSMesh.from_file(output/'out_000_volume.cgns')
-            for a,b in zip(loaded.zones,solver.mesh.zones):
+            for a,b in zip(loaded.zones,serial.mesh.zones):
                 np.testing.assert_array_equal(a.coordinates,b.coordinates)
-        else:
-            assert solver.writeVolumeSolution() is None
-            assert solver.writeTecplotSurfaceSolution() is None
-            assert solver.writeFlowSolution() is None
-    solver._checked(check)
+    solver._checked(check_files)
     # A second call appends the requested steps and auto-writes registered analyses,
     # even while the main surface-output flag remains disabled.
     first_files = None
@@ -141,6 +144,14 @@ def main():
                 assert (appended.output_directory/name).read_bytes()==(root/'serial'/name).read_bytes(),name
             assert not (appended.output_directory/'cfl3d.out').exists()
     solver._checked(check_appended)
+    if comm.rank == comm.size-1:
+        solver.clearSurfaceAnalysis()
+    try:
+        solver.solve()
+    except RuntimeError as exc:
+        assert 'Surface registrations differ' in str(exc)
+    else:
+        raise AssertionError('Expected collective rejection of inconsistent surface requests')
     comm.Barrier()
     if comm.rank == 0:
         print(f'IO_PASS world={world.size} group={color} local={comm.size}: fields, wall loads, analyses, numbered outputs and same-number appended histories match serial',flush=True)

@@ -87,10 +87,12 @@ def main():
         loads = solver.getSolution(args.group)
         print(json.dumps(loads, indent=2, ensure_ascii=False))
         print("Output directory:", result.output_directory)
-        # 三个开关全关时，也可在这里或之后单独补写：
-        # solver.writeVolumeSolution()
-        # solver.writeTecplotSurfaceSolution(groupName=args.group)
-        # solver.writeFlowSolution()
+    # Deferred volume/restart writes must be called by every solver rank.
+    # solver.writeVolumeSolution()
+    # solver.writeFlowSolution()
+    # solver.writeRestartFile()
+    # Surface registration, queries and output also require every MPI rank.
+    # solver.writeTecplotSurfaceSolution(groupName=args.group)
 
 
 if __name__ == "__main__":

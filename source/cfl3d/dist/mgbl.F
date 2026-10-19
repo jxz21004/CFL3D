@@ -73,6 +73,9 @@ c
      .                maxsegdg,nmaster,aehist,timekeep,xorgae0,yorgae0,
      .                zorgae0,icouple,nblelst,iskmax,jskmax,kskmax,ue,
      .                irdrea)
+#ifdef PYTHON_API
+      use cfl3d_python_state, only: py_partition_results
+#endif
 #   ifdef CMPLX
 #   else
       use module_kwstm, only:kws_get_nummem
@@ -585,6 +588,11 @@ c***********************************************************************
 c     compute starting locations for arrays and print out block to
 c     node mapping for mpi case
 c***********************************************************************
+c
+#ifdef PYTHON_API
+c     Allocate only the mean-flow cells owned by this native rank.
+      call py_partition_results(nblg,mblk2nd,myid)
+#endif
 c
       if (mworki .lt. 2*maxbl) then
          nou(1) = min(nou(1)+1,ibufdim)

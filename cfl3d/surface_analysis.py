@@ -55,14 +55,14 @@ class Patch:
 
 
 class SurfaceMesh:
-    def __init__(self, mesh, walls, forces=None, sref=1.0):
+    def __init__(self, mesh, walls, forces=None, sref=1.0, vertices=None):
         self.patches = {}
         for zone in mesh.zones:
             for boundary in zone.boundaries:
                 key = zone.name, boundary.name
                 if key not in walls:
                     continue
-                xyz = wall_vertices(zone, boundary)
+                xyz = wall_vertices(zone, boundary) if vertices is None else vertices[key]
                 quads = np.stack((xyz[:-1, :-1], xyz[1:, :-1], xyz[1:, 1:], xyz[:-1, 1:]), axis=-2).reshape(-1, 4, 3)
                 values = np.asarray(walls[key]).reshape(-1, 6)
                 if forces is not None:

@@ -12,8 +12,8 @@ from fixtures import box_mesh, flatplate_mesh
 from validate_mpi import split_plate
 
 
-def grouped_plate():
-    mesh = split_plate()
+def grouped_plate(*, split=33):
+    mesh = split_plate(split)
     for zone, name in zip(mesh.zones, ("Forward", "Aft")):
         wall = next(bc for bc in zone.boundaries if bc.name == "plate")
         wall.family = name

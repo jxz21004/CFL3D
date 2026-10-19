@@ -12,7 +12,7 @@ development evidence are recorded in [MPI_PROGRESS.md](../MPI_PROGRESS.md).
 | --- | --- |
 | Python flow arrays | `SolverResult.fields` and `FlowState.fields` are readouts. Editing them does not modify the authoritative native restart payload used by the next solve. A primitive-array-to-native-state injection API is not implemented. |
 | Continuation overhead | Python retains the complete finest-grid restart state, including turbulence and ghost data. Each `solve()` restores it through an internal temporary binary file and rebuilds native work/coarse-grid arrays. Repeated calls therefore incur setup, serialization, and disk I/O, even with all visualization output disabled. |
-| MPI memory | Complete coordinates, assembled mean-flow/wall results, and the cached restart payload are replicated on ranks. Python storage is not partitioned by the worker's owned zones; per-rank memory depends on global case size. |
+| MPI peak memory (remaining work) | Persistent coordinates, mean-flow/wall arrays, and native restart records are partitioned by zone ownership. Native grid setup, portable checkpoint I/O, explicit collection, and file output can still assemble global data temporarily on the host. Host peak memory is not yet bounded by local zone size; payload counts are not RSS measurements. See [distributed-storage.md](distributed-storage.md). |
 | MPI work distribution | Rank 0 is the native host; other ranks compute whole existing zones. The interface does not split zones automatically. Worker count cannot exceed zone count. A one-rank communicator uses the serial path. |
 | Process-global native state | Multiple objects may solve sequentially, but concurrent solves in one Python process are unsupported. Native execution also changes the process working directory temporarily, so other threads using relative paths can be affected. |
 | Native failure recovery | Intercepted serial termination paths raise Python exceptions, but a failed native call can leave allocations/state behind. Use a new process after such a failure. Memory faults are not generally converted to Python exceptions. Native MPI fatal errors call `MPI_Abort` and can terminate the job. |
@@ -84,7 +84,7 @@ not validated gamma-Re_theta transition locations against experiments. The
 upstream implementation itself is documented as under development; see the
 [CFL3D model notes](https://nasa.github.io/CFL3D/Cfl3dv6/cfl3dv6_new.html#transmod).
 
-Current API 10 model-validation records use GNU Fortran and Intel MPI. Open MPI
+Model-validation records through API 10 use GNU Fortran and Intel MPI. Open MPI
 and other compiler combinations need their own build/runtime regression before
 being described as tested configurations. This does not imply that the standard
 MPI source interface is Intel-specific.

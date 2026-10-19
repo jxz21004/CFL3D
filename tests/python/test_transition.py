@@ -14,10 +14,14 @@ from test_surface_forces import grouped_plate
 
 def transition_fields(state, mesh):
     """Read wrest.F's paired omega/k and gamma/Re_theta records for each block."""
+    if state.zone_indices == ():
+        return {}
     blocks = records(state.native)
     fields = {}
     start = 0
-    for zone in mesh.zones:
+    indices = range(len(mesh.zones)) if state.zone_indices is None else state.zone_indices
+    for index in indices:
+        zone = mesh.zones[index]
         count = int(np.prod(np.array(zone.dimensions)-1))
         for i in range(max(1, start), len(blocks)-1):
             if (len(blocks[i]) == 4 and struct.unpack('=i', blocks[i])[0] == 4

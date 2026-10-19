@@ -6,7 +6,7 @@ module cfl3d_python_state
   real(8), allocatable :: py_bcdata(:,:), py_xyz(:,:), py_q(:,:), py_history(:,:), py_surface(:,:)
   real(8), allocatable :: py_wall(:,:),py_wall_forces(:,:)
   integer, allocatable :: py_walloffset(:)
-  integer, allocatable :: py_offsets(:), py_qoffsets(:)
+  integer, allocatable :: py_offsets(:), py_qoffsets(:), py_zone_owners(:)
   real(8) :: py_flow(7), py_reference(6), py_time(6), py_keywords(15)
   integer :: py_run(8), py_mg(5), py_scheme(6), py_flux(3), py_smoothing(5,5)
   real(8) :: py_rkap(3), py_final_alpha=0.0d0
@@ -158,6 +158,39 @@ contains
     end do
   end subroutine
 
+  subroutine py_partition_results(zone_blocks,block_owners,rank)
+    integer, intent(in) :: zone_blocks(*),block_owners(*),rank
+    integer :: g,c,p,code
+    ! Use the actual native load balancer, including its finest/coarse mapping.
+    ! Do not allocate a global cell array and slice it after the solve.
+    if (allocated(py_q)) deallocate(py_q)
+    c=1
+    do g=1,py_ngrid
+      py_zone_owners(g)=block_owners(zone_blocks(g))
+      py_qoffsets(g)=0
+      if (py_zone_owners(g) /= rank) cycle
+      py_qoffsets(g)=c
+      c=c+product(py_dims(:,g)-1)
+    end do
+    allocate(py_q(c-1,5))
+    py_q=0
+    ! Wall-cell diagnostics follow the same zone owner. Interface/farfield
+    ! segments have no detailed wall buffer, even in serial builds.
+    deallocate(py_wall,py_wall_forces)
+    p=1
+    do g=1,py_nbc
+      py_walloffset(g)=0
+      code=abs(py_bc(3,g))
+      if (py_zone_owners(py_bc(1,g)) /= rank) cycle
+      if (.not.(code==1005.or.code==1006.or.code==2004.or.code==2014.or.&
+                code==2024.or.code==2034.or.code==2016)) cycle
+      py_walloffset(g)=p
+      p=p+(py_bc(5,g)-py_bc(4,g))*(py_bc(7,g)-py_bc(6,g))
+    end do
+    allocate(py_wall(6,p-1),py_wall_forces(6,p-1))
+    py_wall=0; py_wall_forces=0
+  end subroutine
+
   subroutine py_copy_solution(q,jd,kd,id,grid)
     integer, intent(in) :: jd,kd,id,grid
     real(8), intent(in) :: q(jd,kd,id,5)
@@ -179,7 +212,7 @@ end module
 subroutine py_api_version(version)
   implicit none
   integer, intent(out) :: version
-  version=10
+  version=12
 end subroutine
 
 subroutine py_set_restart_controls(override_alpha)
@@ -284,24 +317,11 @@ subroutine py_collect_results()
   include 'mpif.h'
   integer :: ierr,rank,owner,local_owner
   real(8), allocatable :: gathered(:,:)
-  ! Each cell is filled only on its owning worker; host/other workers keep zero.
-  ! SUM therefore assembles the solution without counting a cell twice.
-  ! This returns full arrays on every rank, so Python storage is not distributed.
-  allocate(gathered(size(py_q,1),size(py_q,2)))
-  call MPI_Allreduce(py_q,gathered,size(py_q),MPI_DOUBLE_PRECISION,MPI_SUM,py_comm,ierr)
-  py_q=gathered
-  deallocate(gathered)
+  ! Detailed fields remain on their owner. Reduce only one integral row per
+  ! boundary; these small diagnostics support noncollective load queries.
   allocate(gathered(size(py_surface,1),size(py_surface,2)))
   call MPI_Allreduce(py_surface,gathered,size(py_surface),MPI_DOUBLE_PRECISION,MPI_SUM,py_comm,ierr)
   py_surface=gathered
-  deallocate(gathered)
-  allocate(gathered(size(py_wall,1),size(py_wall,2)))
-  call MPI_Allreduce(py_wall,gathered,size(py_wall),MPI_DOUBLE_PRECISION,MPI_SUM,py_comm,ierr)
-  py_wall=gathered
-  deallocate(gathered)
-  allocate(gathered(size(py_wall_forces,1),size(py_wall_forces,2)))
-  call MPI_Allreduce(py_wall_forces,gathered,size(py_wall_forces),MPI_DOUBLE_PRECISION,MPI_SUM,py_comm,ierr)
-  py_wall_forces=gathered
   deallocate(gathered)
   call MPI_Comm_rank(py_comm,rank,ierr)
   local_owner=-1
@@ -332,6 +352,10 @@ subroutine py_configure(dims,counts,bcs,bcdata,blocks,connections,flow,reference
                         ngrid,nbc,nconn,mseq,npoints,ncells,status)
   use cfl3d_python_state
   implicit none
+#ifdef DIST_MPI
+  include 'mpif.h'
+  integer :: rank,ierr
+#endif
   integer, intent(in) :: ngrid,nbc,nconn,mseq,npoints,ncells
   integer, intent(in) :: dims(3,ngrid),counts(6,ngrid),bcs(8,nbc),blocks(7,ngrid)
   integer, intent(in) :: connections(10,2,nconn),run_control(8),mg(5),stages(4,mseq)
@@ -346,19 +370,17 @@ subroutine py_configure(dims,counts,bcs,bcdata,blocks,connections,flow,reference
   end if
   if (allocated(py_dims)) then
     deallocate(py_dims,py_counts,py_bc,py_blocks,py_stages,py_connections)
-    deallocate(py_bcdata,py_xyz,py_q,py_offsets,py_qoffsets)
+    deallocate(py_bcdata,py_offsets,py_qoffsets,py_zone_owners)
+    if (allocated(py_xyz)) deallocate(py_xyz)
+    if (allocated(py_q)) deallocate(py_q)
   end if
   if (allocated(py_history)) deallocate(py_history)
   if (allocated(py_surface)) deallocate(py_surface)
-  if (allocated(py_wall)) deallocate(py_wall,py_walloffset,py_wall_forces)
+  if (allocated(py_wall)) deallocate(py_wall,py_wall_forces)
+  if (allocated(py_walloffset)) deallocate(py_walloffset)
   allocate(py_walloffset(nbc))
-  p=1
-  do g=1,nbc
-    py_walloffset(g)=p
-    p=p+(bcs(5,g)-bcs(4,g))*(bcs(7,g)-bcs(6,g))
-  end do
-  allocate(py_wall(6,p-1))
-  allocate(py_wall_forces(6,p-1))
+  py_walloffset=0
+  allocate(py_wall(6,0),py_wall_forces(6,0))
   py_wall_forces=0
   py_wall=0
   allocate(py_surface(10,nbc))
@@ -371,7 +393,20 @@ subroutine py_configure(dims,counts,bcs,bcdata,blocks,connections,flow,reference
   py_run=run_control; py_mg=mg; py_keywords=keywords
   py_smoothing=smoothing; py_final_alpha=flow(2)
   py_scheme=scheme; py_flux=flux; py_rkap=rkap
-  allocate(py_xyz(npoints,3),py_q(ncells,5),py_offsets(ngrid),py_qoffsets(ngrid))
+  ! Only the native host reads coordinates through rp3d. Workers receive
+  ! their grid via the existing native MPI setup, not a replicated f2py copy.
+#ifdef DIST_MPI
+  call MPI_Comm_rank(py_comm,rank,ierr)
+  if (rank == 0) then
+    allocate(py_xyz(npoints,3))
+  else
+    allocate(py_xyz(0,3))
+  end if
+#else
+  allocate(py_xyz(npoints,3))
+#endif
+  allocate(py_q(0,5),py_offsets(ngrid),py_qoffsets(ngrid),py_zone_owners(ngrid))
+  py_zone_owners=0
   py_xyz=0; py_q=0
   p=1; c=1
   do g=1,ngrid
@@ -387,7 +422,31 @@ subroutine py_set_coordinates(xyz,npoints)
   implicit none
   integer, intent(in) :: npoints
   real(8), intent(in) :: xyz(npoints,3)
+  ! A worker deliberately has a zero-sized coordinate input buffer.
+  if (size(py_xyz,1) == 0) return
   py_xyz=xyz
+end subroutine
+
+subroutine py_get_partition(owners,ncells,nwallcells,ngrid)
+  use cfl3d_python_state
+  implicit none
+  integer, intent(in) :: ngrid
+  integer, intent(out) :: owners(ngrid),ncells,nwallcells
+  owners=py_zone_owners
+  ncells=size(py_q,1)
+  nwallcells=size(py_wall,2)
+end subroutine
+
+subroutine py_release_buffers()
+  use cfl3d_python_state
+  implicit none
+  ! Python has taken ownership of the returned state. Keep no second native
+  ! copy between calls; configuration and callbacks rebuild these buffers.
+  if (allocated(py_xyz)) deallocate(py_xyz)
+  if (allocated(py_q)) deallocate(py_q)
+  if (allocated(py_wall)) deallocate(py_wall,py_wall_forces)
+  if (allocated(py_surface)) deallocate(py_surface)
+  if (allocated(py_history)) deallocate(py_history)
 end subroutine
 
 subroutine py_get_solution(q,ncells)

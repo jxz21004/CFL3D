@@ -1,6 +1,6 @@
 # Python interface reference
 
-This document describes the current Python API, native interface version **10**.
+This document describes the current Python API, native interface version **12**.
 For the project motivation, requirements, and build commands, see the
 [README](../README.md). Validation records are maintained in
 [MPI_PROGRESS.md](../MPI_PROGRESS.md).
@@ -235,7 +235,7 @@ transition onset against experimental data.
 
 For the original implementation and its development status, see the
 [CFL3D transition-model notes](https://nasa.github.io/CFL3D/Cfl3dv6/cfl3dv6_new.html#transmod).
-Rebuild both native extensions after updating to interface version 10.
+Rebuild both native extensions after updating to interface version 12.
 
 ### Operating point and lift matching
 
@@ -480,7 +480,9 @@ solver.resetFlow()                       # Clear cached state and restartFile
 result = solver()                        # Cold start, preserving the output counter
 ```
 
-`getFlowState()` returns a copy. The complete native bytes, including turbulence,
+`getFlowState()` returns a copy. In serial it contains the complete case; in MPI
+it contains this rank's owned zones (`state.zone_indices`, in global CGNS order).
+The host rank normally has an empty shard. The native records, including turbulence,
 eddy viscosity, and ghost/wall state, are authoritative; editing the primitive
 `state.fields` arrays alone does not modify the native restart state. The state is
 owned by Python between calls and does not depend on the preceding output directory
@@ -496,11 +498,64 @@ check stored metadata. Raw native files do not carry the full Python configurati
 so the caller must supply matching axis conventions and physical references.
 
 `*_solution.npz` and visualization CGNS are not full-state restart inputs.
-`setFlowState()` must be applied on every participating rank with the same state.
-`writeRestartFile()` is a local root-only file operation and remains available when
-all visualization output flags are False.
+`setFlowState()` must be applied on every participating rank with that rank's own
+snapshot from the same completed solve. Collectively installed complete serial
+snapshots are also accepted and scattered before execution. Do not broadcast one
+worker's shard to other workers. Checkpoints written by `writeRestartFile()` remain
+whole-case files and can be loaded with a different worker count.
+
+`writeRestartFile()` is collective in MPI: every solver rank must call it, including
+the host. It remains available when all visualization output flags are False. This
+replaces the former root-only writer; the host no longer retains a full restart
+payload between calls.
 
 ## MPI
+
+### Local storage and explicit collection (native API 12)
+
+Coordinates, `result.fields`, detailed wall results, and cached restart records
+contain only owned zones. Global topology, BC/group metadata, per-boundary force
+integrals, and per-boundary wetted areas remain available on all ranks.
+`result.zone_owners` maps each CGNS zone name to its owner rank **within this solver's
+communicator**. Ownership comes from the native load balancer, not a Python guess.
+The native host (rank 0) has no persistent coordinates or detailed flow/wall data.
+The f2py bridge allocates owned mean-flow and wall cells; neither detailed array is
+Allreduced. A worker's f2py coordinate input is empty: native setup sends its grid
+from the host using the existing MPI path.
+
+`solver.mesh.zones` retains the global zone order and metadata. For a non-owned
+zone, `zone.coordinates is None`; `zone.dimensions` is still available. Local
+coordinates use their usual `(ni,nj,nk,3)` shape. Edit coordinates only on their
+owner, and retain array dimensions. Use `input_grid` to replace the discretization.
+Before the first native solve, coordinates have an initial placement; afterward
+they follow `result.zone_owners`. Historical geometry snapshots are also local.
+
+Call `solver.gatherFields(root=0)` on every solver rank to explicitly collect
+mean-flow arrays. It returns a whole-case dictionary on root and None elsewhere.
+CFL3D does not cache the collected dictionary. Retaining it in caller code naturally
+uses global-case memory on the receiving rank. `getFlowState()` remains local;
+use the collective checkpoint writer for a portable whole-case state.
+
+| Operation | MPI calling requirement |
+| --- | --- |
+| `solve()`, `gatherFields()` | Every rank in `solver.comm` |
+| `writeVolumeSolution()`, `writeFlowSolution()`, `writeRestartFile()` | Every rank in `solver.comm`; root writes the file |
+| `getFlowState()`, `setFlowState()` | Local; install matching owned shards on every rank before the next solve |
+| `getSolution()` | Local cached integral query |
+| `addLiftDistribution()`, `addSlices()`, `getLiftDistribution()`, `getSlices()` | Every rank; only the request/section/strip results are broadcast |
+| `writeTecplotSurfaceSolution()`, `writeSurfaceAnalysis()` | Every rank; root temporarily collects wall data and writes |
+| `clearSurfaceAnalysis()` | Clear on every rank; consistency is checked before solving/output |
+
+Native API 12 replaces the former root-only surface registration/query/writer
+contract. Call those methods outside `if rank == 0` blocks. Detailed wall geometry
+and fields are collected only for the operation and then released; querying
+`getSolution()` still needs no collective.
+
+Native grid setup, global array collection, and portable file I/O can temporarily
+assemble data on the host. Peak host memory is therefore not yet bounded by its
+owned zones. See [distributed-storage.md](distributed-storage.md) for the remaining
+work and measured payload sizes.
+
 
 Omitting `comm` automatically selects the MPI path under an MPI launch or an
 already initialized multi-rank `MPI.COMM_WORLD`. Ordinary serial construction does
@@ -545,10 +600,11 @@ solver on `MPI.COMM_NULL`. The object checks membership in its supplied communic
 not the entire world. It duplicates that communicator for native messages and
 releases the duplicate afterward; it does not finalize MPI.
 
-All ranks currently store complete Python grid/result copies. Automatic files are
+Ranks retain their owned coordinate/flow/wall/restart arrays. Automatic files are
 written by comm root; workers have separate `rank-0001/` work directories.
-Loads, group queries, and deferred output do not require MPI collectives. Native
-MPI errors abort the job to avoid leaving peers inside blocking native calls.
+Loads and group-name queries remain local. Detailed surface queries and all
+writers are collective. Native MPI errors abort the job to avoid leaving peers
+inside blocking native calls.
 
 ## CGNS grids and boundary conditions
 
@@ -733,19 +789,21 @@ Registered surface analyses and the result/history NPZ still write automatically
 After a successful solve, files can be written without rerunning the core:
 
 ```python
+# All participating ranks call volume/PLOT3D/checkpoint writers.
 solver.writeVolumeSolution()
-solver.writeTecplotSurfaceSolution(groupName="Wing")
-solver.writeSurfaceAnalysis()
 solver.writeFlowSolution()
 solver.writeRestartFile()
+solver.writeTecplotSurfaceSolution(groupName="Wing")
+solver.writeSurfaceAnalysis()
 ```
 
 Default paths retain the most recent result's identity even if live options later
 change. Explicit filenames/prefixes are caller-controlled; relative explicit paths
 are relative to the caller's working directory. Automatic/default paths are based
 on the solve output directory. Visualization writers use temporary files followed
-by replacement and protect the original CGNS input from overwrite. Deferred writers
-run locally on comm root.
+by replacement and protect the original CGNS input from overwrite. In MPI,
+all deferred writers must be called by every solver rank. Surface writers collect
+only wall vertices and detailed wall data, without gathering the volume mesh.
 
 ### File formats
 
@@ -818,19 +876,23 @@ Registered analyses write after every solve, even when
 `wing_slices.dat`. `writeSurfaceAnalysis(prefix="custom")` writes
 `custom_lift.dat` and `custom_slices.dat`. Filtering the main wall file does not
 change the groups registered for analyses. `clearSurfaceAnalysis()` removes all
-requests; `nLiftDist` and `nSlice` report registration counts. Registration,
-queries, and deferred writing can be root-only; solves remain collective.
+requests; `nLiftDist` and `nSlice` report registration counts. Registration and
+queries are collective in MPI, as are both surface writers. Root-only registration
+or querying from the earlier replicated-storage API must be updated. Computed
+strip/section results are returned on all participating ranks; writer paths are
+returned on root, with None on other ranks.
 
 ## Result arrays
 
 | Attribute | Content |
 | --- | --- |
-| `fields[zone]` | Cell-centered `(ni-1,nj-1,nk-1,5)` arrays: rho,u,v,w,p |
+| `fields[zone]` | Owned zones only in MPI; cell-centered `(ni-1,nj-1,nk-1,5)` arrays: rho,u,v,w,p |
+| `zone_owners` | Global CGNS zone name to rank in this solver's communicator |
 | `history` | Current chunk's rows: residual,CL,CD,CX,CY,CMX,CMY,CMZ |
 | `coefficients` | Last-step coefficients, with uppercase CMX/CMY/CMZ and total CDp/CDv |
 | `surface_coefficients[(zone,bc)]` | CL,CD,CX,CY,CZ,Cmx,Cmy,Cmz,CDp,CDv for each boundary |
-| `wall_fields[(zone,bc)]` | Two surface cell indices followed by Cp,T,Cfx,Cfy,Cfz,y+ |
-| `wall_forces[(zone,bc)]` | Native pressure XYZ and viscous XYZ loads divided by q_inf*sref |
+| `wall_fields[(zone,bc)]` | Owned walls only in MPI; two surface cell indices followed by Cp,T,Cfx,Cfy,Cfz,y+ |
+| `wall_forces[(zone,bc)]` | Owned walls only in MPI; pressure XYZ and viscous XYZ loads divided by q_inf*sref |
 | `final_alpha` | Final native angle, degrees |
 | `name`, `solve_index`, `output_directory`, `output_paths` | Output identity and targets |
 | `iteration_offset`, `cumulative_history` | Previous steps and accumulated history for this index |
@@ -843,7 +905,9 @@ print log10(residual). Surface indices follow the two unfixed grid axes.
 
 Automatic result NPZ contains cumulative `history`, `chunk_history`, identity and
 initialization metadata, final_alpha, and the surface names/coefficient table.
-When volume output is enabled it also contains `zone_<name>` arrays. The surface
+When volume output is enabled it also contains all `zone_<name>` arrays, collected
+temporarily on root. Calling `result.save()` directly writes only that result's
+local fields; use `gatherFields()` explicitly when whole-case arrays are needed. The surface
 coefficient column names are stored in `surface_coefficient_names`.
 
 ## Validation and supported scope

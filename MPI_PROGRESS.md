@@ -521,3 +521,57 @@ build/native-output-gamma-theta-mpi-fixed.log。
 日志：build/native-output-variants-full-tests.log、build/native-output-variants-parity.log、
 build/native-output-variants-mpi-{bsl,sst2003,wilcox2006,gamma-theta}.log。
 本轮未下载依赖，其他模型暂未扩展。
+
+
+## 第十四轮：分布式存储第一阶段（2026-10-19，未完成全部迁移）
+
+- 原生 API 升至 11。读取原生 mblk2nd/nblg 分区后才分配 f2py 平均流场缓冲区，
+  仅包含本 rank 拥有的最细层单元；移除体场的全数组 Allreduce。
+- SolverResult.fields、内部平均流场缓存和 FlowState 的原生完整记录按 zone 分片；
+  主进程没有计算网格时，这三者为空。保留湍流、黏性及 ghost 状态，未降级成平均流续算。
+- 缓存续算逐 zone 向原生主进程流式提交记录，不在主进程常驻完整 restart 副本；
+  不再广播完整 restart 给所有 rank。完整文件加载后 scatter，计算后按实际分区重新分片。
+- 新增 result.zone_owners 和显式 collective gatherFields()。延后体场、PLOT3D、restart
+  写出改为 collective，所有 comm 成员都要调用。完整可移植输出只在写出期间临时组装。
+- 原生计算成功后释放 f2py 数据缓冲区，Python 不再与原生常驻缓存重复保留一份体结果。
+- 重要边界：坐标和详细壁面数据仍复制，完整文件 I/O 仍可能需要主进程的临时全量内存。
+  这只是第一阶段，不能称为完整分布式存储。后续步骤见 docs/distributed-storage.md。
+
+验证：63 项单元/串行测试，60 通过、3 项可选 HDF5 跳过；三进程 SST 和 gamma-theta
+分片大小、逐位流场一致性、内存续算、文件续算和延后/自动输出通过；四进程两个独立
+二进程子通信器 SA 测试通过；三进程表面/截面/升力分布输出和编号接续回归通过。
+排除 world rank 0 的三进程 gamma-theta 动态参数、物理重置、网格重载回归通过。
+SST 两 zone 样例单次分片大小为主进程 0、worker 1053724 和 1053252 bytes，
+平均流场为主进程 0、worker 各 122880 bytes；全局之和分别等于完整原生记录及体场大小。
+这些是 payload 大小，未作为进程 RSS 或生产网格性能测量。
+
+
+## 第十五轮：坐标与详细壁面分布式存储（2026-10-19）
+
+- 原生 API 升至 12，串行与 Intel MPI 扩展均已重编译。
+- 构造/网格重载只广播 zone 尺寸、连接、边界等元数据，坐标 scatter 到 worker；
+  原生负载均衡后按实际 owner 迁移坐标。历史几何快照也只包含本地坐标。
+  非本地 Zone.coordinates 为 None，Zone.dimensions 仍可读取。
+- 原生主进程临时接收坐标用于 rp3d；worker 的 f2py 坐标输入缓冲区为空。
+  原生壁面缓冲区按本地物理 wall 单元分配，不给接口/远场分配详细壁面数组，
+  移除壁面数据及面载荷的全数组 Allreduce。
+- SolverResult 及内部详细壁面缓存均只保留本地 wall。每个边界的积分和浸润面积
+  仍是全局可用的小量，因此 getSolution() 仍可单独调用。
+- 表面注册、截面/升力分布查询、表面写出改为 collective。只在操作期间收集
+  壁面顶点和详细壁面数据，完成后释放；不收集体坐标，不把全局壁面缓存留在主进程。
+  原先只在 root 调用这些函数的脚本需要调整。clearSurfaceAnalysis() 也要更新所有 rank，
+  不一致时在下次 solve/输出前报错，避免各 rank 进入不同输出分支。
+- 体/PLOT3D 延后输出只在写出时临时收集坐标；输入坐标和保存结果的几何仍相互隔离。
+
+验证：63 项单元/串行测试，60 通过、3 项可选 HDF5 跳过；三进程 SST 本地存储和
+续算通过；不等大小两块网格 gamma-theta 测试刻意改变实际 owner，坐标迁移及续算通过；
+三维不等块、y-up、侧滑 SST 逐位流场对照和续算通过；三进程表面/截面/升力分布及
+续算编号输出与单核一致；四进程两个独立二进程子通信器的相同输出回归通过；
+排除 world rank 0 的 gamma-theta 工况修改、物理重置和网格重载回归通过。
+
+不等块 gamma-theta 样例：主进程常驻 native/平均流/坐标/详细壁面均为 0；
+worker 坐标分别 190896、116400 bytes，壁面场+面载荷分别 3840、768 bytes。
+这些是指定数组/payload 大小，未当作进程 RSS 或生产算例峰值内存测量。
+剩余主进程网格设置、checkpoint/可视化 I/O 的临时全量内存仍需后续优化。
+完整说明与复现命令见 docs/distributed-storage.md；日志前缀 build/native-output-distributed2-*。
+本轮未下载依赖，未自动提交。

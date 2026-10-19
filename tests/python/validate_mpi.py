@@ -15,10 +15,10 @@ from cfl3d import Boundary, CFL3D, CGNSMesh, Connection, MultigridStage, SolverO
 from fixtures import box_mesh, flatplate_mesh
 
 
-def split_plate():
+def split_plate(split=33):
     original = flatplate_mesh().zones[0]
     zones = []
-    for number, (lo, hi) in enumerate(((1, 33), (33, 65))):
+    for number, (lo, hi) in enumerate(((1, split), (split, 65))):
         zone = Zone(f"plate{number}", original.coordinates[:, lo-1:hi].copy())
         for bc in original.boundaries:
             p = bc.point_range.copy()
@@ -31,9 +31,9 @@ def split_plate():
                     continue
             p[1] -= lo-1
             zone.boundaries.append(Boundary(bc.name, bc.bc_type, p, bc.data))
-        p = np.array([[1, 2], [33 if number == 0 else 1]*2, [1, 97]])
+        p = np.array([[1, 2], [hi-lo+1 if number == 0 else 1]*2, [1, 97]])
         donor = p.copy()
-        donor[1] = 1 if number == 0 else 33
+        donor[1] = 1 if number == 0 else split
         zone.connections.append(Connection(f"plate{1-number}", p, donor, np.array([1, 2, 3])))
         zones.append(zone)
     return CGNSMesh(zones)
@@ -117,7 +117,7 @@ def compare_reference(result, filename, name):
         np.testing.assert_allclose(values, reference["surface_coefficients"], rtol=2e-10, atol=2e-13)
         surface_difference = float(np.max(np.abs(values-reference["surface_coefficients"])))
     assert np.isfinite(result.history).all()
-    return {"max_field_difference": max(differences.values()),
+    return {"max_field_difference": max(differences.values(), default=0.0),
             "max_history_difference": history_difference,
             "history_columns_compared": "coefficients" if uniform else "all",
             "history_rows": len(result.history), "final_alpha": result.final_alpha,

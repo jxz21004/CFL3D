@@ -26,15 +26,21 @@ class Connection:
 @dataclass
 class Zone:
     name: str
-    coordinates: np.ndarray  # (ni,nj,nk,3), physical Cartesian axes
+    coordinates: np.ndarray | None  # None for non-owned MPI zones; otherwise (ni,nj,nk,3)
     boundaries: list[Boundary] = field(default_factory=list)
     connections: list[Connection] = field(default_factory=list)
     family: str | None = None
     additional_families: tuple[str, ...] = ()
 
+    coordinate_dimensions: tuple[int, int, int] | None = field(default=None, repr=False)
+
     @property
     def dimensions(self):
-        return self.coordinates.shape[:3]
+        if self.coordinates is not None:
+            return self.coordinates.shape[:3]
+        if self.coordinate_dimensions is None:
+            raise ValueError(f"Zone {self.name} has neither coordinates nor dimensions")
+        return self.coordinate_dimensions
 
 
 def _text(value):

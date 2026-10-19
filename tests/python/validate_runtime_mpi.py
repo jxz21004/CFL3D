@@ -114,7 +114,8 @@ def run(comm, root, automatic, model='sst'):
                               if comm.rank == 0 else None, root=0)
         def check_transition():
             actual = transition_fields(solver.getFlowState(), solver.mesh)
-            for zone in expected:
+            assert set(actual) == set(solver._last_fields)
+            for zone in actual:
                 np.testing.assert_array_equal(actual[zone], expected[zone])
         solver._checked(check_transition)
     # Cached states are also checked before native collectives.

@@ -1,5 +1,12 @@
 python module _native
     interface
+        subroutine py_get_partition(owners,ncells,nwallcells,ngrid)
+            integer intent(in) :: ngrid
+            integer dimension(ngrid),intent(out),depend(ngrid) :: owners
+            integer intent(out) :: ncells,nwallcells
+        end subroutine py_get_partition
+        subroutine py_release_buffers()
+        end subroutine py_release_buffers
         subroutine py_set_restart_controls(override_alpha)
             integer intent(in) :: override_alpha
         end subroutine py_set_restart_controls
