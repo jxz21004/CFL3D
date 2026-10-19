@@ -628,3 +628,34 @@ NPZ/PLOT3D/壁面字节与串行一致，CGNS 数组一致；注入 CGNS、壁�
 剩余限制：原生网格准备仍在 host 汇集完整坐标并保留 py_xyz；截面及升力分布分析仍
 临时汇集表面。尚未做生产网格 RSS/峰值内存测量；本次没有宣称整体迁移已完成。
 日志 build/native-output-output-streaming-*；复现及边界见 docs/distributed-storage.md。
+
+
+阶段五第一步：原生驻留驱动原型（Native API 13，尚未接入公开 solve）
+
+- 撤回额外临时坐标文件方案；不把坐标文件桥作为后续续算的基础。
+- 在 PYTHON_API 分支保留 main/cfl3d/mgbl/mgblk 的数组与驱动状态，完整 MG cycle
+  边界返回 Python，后续原生推进跳过初始化、负载分配、setup 和层级构造。
+- 原生数值子程序及负载分配复用原实现；独立程序分支保留原来的循环与释放流程。
+- setup 分发完块以后释放 py_xyz 的全域输入副本；驻留推进不经 grid spool/restart
+  文件。原生文字日志仍会输出，不能称为零文件系统访问。
+- 增加显式原生入口 py_start_resident、py_advance_resident、py_close_resident、
+  py_resident_info。禁止活动上下文被重新 configure/换 communicator，提前关闭不增加
+  迭代且保留最后一次 readout，避免 MPI 力系数在关闭时再次 Allreduce。
+
+验证：70 项测试，67 通过、3 项可选 HDF5 跳过。SA/SST/gamma-theta 的 V/W 循环
+2+3+1+3 分段与连续 9 步一致，保留 first-order 启动和固定 CFL ramp；另测动态 CFL
+序列在不同分段边界下结果一致（该项关闭 ramp）。三核 SST 和两组独立二核 gamma-theta
+覆盖三维不等块、y-up、侧滑、原生块分区、只做一次 setup、释放全域 xyz、提前关闭。
+原有 MPI 表面/截面/升力分布/编号输出/追加历史回归通过。重新编译非 Python 独立程序，
+NASA SA/SST 基准与普通 Python 路径的流场、历史最大差值均为 0。
+
+限制：公开 CFL3D.solve 仍是 restart-based continuation；本次只建立可核对的原生基础。
+原型目前仅支持单个 mesh-sequence stage 的 steady cold start、预设总迭代容量、CFL/
+步数更新和单个活动上下文；多阶段初始 sequencing、无限续算/历史增长、FlowState 快照、
+更多动态选项及公开对象/输出生命周期仍需接入。Native API 13 要重编译两个扩展并重启
+已有 Python 进程（当前测试环境已重编译）。
+日志 build/native-output-resident-*；细节及复现见 docs/distributed-storage.md。
+
+补充：在 gamma-theta 驻留回归最后一步显式请求一次原生 checkpoint，用其完整 native
+payload 与连续计算逐字节比较，通过；其中包含四个模型输运变量、粘性和 ghost/wall
+记录。此前各分段边界均无内部 restart 文件。该测试不等于公开 FlowState 内存快照已实现。

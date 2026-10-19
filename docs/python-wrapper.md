@@ -512,6 +512,15 @@ need whole-case temporary storage on root. Volume output retains at most one
 received zone plus conversion buffers;
 wall ASCII output streams serialized patches from their owners.
 
+Continuation currently re-enters native initialization on every `solve()`. Keeping
+a cached `FlowState` does not retain the native multigrid workspace. Short-chunk
+adaptive control therefore still incurs setup and internal checkpoint I/O; the
+[resident-runtime design](distributed-storage.md#resident-runtime-design-for-the-next-stage)
+describes the intended replacement. API 13 contains an explicit native prototype;
+it is not yet connected to `CFL3D.solve()`. Rebuild both native extensions and
+restart Python after updating from API 12; this update does not enable resident
+continuation automatically.
+
 `*_solution.npz` and visualization CGNS are not full-state restart inputs.
 `setFlowState()` must be applied on every participating rank with that rank's own
 snapshot from the same completed solve. Collectively installed complete serial
@@ -526,7 +535,7 @@ payload between calls.
 
 ## MPI
 
-### Local storage and explicit collection (native API 12)
+### Local storage and explicit collection (since native API 12)
 
 Coordinates, `result.fields`, detailed wall results, and cached restart records
 contain only owned zones. Global topology, BC/group metadata, per-boundary force

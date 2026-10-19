@@ -398,6 +398,10 @@ c
 #endif
       common /unit5/ iunit5
       common /wrestq/ irest,irest2
+#ifdef PYTHON_API
+      save
+      if (py_resuming) go to 9102
+#endif
 c
 c***********************************************************************
 c     memory allocation
@@ -1053,6 +1057,9 @@ c***********************************************************************
 c     call flow solver
 c***********************************************************************
 c
+#ifdef PYTHON_API
+ 9102 continue
+#endif
       call mgbl(mwork,mworki,nplots,minnode,iitot,intmax,maxxe,
      .          mxbli,nsub1,lbcprd,lbcemb,lbcrad,maxbl,maxgr,
      .          maxseg,maxcs,ncycmax,intmx,mxxe,mptch,msub1,
@@ -1107,6 +1114,9 @@ c
      .          icouple,nblelst,iskmax,jskmax,kskmax,ue,irdrea)
 c
 #ifdef PYTHON_API
+c     Explicit close keeps the last published readout. Recollecting already
+c     reduced surface rows here would count them again on MPI ranks.
+      if (py_resident_closing) go to 9105
       do py_g=1,py_ngrid
          py_b=nblg(py_g)
 #if defined DIST_MPI
@@ -1119,6 +1129,8 @@ c
 #endif
       end do
       py_nhistory = min(ncycmax,sum(py_stages(1,:)))
+      if (py_resident_enabled) py_nhistory=py_resident_done
+      if (allocated(py_history)) deallocate(py_history)
       allocate(py_history(py_nhistory,8))
       py_history = 0
       if (myid.eq.myhost) then
@@ -1132,6 +1144,8 @@ c
       py_history(:,8) = cmzw(1:py_nhistory)
       end if
       call py_collect_results()
+      if (py_resident_paused) return
+ 9105 continue
 #endif
 c
 c***********************************************************************

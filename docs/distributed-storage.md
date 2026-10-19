@@ -1,8 +1,9 @@
 # Distributed storage migration
 
-Native API 12 completes persistent coordinate and detailed wall distribution,
-following the API 11 mean-flow/restart migration. MPI checkpoint I/O now also uses
-bounded streaming, without changing native API 12 or the NPZ checkpoint format.
+Native API 13 adds an experimental native resident driver on top of API 12's
+persistent coordinate/wall distribution and API 11's mean-flow/restart migration.
+The public `CFL3D.solve()` path still uses restart-based continuation. MPI
+checkpoint I/O uses bounded streaming and retains the existing NPZ format.
 File-based MPI input now reads coordinates on their initial owners. Volume output
 is written one zone at a time, and wall ASCII output is streamed from its owners.
 Native grid setup and surface analysis still need further work on peak host memory.
@@ -98,20 +99,196 @@ load through `options['restartFile']` or install each rank's own cached shard.
 
 ## Remaining work
 
-1. Bound temporary host storage during native grid setup. Initial file loading no
+1. Retain the native solver workspace between calculation chunks. The current
+   restart-based continuation rebuilds setup on every `solve()` and incurs
+   internal checkpoint I/O. This takes priority over changing the grid I/O path;
+   see the resident-runtime design below.
+2. Bound temporary host storage during native grid setup. Initial file loading no
    longer assembles a complete mesh, but native array preparation/validation still
    gathers whole-case geometry, and the native host retains its coordinate input
    buffer during computation. The host's peak memory still depends on global size.
-2. Distribute surface analysis itself. Slice registration/evaluation and lift
+3. Distribute surface analysis itself. Slice registration/evaluation and lift
    distribution computation still temporarily collect complete wall data on root.
    Volume writers are bounded by the largest zone; a single large zone can still
    require substantial conversion memory and cannot be split across workers.
-3. Measure process RSS/peak memory on representative production meshes. Small
+4. Measure process RSS/peak memory on representative production meshes. Small
    payload checks establish ownership, not an overall scaling/performance result.
 
 The native host/worker solver and whole-zone partition strategy remain in use;
 this migration does not add intra-zone decomposition or remove all legacy scratch
 allocations. Global topology and small per-boundary summaries remain replicated.
+
+## Resident runtime: design for the next stage
+
+Status: **native prototype implemented; public integration pending**. The public
+`CFL3D.solve()` still performs restart-based continuation.
+An uncommitted experiment that staged coordinates to a temporary file has been
+withdrawn from the active implementation. It removed the global coordinate copy
+but did not avoid setup on every call and added coordinate disk I/O. Merely moving
+that file to a RAM-backed directory would not solve the lifecycle problem.
+
+The requirement is to retain the original CFL3D numerical methods, host/worker
+partition and block distribution, while separating native initialization,
+iteration advancement and final cleanup. Preserving the numerical algorithm
+does not require preserving the standalone program's allocate/run/free lifetime.
+
+The source audit identifies these boundaries:
+
+- `dist/main.F` enters the native top-level solver for every call.
+- `dist/cfl3d.F` owns the main work arrays and many topology/model arrays. It calls
+  `mgbl`, exports Python readouts after that call, then deallocates the arrays.
+- `dist/mgbl.F` initializes global state, determines the partition, calls `setup`,
+  runs initial mesh sequencing and calls `mgblk`. Its residual/history work arrays
+  are also deallocated before returning.
+- `dist/mgblk.F` contains the multigrid cycle loop and end-of-chunk restart output.
+  Keeping only the finest-grid mean flow cannot preserve this entire workspace.
+
+### Intended behavior
+
+1. The first `solve()` lazily initializes the native context, reads/distributes
+   geometry using the original host/worker scheme, builds the grid hierarchy and
+   advances the requested schedule. Initial coarse-to-fine sequencing runs once.
+2. Further compatible calls update supported runtime controls at a collective
+   iteration boundary and advance the requested number of additional cycles.
+   They retain coordinates, partition, communication state, metric/wall-distance
+   data, turbulence/ghost state, and all required multigrid levels and work arrays.
+   They must not rerun setup, reload geometry or serialize a restart to continue.
+3. Existing Python result queries use rank-local readouts and small global load
+   summaries. Returning to Python must leave the authoritative native context
+   alive. A context handle is distinct from an exported `FlowState` snapshot;
+   creating a binary snapshot on every call must not become an implicit new cost.
+4. `resetFlow()` or incompatible configuration changes invalidate the context
+   and trigger a clean initialization when required. Output names/directories
+   and the number of requested iterations do not invalidate the physical state.
+   Grid hierarchy or allocation changes need an explicit policy; the current
+   broad "numerical" option category is not sufficient to prove safe updates.
+5. Explicit checkpoint loading/saving remains file I/O. Automatic snapshot,
+   history and visualization policies must be separable from advancement; an
+   internal control loop with output disabled must not write a restart, grid spool
+   or unconditional solution NPZ merely because `solve()` returned.
+
+This needs changes to allocation ownership and driver control flow, guarded for
+the Python build. Residual evaluation, fluxes, turbulence equations, restriction,
+prolongation and the original load balancer should be reused. Leaving arrays
+allocated without retaining the associated scalar/COMMON state is insufficient.
+Threads, background solver processes and implicit file-based context switching
+are not part of this proposed design.
+
+Communicators must remain valid for the lifetime of the native context, rather
+than being duplicated/freed per calculation chunk. Multi-object semantics must
+be resolved before enabling this path: the legacy COMMON state is process-global,
+and initializing another object must not silently overwrite a resident context.
+History capacity, convergence normalization, CFL-ramp counters, first-order
+startup and lift-control counters must also survive calculation boundaries or be
+updated according to a documented explicit option change.
+
+### Acceptance checks
+
+- Instrument initialization, partitioning and hierarchy construction. Repeated
+  compatible advancement increments none of those counts. A requested reset or
+  incompatible change causes exactly one new initialization.
+- Compare one continuous run against many chunks with identical controls. Check
+  residual history, force integrals, mean flow, transported turbulence variables
+  and the preserved multigrid state. Cover V/W cycles, nonzero startup settings,
+  SA/SST/gamma-Re_theta, unequal zones, 3D and both axis conventions.
+- Change CFL and chunk length between calls and compare with the same prescribed
+  control sequence applied to a continuous native run. Do not compare against a
+  constant-CFL reference or silently restart CFL ramps at every chunk.
+- Trace solver file access with automatic output disabled. After initialization,
+  compatible advancement performs no grid/restart/snapshot file I/O. Native MPI
+  runtime/library file access is separate from solver payload I/O.
+- Confirm original block ownership and rank-local storage. Measure setup count,
+  advancement time, payload bytes and RSS separately; do not infer performance
+  from array sizes alone.
+- Check queries between chunks, reset/cleanup, communicator splits/excluded ranks,
+  exceptions and multi-object behavior. Verify that the non-Python standalone
+  build and its numerical results remain unchanged.
+
+The design above is not yet an available `SolverOptions` runtime option. Native
+API 13 exposes the first prototype described below for explicit development use.
+
+### First native prototype (API 13)
+
+`py_start_resident(cycles)` opts into a bounded native session after ordinary
+configuration. The configured single-stage iteration count reserves the total
+schedule/history capacity. The first `py_solve()` returns after the requested
+number of complete V/W cycles. `py_advance_resident(cycles, cfl)` advances additional
+cycles in the same workspace; cfl=0 preserves the existing control, while a
+positive value applies a new CFL. `py_close_resident()` releases an unfinished
+context without advancing another cycle. Finishing the reserved schedule also
+performs cleanup. These functions are low-level development interfaces, not a
+supported replacement for `CFL3D.solve()` yet.
+
+The guarded Python driver retains its original arrays and scalar state across
+normal returns. It resumes after a completed cycle rather than re-entering
+initialization, partitioning, `setup`, or grid hierarchy construction. MPI ranks
+retain the original block map and must all advance/close together. Input `py_xyz`
+is released immediately after original setup has distributed the blocks. No
+coordinate spool or internal restart file supplies an advance operation.
+
+Native restart output is disabled by default for the prototype. Existing native text logs
+remain open and receive iteration diagnostics; this is **not** a claim of zero
+filesystem activity. The resident driver does not create automatic Python result
+NPZ/CGNS/Tecplot files, since the public writer pipeline is not attached to it.
+Early close preserves the last published readout and does not reduce MPI force
+rows a second time. Configuration/communicator replacement is rejected while a
+context is active. Another ordinary solver may initialize after explicit close.
+Native timing summaries span time spent back in Python while the context is
+paused. Measure native advance calls separately for performance comparisons.
+
+`py_resident_info()` returns enabled/paused flags, completed cycles, setup-call
+count, reserved native history capacity, main real/integer workspace capacity in
+bytes, and retained input-coordinate value count. Workspace bytes describe the
+last initialized capacity, not all allocations or current RSS; their value remains
+available after cleanup. Readout buffers are separate rank-local copies.
+
+Current prototype boundaries:
+
+- Steady cold starts with one mesh-sequence stage only; multilevel V/W cycling is
+  supported. Coarse-to-fine initial sequencing and file-based initial restart are
+  not yet supported by the resident start entry point.
+- A finite schedule is reserved before starting. Indefinite advancement/history
+  growth without rebuilding geometry is not implemented. Advances beyond the
+  reserved budget are rejected before modifying the state.
+- Only CFL/chunk-length changes are exposed. Fixed-control tests retain startup
+  order and CFL-ramp state. Changed-CFL tests currently use disabled ramps; this
+  does not establish arbitrary runtime option-update semantics.
+- One active native context per process. It borrows a communicator that must stay
+  alive until close. Full multi-object context switching, resident `FlowState`
+  snapshots and public output numbering remain integration work.
+- `CFL3D.solve()` and existing result/post-processing APIs retain their established
+  behavior; users must not expect resident advancement merely by updating builds.
+
+Both extensions must be rebuilt for API 13 and existing Python processes restarted:
+
+```bash
+python tools/build_python.py --jobs 8
+python tools/build_python.py --mpi --jobs 8
+```
+
+Regression entry points:
+
+```bash
+PYTHONPATH=tests/python python -m unittest test_resident_native -v
+PYTHONPATH=tests/python mpirun -np 3 python tests/python/validate_resident_mpi.py --model sst --directory build/native-output-resident-final-mpi3
+PYTHONPATH=tests/python mpirun -np 4 python tests/python/validate_resident_mpi.py --split --model gamma-theta --directory build/native-output-resident-gamma-split
+```
+
+The first comparison covers continuous versus 2+3+1+3 cycles, all three tested
+models (SA/SST/gamma-Re_theta), V/W cycling, startup order and CFL ramps. A separate
+test applies the same changing-CFL sequence at different chunk boundaries. The
+MPI fixture uses unequal 3D blocks, y-up axes and sideslip; it checks the original
+block map, exact readouts/history, one setup call and zero retained input xyz.
+A final, explicitly requested gamma-Re_theta restart export matches the continuous
+run's complete native payload byte for byte, including transported turbulence,
+viscosity and ghost/wall records; no such file is created between its chunks.
+Both MPI layouts also check early close without an extra cycle or duplicated
+surface reduction. The complete suite reports 70 tests: 67 pass and 3 optional
+HDF5 tests skip. Existing MPI surface/analysis/output/continuation regression passes
+in two independent two-rank communicators. The non-Python standalone build also
+compiles, and the SA/SST NASA fixture comparison gives zero maximum field and
+history differences between the ordinary Python path and standalone executable.
+These small fixtures do not establish production memory scaling or speedup.
 
 ## Evidence for the second stage
 
@@ -203,6 +380,6 @@ PYTHONPATH=tests/python mpirun -np 4 python tests/python/validate_solution_io_mp
 PYTHONPATH=tests/python mpirun -np 3 python tests/python/validate_distributed_mpi.py --unequal --3d --y-up --model sst --directory build/native-output-output-streaming-3d
 ```
 
-These changes keep native API 12; rebuilding the native extensions is unnecessary
-when updating from an already-built API 12 checkout. Result NPZ member order is
+The checkpoint/output-streaming stage kept native API 12. The resident prototype
+now requires rebuilding for API 13 as described above. Result NPZ member order is
 not an interface guarantee; existing array names and values remain compatible.

@@ -73,7 +73,7 @@ c
      .                 timekeep,xorgae0,yorgae0,zorgae0,icouple,
      .                 iprnsurf,nblelst,iskmax,jskmax,kskmax,ue,nummem)
 #ifdef PYTHON_API
-      use cfl3d_python_state, only: py_write_restart
+      use cfl3d_python_state
 #endif
 c
 c     $Id$
@@ -132,10 +132,20 @@ c
      .          istat2_em(istat_size,lbcemb*3),
      .          istat2_pe(istat_size,lbcprd*5)
       dimension w(mgwk),wk(nwork),lw(65,maxbl),lw2(43,maxbl),iwk(iwork)
-      dimension iw(maxbl*7*3),timesave(maxbl),lwdat(maxbl,maxseg,6)
+      dimension iw(maxbl*7*3),lwdat(maxbl,maxseg,6)
+#ifdef PYTHON_API
+      allocatable :: timesave(:)
+#else
+      dimension timesave(maxbl)
+#endif
       dimension inpl3d(nplots,11),inpr(nplots,11)
       dimension deltat(5),nptsr(20)
-      dimension mblk2nd(maxbl),ireq_qb(maxbl*13),mytag_qb(13)
+      dimension mblk2nd(maxbl),mytag_qb(13)
+#ifdef PYTHON_API
+      integer, allocatable :: ireq_qb(:)
+#else
+      dimension ireq_qb(maxbl*13)
+#endif
       dimension iovrlp(maxbl),lig(maxbl),lbg(maxbl),ibpntsg(maxbl,4),
      .          iipntsg(maxbl),iibg(iitot),kkbg(iitot),jjbg(iitot),
      .          ibcg(iitot),dxintg(iitot),dyintg(iitot),dzintg(iitot),
@@ -258,8 +268,14 @@ c
       dimension iskmax(maxbl)
       dimension jskmax(maxbl)
       dimension kskmax(maxbl)
+#ifdef PYTHON_API
+      integer, allocatable :: idimt(:),jdimt(:),kdimt(:)
+      integer, allocatable :: nnegb(:),negn(:)
+      allocatable :: rmstb(:),sumn(:)
+#else
       dimension idimt(maxbl),jdimt(maxbl),kdimt(maxbl)
       dimension nnegb(nummem),rmstb(nummem),sumn(nummem),negn(nummem)
+#endif
 c
       common /cfl/ dt0,dtold
       common /elastic/ ndefrm,naesrf
@@ -405,6 +421,27 @@ c                        res=r(q)
 c                        res=res+qr
 c                        l(dq)=res
 c
+#ifdef PYTHON_API
+c     Pause only after complete cycles. No native MPI request is left pending
+c     at this boundary; caller-owned arrays and scalar state remain resident.
+      save
+      if (py_resuming) then
+         py_resuming=.false.
+         if (py_resident_closing) then
+            ncyc=icyc
+            go to 7011
+         end if
+         if (py_resident_cfl.gt.0.d0) then
+            dt=-py_resident_cfl
+            dt0=dt
+            dtold=dt
+         end if
+         go to 9104
+      end if
+      allocate(timesave(maxbl),ireq_qb(maxbl*13))
+      allocate(idimt(maxbl),jdimt(maxbl),kdimt(maxbl))
+      allocate(nnegb(nummem),rmstb(nummem),sumn(nummem),negn(nummem))
+#endif
       levt  = levelt(iseq)
       levb  = levelb(iseq)
       nitfo = nitfo1(iseq)
@@ -690,7 +727,12 @@ c
 c
 c     loop over time steps
 c
+#ifdef PYTHON_API
+      nt=1
+ 6001 continue
+#else
       do 6000 nt=1,ntstep
+#endif
 c
 c     check for user stop file - will then stop on next time step
 c
@@ -959,7 +1001,12 @@ c***********************************************
 c
 c     loop over multigrid cycles
 c
+#ifdef PYTHON_API
+      icyc=1
+ 7001 continue
+#else
       do 7000 icyc=1,ncyc
+#endif
 c
       if (icyc.gt.1) isklton = 0
 c
@@ -2454,6 +2501,15 @@ c     end upward leg of multigrid cycle
 c***********************************************
 c
  6999 continue
+#ifdef PYTHON_API
+      if (py_resident_enabled) then
+         py_resident_done=ntt
+         if (ntt.ge.py_resident_stop .and. icyc.lt.ncyc) then
+            py_resident_paused=.true.
+            return
+         end if
+      end if
+#endif
 c
 c     write restart file if non time-accurate
 c
@@ -2637,6 +2693,11 @@ c
 
 c
  7000 continue
+#ifdef PYTHON_API
+ 9104 continue
+      icyc=icyc+1
+      if (icyc.le.ncyc) go to 7001
+#endif
 c
 7011  continue
 c     recover original ita
@@ -3244,6 +3305,10 @@ c
 c
 
  6000 continue
+#ifdef PYTHON_API
+      nt=nt+1
+      if (nt.le.ntstep) go to 6001
+#endif
 c
  6011 continue
 c
@@ -3305,5 +3370,9 @@ c
  3080 format(/30h***** ENDING PROLONGATION LOOP)
  3090 format(/37h***** ENDING TIME ADVANCEMENT, iseq =,i2,6h *****/)
 c
+#ifdef PYTHON_API
+      deallocate(timesave,ireq_qb,idimt,jdimt,kdimt)
+      deallocate(nnegb,rmstb,sumn,negn)
+#endif
       return
       end

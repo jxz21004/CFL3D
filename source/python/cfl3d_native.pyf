@@ -1,5 +1,21 @@
 python module _native
     interface
+        subroutine py_start_resident(cycles,status)
+            integer intent(in) :: cycles
+            integer intent(out) :: status
+        end subroutine py_start_resident
+        subroutine py_advance_resident(cycles,cfl,status,nrows)
+            integer intent(in) :: cycles
+            real(kind=8) intent(in) :: cfl
+            integer intent(out) :: status,nrows
+        end subroutine py_advance_resident
+        subroutine py_close_resident(status)
+            integer intent(out) :: status
+        end subroutine py_close_resident
+        subroutine py_resident_info(enabled,paused,cycles,initializations,capacity,work_bytes,coordinate_values)
+            integer intent(out) :: enabled,paused,cycles,initializations,capacity
+            integer(kind=8) intent(out) :: work_bytes,coordinate_values
+        end subroutine py_resident_info
         subroutine py_get_partition(owners,ncells,nwallcells,ngrid)
             integer intent(in) :: ngrid
             integer dimension(ngrid),intent(out),depend(ngrid) :: owners

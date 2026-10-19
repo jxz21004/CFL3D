@@ -74,7 +74,7 @@ c
      .                zorgae0,icouple,nblelst,iskmax,jskmax,kskmax,ue,
      .                irdrea)
 #ifdef PYTHON_API
-      use cfl3d_python_state, only: py_partition_results
+      use cfl3d_python_state
 #endif
 #   ifdef CMPLX
 #   else
@@ -294,6 +294,10 @@ c     NKEY sizes the MPI buffer below; read the initialized COMMON value.
 
       allocatable :: rmstr(:,:)
       allocatable :: nneg(:,:)
+#ifdef PYTHON_API
+      save
+      if (py_resuming) go to 9103
+#endif
 c
 c***********************************************************************
 c     initialization
@@ -692,6 +696,13 @@ c     RSM not working in complex mode
       allocate( nneg(ncycmax,nummem),stat=stats )
       call umalloc(ncycmax*nummem,1,'nneg',memuse,stats)
 c
+#ifdef PYTHON_API
+      if (py_resident_enabled) then
+         py_resident_initializations=py_resident_initializations+1
+         py_resident_capacity=ncycmax
+         py_resident_work_bytes=int(mwork,8)*8+int(mworki,8)*4
+      end if
+#endif
       call setup(lw,lw2,work,nstart,work(nstart+1),nwork,iwork(iwk5),
      .           mworki1,iwork(iwk1),iwork(iwk2),iwork(iwk3),
      .           maxbl,mxbli,maxgr,maxseg,nsub1,maxxe,intmax,
@@ -724,6 +735,15 @@ c
      .           zorgae0,icouple,lfgm,nblk,limblk,isva,nblelst,iskmax,
      .           jskmax,kskmax,ue,irdrea,nbli,nummem)
 c
+#ifdef PYTHON_API
+c     setup has distributed all blocks. Resident advancement never reads the
+c     input geometry again; do not keep a global input xyz buffer alive.
+      if (py_resident_enabled) then
+         if (allocated(py_xyz)) deallocate(py_xyz)
+         allocate(py_xyz(0,3))
+      end if
+#endif
+
       do iii = 1,mworki
          iwork(iii) = 0
       end do
@@ -767,7 +787,13 @@ c
       nframes = 0
       icall1 = 0
 c
+#ifdef PYTHON_API
+c     Explicit sequence counters remain valid across a normal Python return.
+      iseq=1
+ 8001 continue
+#else
       do 8000 iseq=1,mseq
+#endif
 c
 c     skip mesh sequence levels with ncyc = 0
 c
@@ -817,6 +843,9 @@ c
      .           ''work space for subroutine mgblk'')')
             call termn8(myid,-1,ibufdim,nbuf,bou,nou)
          end if
+#ifdef PYTHON_API
+ 9103    continue
+#endif
          call mgblk(iseq,lw,lw2,work,nstart,work(nstart+1),
      .              work(nstart+1+maxbl),nwork1,
      .              iwork(iwk1),iwork(iwk2),iwork(iwk3),mworki1,
@@ -871,6 +900,9 @@ c
      .              iaesurf,maxsegdg,nmaster,aehist,timekeep,xorgae0,
      .              yorgae0,zorgae0,icouple,iprnsurf,nblelst,iskmax,
      .              jskmax,kskmax,ue,nummem)
+#ifdef PYTHON_API
+         if (py_resident_paused) return
+#endif
 c
          do iii = 1,mworki
             iwork(iii) = 0
@@ -1048,6 +1080,10 @@ c
       end if
 c
  8000 continue
+#ifdef PYTHON_API
+      iseq=iseq+1
+      if (iseq.le.mseq) go to 8001
+#endif
  8100 continue
 c
 c     end of mesh sequencing

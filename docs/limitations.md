@@ -1,6 +1,6 @@
 # Known limitations and validation gaps
 
-This document describes the Python interface at native API **10**. It records
+This document describes the Python interface at native API **13**. It records
 confirmed constraints and unfinished work, rather than an exhaustive audit of the
 legacy Fortran solver. For parameter definitions and usage, see the
 [Python interface reference](python-wrapper.md). Reproducible test commands and
@@ -11,7 +11,7 @@ development evidence are recorded in [MPI_PROGRESS.md](../MPI_PROGRESS.md).
 | Area | Current behavior and practical consequence |
 | --- | --- |
 | Python flow arrays | `SolverResult.fields` and `FlowState.fields` are readouts. Editing them does not modify the authoritative native restart payload used by the next solve. A primitive-array-to-native-state injection API is not implemented. |
-| Continuation overhead | Python retains the complete finest-grid restart state, including turbulence and ghost data. Each `solve()` restores it through an internal temporary binary file and rebuilds native work/coarse-grid arrays. Repeated calls therefore incur setup, serialization, and disk I/O, even with all visualization output disabled. |
+| Continuation overhead | Python retains the complete finest-grid restart state, including turbulence and ghost data. Each public `solve()` restores it through an internal temporary binary file and rebuilds native work/coarse-grid arrays. Repeated calls therefore incur setup, serialization, and disk I/O, even with all visualization output disabled. An explicit native resident prototype now exists, but public integration and unbounded advancement remain unfinished; see [the lifecycle design](distributed-storage.md#resident-runtime-design-for-the-next-stage). |
 | MPI peak memory (remaining work) | Persistent coordinates, mean-flow/wall arrays, and native restart records are partitioned by zone ownership. File inputs read coordinates on initial owners; checkpoint I/O streams chunks, with compressed input spooled to disk. Volume output receives one zone at a time, and wall ASCII output streams from owners. Native grid setup, explicit `gatherFields()`, and slice/lift analysis still collect global data temporarily on the host. Host peak memory is not yet bounded by local zone size; payload counts are not RSS measurements. See [distributed-storage.md](distributed-storage.md). |
 | MPI work distribution | Rank 0 is the native host; other ranks compute whole existing zones. The interface does not split zones automatically. Worker count cannot exceed zone count. A one-rank communicator uses the serial path. |
 | Process-global native state | Multiple objects may solve sequentially, but concurrent solves in one Python process are unsupported. Native execution also changes the process working directory temporarily, so other threads using relative paths can be affected. |

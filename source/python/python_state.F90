@@ -20,6 +20,14 @@ module cfl3d_python_state
   logical :: py_append_output=.false.
   logical :: py_override_restart_alpha=.false.
   integer :: py_iteration_offset=0
+  ! Experimental resident driver. Enabled only through the explicit native API;
+  ! CFL3D.solve still uses its established restart path until integration checks.
+  logical :: py_resident_enabled=.false.,py_resident_paused=.false.
+  logical :: py_resuming=.false.,py_resident_closing=.false.
+  integer :: py_resident_stop=0,py_resident_done=0
+  integer :: py_resident_initializations=0,py_resident_capacity=0
+  integer(kind=8) :: py_resident_work_bytes=0
+  real(8) :: py_resident_cfl=0.d0
 contains
   function py_output_name(legacy) result(name)
     character(len=*), intent(in) :: legacy
@@ -212,7 +220,7 @@ end module
 subroutine py_api_version(version)
   implicit none
   integer, intent(out) :: version
-  version=12
+  version=13
 end subroutine
 
 subroutine py_set_restart_controls(override_alpha)
@@ -301,7 +309,7 @@ subroutine py_set_communicator(comm,status)
 #ifdef DIST_MPI
   call MPI_Initialized(initialized,ierr)
   call MPI_Finalized(finalized,ierr)
-  if (.not.initialized .or. finalized .or. py_used /= 0) return
+  if (.not.initialized .or. finalized .or. py_used /= 0 .or. py_resident_enabled) return
   if (comm == MPI_COMM_NULL) return
   call MPI_Comm_size(comm,nprocs,ierr)
   if (ierr /= MPI_SUCCESS .or. nprocs < 2) return
@@ -366,6 +374,10 @@ subroutine py_configure(dims,counts,bcs,bcdata,blocks,connections,flow,reference
   status=0
   if (py_used /= 0) then
     status=1
+    return
+  end if
+  if (py_resident_enabled) then
+    status=3
     return
   end if
   if (allocated(py_dims)) then
@@ -440,6 +452,7 @@ end subroutine
 subroutine py_release_buffers()
   use cfl3d_python_state
   implicit none
+  if (py_resident_enabled) return
   ! Python has taken ownership of the returned state. Keep no second native
   ! copy between calls; configuration and callbacks rebuild these buffers.
   if (allocated(py_xyz)) deallocate(py_xyz)
@@ -447,6 +460,87 @@ subroutine py_release_buffers()
   if (allocated(py_wall)) deallocate(py_wall,py_wall_forces)
   if (allocated(py_surface)) deallocate(py_surface)
   if (allocated(py_history)) deallocate(py_history)
+end subroutine
+
+subroutine py_start_resident(cycles,status)
+  use cfl3d_python_state
+  implicit none
+  integer, intent(in) :: cycles
+  integer, intent(out) :: status
+  status=1
+  if (py_used /= 0 .or. py_resident_enabled .or. cycles < 1) return
+  if (.not.allocated(py_xyz) .or. .not.allocated(py_stages)) return
+  if (py_time(1) >= 0.d0 .or. py_time(2) /= 0.d0) return
+  ! First stage: steady cold start with one mesh-sequence stage, including
+  ! multilevel V/W cycling. Initial coarse-to-fine sequencing comes later.
+  if (size(py_stages,2) /= 1) return
+  if (cycles > sum(py_stages(1,:))) return
+  ! This prototype reserves a finite total schedule using the existing history
+  ! sizing. Growing that capacity is a separate step, not a hidden reinitialize.
+  py_resident_enabled=.true.; py_resident_paused=.false.
+  py_resuming=.false.; py_resident_closing=.false.
+  py_resident_stop=cycles; py_resident_done=0
+  py_resident_initializations=0; py_resident_capacity=0
+  py_resident_work_bytes=0; py_resident_cfl=0.d0
+  py_write_restart=.false.
+  status=0
+end subroutine
+
+subroutine py_advance_resident(cycles,cfl,status,nrows)
+  use cfl3d_python_state
+  use, intrinsic :: ieee_arithmetic, only: ieee_is_finite
+  implicit none
+  integer, intent(in) :: cycles
+  real(8), intent(in) :: cfl
+  integer, intent(out) :: status,nrows
+  status=1; nrows=py_nhistory
+  if (.not.py_resident_enabled .or. .not.py_resident_paused .or. py_used /= 0) return
+  if (cycles < 1 .or. .not.ieee_is_finite(cfl) .or. .not.(cfl >= 0.d0)) return
+  if (cycles > sum(py_stages(1,:))-py_resident_done) return
+  py_resident_stop=py_resident_done+cycles
+  py_resident_cfl=cfl
+  py_resuming=.true.; py_resident_paused=.false.
+  py_surface=0; py_force_angle_valid=0
+  call py_solve(status,nrows)
+end subroutine
+
+subroutine py_close_resident(status)
+  use cfl3d_python_state
+  implicit none
+  integer, intent(out) :: status
+  integer :: nrows
+  status=0
+  if (.not.py_resident_enabled) return
+  if (py_used /= 0) then
+    status=1
+    return
+  end if
+  if (py_resident_initializations == 0) then
+    py_resident_enabled=.false.
+    return
+  end if
+  if (.not.py_resident_paused) then
+    status=1
+    return
+  end if
+  py_resident_closing=.true.; py_resuming=.true.
+  py_resident_paused=.false.
+  call py_solve(status,nrows)
+  py_resident_closing=.false.
+end subroutine
+
+subroutine py_resident_info(enabled,paused,cycles,initializations,capacity,work_bytes,coordinate_values)
+  use cfl3d_python_state
+  implicit none
+  integer, intent(out) :: enabled,paused,cycles,initializations,capacity
+  integer(kind=8), intent(out) :: work_bytes,coordinate_values
+  enabled=0; paused=0
+  if (py_resident_enabled) enabled=1
+  if (py_resident_paused) paused=1
+  cycles=py_resident_done; initializations=py_resident_initializations
+  capacity=py_resident_capacity; work_bytes=py_resident_work_bytes
+  coordinate_values=0
+  if (allocated(py_xyz)) coordinate_values=size(py_xyz,kind=8)
 end subroutine
 
 subroutine py_get_solution(q,ncells)
@@ -469,6 +563,10 @@ subroutine py_solve(status,nrows)
   use cfl3d_python_state
   implicit none
   integer, intent(out) :: status,nrows
+  if (py_resident_paused) then
+    status=2; nrows=py_nhistory
+    return
+  end if
   if (py_used /= 0 .or. .not.allocated(py_xyz)) then
     status=1; nrows=0
     return

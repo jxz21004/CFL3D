@@ -1748,7 +1748,7 @@ class CFL3D:
                                    + (" --mpi" if self.comm is not None else "")) from exc
             if bool(module.py_build_info()) != (self.comm is not None):
                 raise RuntimeError("Native extension MPI mode does not match the solver")
-            if getattr(module, "py_api_version", lambda: 0)() != 12:
+            if getattr(module, "py_api_version", lambda: 0)() != 13:
                 raise RuntimeError("Native interface changed; rebuild with python tools/build_python.py"
                                    + (" --mpi" if self.comm is not None else "") + " and restart Python")
             return module
@@ -1785,6 +1785,8 @@ class CFL3D:
                 _native.py_set_output_names(stem, int(append_output), iteration_offset)
                 _native.py_set_restart_controls(int("alpha" in changed_options))
                 status = _native.py_configure(**arrays)
+                if status == 3:
+                    raise RuntimeError("A resident native context is active; close it before configuring another solver")
                 if status:
                     raise RuntimeError(f"Native configuration failed ({status}); start a fresh interpreter")
                 _native.py_set_coordinates(xyz)

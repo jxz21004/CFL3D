@@ -361,6 +361,12 @@ c
       common /key/ nkey
       common /zero/ iexp
       common /wrestq/ irest,irest2
+#ifdef PYTHON_API
+c     A paused resident call returns normally; retain driver dimensions and
+c     buffers so re-entry bypasses standalone initialization.
+      save
+      if (py_resuming) go to 9101
+#endif
 #   ifdef FASTIO
       common/rjbdbgi/lunfio0
       lunfio0=8000
@@ -1106,6 +1112,9 @@ c***********************************************************************
 c     allocate memory and run flow solver
 c***********************************************************************
 c
+#ifdef PYTHON_API
+ 9101 continue
+#endif
       call cfl3d(mwork,mworki,nplots,minnode,iitot,intmax,
      .           maxxe,mxbli,nsub1,lbcprd,lbcemb,lbcrad,maxbl,
      .           maxgr,maxseg,maxcs,ncycmax,intmx,mxxe,mptch,
@@ -1137,6 +1146,10 @@ c
       end if
 #endif
 c
+#ifdef PYTHON_API
+      if (py_resident_paused) return
+      py_resident_enabled=.false.
+#endif
       if (allocated(blocks_clcd)) then
          deallocate(blocks_clcd)
       end if
