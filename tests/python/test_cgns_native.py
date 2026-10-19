@@ -2,6 +2,7 @@ import ctypes as C
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 import cfl3d
@@ -13,6 +14,31 @@ from fixtures import box_mesh, flatplate_mesh
 @unittest.skipUnless(Path(cfl3d.__file__).with_name("_cgns_bridge.so").is_file(),
                      "Build the CGNS bridge first: python tools/build_cgns.py")
 class NativeCGNSTests(unittest.TestCase):
+    def test_selective_coordinates_keep_topology_without_unowned_reads(self):
+        from cfl3d._cgns_native import library
+        mesh = box_mesh(True)
+        api = library()
+        original = api.call
+        with tempfile.TemporaryDirectory() as directory:
+            path = write_adf(mesh, Path(directory)/"mesh.cgns")
+            for names in ((), (mesh.zones[1].name,)):
+                reads = []
+                def read(name, *args):
+                    if name == "cg_coord_read":
+                        reads.append(args[2])
+                    return original(name, *args)
+                with patch.object(api, "call", read):
+                    selected = CGNSMesh.from_file(path, coordinate_zones=names)
+                self.assertEqual(reads, [2,2,2] if names else [])
+                for expected, actual in zip(mesh.zones, selected.zones):
+                    self.assertEqual(actual.dimensions, expected.dimensions)
+                    self.assertEqual(len(actual.boundaries), len(expected.boundaries))
+                    self.assertEqual(len(actual.connections), len(expected.connections))
+                    if actual.name in names:
+                        np.testing.assert_array_equal(actual.coordinates, expected.coordinates)
+                    else:
+                        self.assertIsNone(actual.coordinates)
+
     def assert_mesh_equal(self, expected, actual):
         self.assertEqual([z.name for z in expected.zones], [z.name for z in actual.zones])
         for a, b in zip(expected.zones, actual.zones):

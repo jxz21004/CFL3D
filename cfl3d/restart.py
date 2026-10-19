@@ -225,3 +225,277 @@ def merge_states(states, mesh):
     if set(parts) != set(range(len(mesh.zones))):
         raise ValueError("Incomplete distributed restart state")
     return FlowState(b"".join(parts[i] for i in range(len(mesh.zones))), states[0].metadata, fields)
+
+
+def index_native_file(stream, mesh, options):
+    """Locate native zones by record metadata, without reading the flow payload."""
+    stream.seek(0, 2)
+    size = stream.tell()
+    rows, offset = [], 0
+    while offset < size:
+        if offset+8 > size:
+            raise ValueError('Truncated native restart record')
+        stream.seek(offset)
+        marker = stream.read(4)
+        if len(marker) != 4:
+            raise ValueError('Truncated native restart record')
+        length = struct.unpack('=i', marker)[0]
+        end = offset+4+length
+        if length < 0 or end+4 > size:
+            raise ValueError('Invalid native restart record markers')
+        stream.seek(end)
+        if stream.read(4) != marker:
+            raise ValueError('Invalid native restart record markers')
+        rows.append((offset, length))
+        offset = end+4
+    if not rows:
+        raise ValueError('Empty restart file')
+    candidates = []
+    dimensions = {(z.dimensions[1], z.dimensions[2], z.dimensions[0]) for z in mesh.zones}
+    for i, (start, length) in enumerate(rows):
+        if length != 208:
+            continue
+        stream.seek(start+4)
+        header = stream.read(208)
+        if struct.unpack_from('=3i', header, 168) not in dimensions:
+            continue
+        model_index = i+(4 if not candidates else 3)
+        if model_index < len(rows) and rows[model_index][1] == 12:
+            candidates.append((i, model_index, header))
+    if len(candidates) != len(mesh.zones) or candidates[0][0] != 0:
+        raise ValueError('Restart must contain one finest-grid native block per CGNS zone')
+    model = MODELS[options.turbulence.lower()]
+    i2d = all(z.dimensions[0] == 2 for z in mesh.zones)
+    starts = []
+    for global_index, (zone, (i, model_index, header)) in enumerate(zip(mesh.zones, candidates, strict=True)):
+        expected = (zone.dimensions[1], zone.dimensions[2], zone.dimensions[0])
+        if struct.unpack_from('=3i', header, 168) != expected:
+            raise ValueError(f'Restart grid dimensions differ for {zone.name}')
+        history_count = struct.unpack_from('=i', header, 196)[0]
+        if history_count < 0 or (global_index == 0 and rows[i+1][1] != history_count*16*8):
+            raise ValueError('Restart convergence history does not match its header')
+        q_index = i+(2 if global_index == 0 else 1)
+        ni,nj,nk = np.asarray(zone.dimensions)-1
+        if rows[q_index][1] != int(ni*nj*nk)*5*8:
+            raise ValueError(f'Restart flow record size differs for {zone.name}')
+        if rows[q_index+1][1] != int(nj*nk+ni*nk+ni*nj)*5*4*8:
+            raise ValueError(f'Restart ghost records differ for {zone.name}')
+        stream.seek(rows[model_index][0]+4)
+        if struct.unpack('=3i', stream.read(12)) != ((0 if i2d else model), model, model):
+            raise ValueError(f'Restart turbulence model differs for {zone.name}')
+        starts.append(rows[i][0])
+    return tuple((start, end-start) for start,end in zip(starts, starts[1:]+[size], strict=True))
+
+
+def _read_npy_header(stream):
+    version = np.lib.format.read_magic(stream)
+    if version == (1, 0):
+        return np.lib.format.read_array_header_1_0(stream)
+    if version == (2, 0):
+        return np.lib.format.read_array_header_2_0(stream)
+    raise ValueError(f'Unsupported restart NPY header version {version}')
+
+
+def open_native_restart(path, mesh, options):
+    """Open native bytes with bounded RAM; compressed NPZ is spooled to disk.
+
+    Returns an owned seekable file and the verified checksum for NPZ input.
+    Raw files return None for the checksum: it is computed while transferring
+    their bytes, avoiding a separate full-file read. Redundant NPZ mean-flow
+    readouts are skipped; public serial read_restart() still returns them.
+    """
+    import tempfile
+    import zipfile
+    from ._streaming import CHUNK_BYTES
+    stream = Path(path).open('rb')
+    try:
+        signature = stream.read(4)
+        stream.seek(0)
+        if signature[:2] != b'PK':
+            return stream, None
+        with zipfile.ZipFile(stream) as archive:
+            if not {'native.npy','metadata.npy','sha256.npy'} <= set(archive.namelist()):
+                raise ValueError('restartFile is not a CFL3D checkpoint; solution.npz is visualization output')
+            with archive.open('metadata.npy') as member:
+                saved_metadata = json.loads(str(np.load(member, allow_pickle=False)))
+            if saved_metadata != metadata(mesh, options):
+                raise ValueError('Cached restart incompatible; call resetFlow() for a fresh start')
+            with archive.open('sha256.npy') as member:
+                expected_digest = str(np.load(member, allow_pickle=False))
+            temporary = tempfile.TemporaryFile(mode='w+b')
+            try:
+                with archive.open('native.npy') as member:
+                    shape, _, dtype = _read_npy_header(member)
+                    if len(shape) != 1 or dtype != np.dtype('uint8'):
+                        raise ValueError('Restart native array must be one-dimensional uint8')
+                    remaining = shape[0]
+                    digest = hashlib.sha256()
+                    while remaining:
+                        chunk = member.read(min(remaining, CHUNK_BYTES))
+                        if not chunk:
+                            raise ValueError('Truncated restart native array')
+                        temporary.write(chunk)
+                        digest.update(chunk)
+                        remaining -= len(chunk)
+                    if member.read(1):
+                        raise ValueError('Unexpected bytes after restart native array')
+                if digest.hexdigest() != expected_digest:
+                    raise ValueError('Restart checkpoint checksum mismatch')
+                temporary.seek(0)
+            except BaseException:
+                temporary.close()
+                raise
+        stream.close()
+        return temporary, expected_digest
+    except BaseException:
+        stream.close()
+        raise
+
+
+def read_restart_partitioned(path, mesh, options, owners, comm, checked):
+    """Read a complete native/NPZ checkpoint into owned shards, with bounded host RAM."""
+    from ._streaming import file_chunks, transfer_bytes
+    opened = checked(lambda: open_native_restart(path, mesh, options) if comm.rank == 0 else None)
+    stream = opened[0] if comm.rank == 0 else None
+    transfer_comm = comm.Dup()
+    try:
+        ranges = checked(lambda: index_native_file(stream, mesh, options) if comm.rank == 0 else None)
+        ranges, expected_digest = comm.bcast((ranges, opened[1]) if comm.rank == 0 else None, root=0)
+        digest = hashlib.sha256()
+        indices = tuple(i for i,owner in enumerate(owners) if owner == comm.rank)
+        local = checked(lambda: bytearray(sum(ranges[i][1] for i in indices)))
+        cursor = 0
+        for i,(start,length) in enumerate(ranges):
+            owner = owners[i]
+            position = cursor
+            def consume(chunk):
+                nonlocal position
+                local[position:position+len(chunk)] = chunk
+                position += len(chunk)
+            def source_chunks():
+                for chunk in file_chunks(stream, start, length):
+                    if expected_digest is None:
+                        digest.update(chunk)
+                    yield chunk
+            chunks = source_chunks() if comm.rank == 0 else None
+            transfer_bytes(transfer_comm, 0, owner, chunks, consume, length, checked)
+            if comm.rank == owner:
+                cursor = position
+        identity = comm.bcast((expected_digest or digest.hexdigest()) if comm.rank == 0 else None, root=0)
+        state = checked(lambda: FlowState(bytes(local), metadata(mesh, options), {}, indices, identity))
+        checked(lambda: state.validate(mesh, options))
+        return state
+    finally:
+        try:
+            checked(lambda: stream.close() if stream is not None else None)
+        finally:
+            transfer_comm.Free()
+
+
+def _array_header(shape, dtype, fortran_order=False):
+    return dict(descr=np.lib.format.dtype_to_descr(np.dtype(dtype)),
+                fortran_order=bool(fortran_order), shape=tuple(shape))
+
+
+def write_restart_partitioned(path, state, mesh, comm, checked):
+    """Write the existing NPZ format without gathering native/field arrays on root."""
+    from contextlib import contextmanager
+    import zipfile
+    from ._streaming import array_chunks, byte_chunks, transfer_bytes
+
+    def describe():
+        parts = zone_payloads(state, mesh)
+        names = {mesh.zones[index].name for index in parts}
+        fields = {}
+        for name, array in state.fields.items():
+            if name not in names:
+                raise ValueError(f'Checkpoint field {name} does not belong to this rank')
+            array = np.asarray(array)
+            zone = next(z for z in mesh.zones if z.name == name)
+            if array.shape != (*tuple(n-1 for n in zone.dimensions), 5) or array.dtype.hasobject:
+                raise ValueError(f'Checkpoint field layout differs for {name}')
+            fields[name] = _array_header(array.shape, array.dtype,
+                                        array.flags.f_contiguous and not array.flags.c_contiguous)
+        return parts, fields
+    parts, fields = checked(describe)
+    metadata_digest = hashlib.sha256(json.dumps(state.metadata, sort_keys=True).encode()).hexdigest()
+    descriptions = comm.allgather((metadata_digest, state.global_digest or state.digest,
+                                  {i:len(part) for i,part in parts.items()}, fields))
+    def check_layout():
+        if any(item[:2] != descriptions[0][:2] for item in descriptions):
+            raise ValueError('Distributed restart states differ between completed solves')
+        owners, sizes, field_owners, field_headers = {}, {}, {}, {}
+        for rank,(_,_,native,headers) in enumerate(descriptions):
+            for index, size in native.items():
+                if index in owners:
+                    raise ValueError('Duplicate restart zone ownership')
+                owners[index], sizes[index] = rank, size
+            for name, header in headers.items():
+                if name in field_owners:
+                    raise ValueError('Duplicate checkpoint field ownership')
+                field_owners[name], field_headers[name] = rank, header
+        if set(owners) != set(range(len(mesh.zones))):
+            raise ValueError('Incomplete distributed restart state')
+        return owners, sizes, field_owners, field_headers
+    owners, sizes, field_owners, headers = checked(check_layout)
+
+    @contextmanager
+    def output():
+        with _temporary_output(path) as temporary:
+            with zipfile.ZipFile(temporary, mode='w', compression=zipfile.ZIP_DEFLATED,
+                                 allowZip64=True) as archive:
+                yield archive
+    manager = output() if comm.rank == 0 else None
+    archive = checked(lambda: manager.__enter__() if manager is not None else None)
+    member = None
+    transfer_comm = comm.Dup()
+    try:
+        def open_array(name, header):
+            if comm.rank != 0:
+                return None
+            result = archive.open(name+'.npy', mode='w', force_zip64=True)
+            try:
+                np.lib.format.write_array_header_1_0(result, header)
+            except BaseException:
+                result.close()
+                raise
+            return result
+        member = checked(lambda: open_array('native', _array_header((sum(sizes.values()),), 'uint8')))
+        digest = hashlib.sha256()
+        def write_native(chunk):
+            member.write(chunk)
+            digest.update(chunk)
+        for index in range(len(mesh.zones)):
+            owner = owners[index]
+            chunks = byte_chunks(parts[index]) if comm.rank == owner else None
+            transfer_bytes(transfer_comm, owner, 0, chunks, write_native, sizes[index], checked)
+        checked(lambda: member.close() if member is not None else None)
+        member = None
+        # Store only small scalar metadata on the root; native/field data above
+        # and below never become whole-case Python arrays on the output rank.
+        def write_scalar(name, value):
+            if comm.rank == 0:
+                with archive.open(name+'.npy', mode='w', force_zip64=True) as scalar:
+                    np.lib.format.write_array(scalar, np.asarray(value), allow_pickle=False)
+        checked(lambda: write_scalar('metadata', json.dumps(state.metadata, sort_keys=True)))
+        checked(lambda: write_scalar('sha256', digest.hexdigest()))
+        for name in sorted(headers):
+            header = headers[name]
+            member = checked(lambda: open_array('field_'+name, header))
+            chunks = (array_chunks(np.asarray(state.fields[name]), fortran_order=header['fortran_order'])
+                      if comm.rank == field_owners[name] else None)
+            size = int(np.prod(header['shape']))*np.dtype(header['descr']).itemsize
+            transfer_bytes(transfer_comm, field_owners[name], 0, chunks,
+                           lambda chunk: member.write(chunk), size, checked)
+            checked(lambda: member.close() if member is not None else None)
+            member = None
+    except BaseException as exc:
+        try:
+            checked(lambda: member.close() if member is not None else None)
+        finally:
+            checked(lambda: manager.__exit__(type(exc), exc, exc.__traceback__) if manager is not None else None)
+        raise
+    else:
+        checked(lambda: manager.__exit__(None, None, None) if manager is not None else None)
+    finally:
+        transfer_comm.Free()

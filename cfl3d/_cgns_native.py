@@ -160,7 +160,7 @@ def _families(api):
     return family, tuple(additional)
 
 
-def read_mesh(filename, *, base=None):
+def read_mesh(filename, *, base=None, coordinate_zones=None):
     from .cgns import Boundary, CGNSMesh, Connection, Zone
 
     path = Path(filename)
@@ -211,14 +211,16 @@ def read_mesh(filename, *, base=None):
             if api.optional("cg_rind_read", rind) and any(rind):
                 raise NotImplementedError("CGNS coordinate rind layers are not supported")
             # CGNS C API 的结构化坐标按 i 索引最快存放；F 顺序可直接读入，无需转置。
-            coordinates = np.empty((*dims, 3), dtype=np.float64, order="F")
-            lo, hi = (api.index * 3)(1, 1, 1), (api.index * 3)(*dims)
-            for axis, coord in enumerate(("CoordinateX", "CoordinateY", "CoordinateZ")):
-                api.call("cg_coord_read", fn, b, z, coord.encode(), api.constant("RealDouble"),
-                         lo, hi, coordinates[..., axis].ctypes.data)
-            if not np.isfinite(coordinates).all():
-                raise ValueError(f"{zonename}: nonfinite coordinate")
-            zone = Zone(zonename, coordinates)
+            coordinates = None
+            if coordinate_zones is None or zonename in coordinate_zones:
+                coordinates = np.empty((*dims, 3), dtype=np.float64, order="F")
+                lo, hi = (api.index * 3)(1, 1, 1), (api.index * 3)(*dims)
+                for axis, coord in enumerate(("CoordinateX", "CoordinateY", "CoordinateZ")):
+                    api.call("cg_coord_read", fn, b, z, coord.encode(), api.constant("RealDouble"),
+                             lo, hi, coordinates[..., axis].ctypes.data)
+                if not np.isfinite(coordinates).all():
+                    raise ValueError(f"{zonename}: nonfinite coordinate")
+            zone = Zone(zonename, coordinates, coordinate_dimensions=dims)
             api.navigate(fn, b, ("Zone_t", z))
             zone.family, zone.additional_families = _families(api)
             for bc in range(1, api.count("cg_nbocos", fn, b, z) + 1):

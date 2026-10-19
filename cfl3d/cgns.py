@@ -99,11 +99,13 @@ class CGNSMesh:
     source: str | None = None
 
     @classmethod
-    def from_file(cls, filename, *, base=None, backend="auto"):
+    def from_file(cls, filename, *, base=None, backend="auto", coordinate_zones=None):
         """Read ADF with libcgns, or HDF5 with a capable libcgns/h5py.
 
         backend can be 'auto', 'cgns', or 'h5py'. ADF needs the locally
-        compiled CGNS bridge; the h5py dependency is optional.
+        compiled CGNS bridge; the h5py dependency is optional. ``coordinate_zones``
+        selects coordinate payloads by zone name; omitted zones retain topology
+        and dimensions with coordinates=None. None reads every zone; () reads metadata.
         """
         if backend not in ("auto", "cgns", "h5py"):
             raise ValueError("CGNS backend must be auto, cgns, or h5py")
@@ -111,23 +113,23 @@ class CGNSMesh:
         if not path.is_file():
             raise FileNotFoundError(path)
         if backend == "h5py":
-            return cls._from_hdf5(path, base=base)
+            return cls._from_hdf5(path, base=base, coordinate_zones=coordinate_zones)
         from ._cgns_native import library, read_mesh
         try:
             api = library()
         except ImportError:
             if backend == "cgns" or not _is_hdf5(path):
                 raise
-            return cls._from_hdf5(path, base=base)
+            return cls._from_hdf5(path, base=base, coordinate_zones=coordinate_zones)
         if _is_hdf5(path) and not api.has_hdf5:
             if backend == "cgns":
                 raise NotImplementedError("The linked CGNS library was built without HDF5 support")
             # 原生 CGNS 库可能只编译了 ADF；仅在能力不足时回退，解析错误仍直接报告。
-            return cls._from_hdf5(path, base=base)
-        return read_mesh(path, base=base)
+            return cls._from_hdf5(path, base=base, coordinate_zones=coordinate_zones)
+        return read_mesh(path, base=base, coordinate_zones=coordinate_zones)
 
     @classmethod
-    def _from_hdf5(cls, filename, *, base=None):
+    def _from_hdf5(cls, filename, *, base=None, coordinate_zones=None):
         try:
             import h5py
         except ImportError as exc:
@@ -166,17 +168,19 @@ class CGNSMesh:
                     raise ValueError(f"{z.name}: expected one GridCoordinates node")
                 if _children(grids[0], "Rind_t"):
                     raise NotImplementedError("CGNS coordinate rind layers are not supported")
-                coordinates = np.empty((*dims, 3), dtype=np.float64, order="F")
-                for axis, name in enumerate(("CoordinateX", "CoordinateY", "CoordinateZ")):
-                    if name not in grids[0]:
-                        raise ValueError(f"{z.name}: missing {name}")
-                    values = _data(grids[0][name])
-                    if values.shape != dims[::-1]:
-                        raise ValueError(f"{z.name}: {name} shape does not match ZoneSize")
-                    coordinates[..., axis] = values.transpose(2, 1, 0)
-                if not np.isfinite(coordinates).all():
-                    raise ValueError(f"{z.name}: nonfinite coordinate")
-                zone = Zone(z.name.rsplit("/", 1)[-1], coordinates)
+                coordinates = None
+                if coordinate_zones is None or z.name.rsplit("/", 1)[-1] in coordinate_zones:
+                    coordinates = np.empty((*dims, 3), dtype=np.float64, order="F")
+                    for axis, name in enumerate(("CoordinateX", "CoordinateY", "CoordinateZ")):
+                        if name not in grids[0]:
+                            raise ValueError(f"{z.name}: missing {name}")
+                        values = _data(grids[0][name])
+                        if values.shape != dims[::-1]:
+                            raise ValueError(f"{z.name}: {name} shape does not match ZoneSize")
+                        coordinates[..., axis] = values.transpose(2, 1, 0)
+                    if not np.isfinite(coordinates).all():
+                        raise ValueError(f"{z.name}: nonfinite coordinate")
+                zone = Zone(z.name.rsplit("/", 1)[-1], coordinates, coordinate_dimensions=dims)
                 zone.family, zone.additional_families = _families(z)
                 for zb in _children(z, "ZoneBC_t"):
                     for bc in _children(zb, "BC_t"):

@@ -2,6 +2,7 @@
 from __future__ import annotations
 from dataclasses import dataclass, field, asdict, replace
 from collections.abc import Mapping, MutableMapping
+from contextlib import ExitStack
 from copy import deepcopy
 import os
 from pathlib import Path
@@ -493,7 +494,7 @@ class SolverResult:
             coefficients.update(CDp=float(total[8]), CDv=float(total[9]))
         return coefficients
 
-    def save(self, filename, *, include_volume=True):
+    def _saved_values(self):
         values = {"history": self.history if self.cumulative_history is None else self.cumulative_history,
                   "chunk_history": self.history, "iteration_offset": np.asarray(self.iteration_offset),
                   "final_alpha": np.asarray(self.final_alpha),
@@ -501,13 +502,19 @@ class SolverResult:
                   "start_mode": np.asarray(self.start_mode),
                   "changed_options": np.asarray(self.changed_options, dtype=str),
                   "reset_reasons": np.asarray(self.reset_reasons, dtype=str)}
-        if include_volume:
-            values.update({f"zone_{name}": field for name, field in self.fields.items()})
         keys = sorted(self.surface_coefficients)
         values["surface_names"] = np.asarray(keys, dtype=str).reshape(-1, 2)
         values["surface_coefficients"] = np.asarray([self.surface_coefficients[k] for k in keys]).reshape(-1, 10)
         values["surface_coefficient_names"] = np.asarray(_SURFACE_COEFFICIENTS)
-        np.savez_compressed(filename, **values)
+        return values
+
+    def save(self, filename, *, include_volume=True):
+        from .solution_io import result_output
+        from types import SimpleNamespace
+        with result_output(filename, self._saved_values()) as write_zone:
+            if include_volume:
+                for name, q in self.fields.items():
+                    write_zone(SimpleNamespace(name=name), q)
 
 
 class CFL3D:
@@ -568,7 +575,8 @@ class CFL3D:
             input_mesh = mesh if mesh is not None else self.options.input_grid
             if input_mesh is None:
                 raise ValueError("Set options['input_grid'] or provide a mesh")
-            loaded = input_mesh if isinstance(input_mesh, CGNSMesh) else CGNSMesh.from_file(input_mesh)
+            loaded = input_mesh if isinstance(input_mesh, CGNSMesh) else CGNSMesh.from_file(
+                input_mesh, coordinate_zones=None if comm is None else ())
             return loaded, boundary_overrides or {}, {} if groups is None else groups
         if comm is None:
             self.mesh, self.boundary_overrides, group_definitions = load()
@@ -600,10 +608,21 @@ class CFL3D:
         # Input placement is temporary. After the first native solve, coordinates
         # move to the actual load-balancer owners, without a global broadcast.
         owners = tuple(1+i % (self.comm.size-1) for i in range(len(self.mesh.zones)))
-        pieces = self._checked(lambda: [
-            {z.name: z.coordinates for i,z in enumerate(complete.zones) if owners[i] == rank}
-            for rank in range(self.comm.size)] if self.comm.rank == 0 else None)
-        local = self.comm.scatter(pieces, root=0)
+        from_file = self.comm.bcast(
+            bool(complete.source and all(z.coordinates is None for z in complete.zones))
+            if self.comm.rank == 0 else None, root=0)
+        if from_file:
+            # Read only owned coordinates. In particular the host never loads a
+            # global mesh merely to redistribute it. Topology stays replicated.
+            names = {z.name for i,z in enumerate(self.mesh.zones) if owners[i] == self.comm.rank}
+            loaded = self._checked(lambda: CGNSMesh.from_file(self.mesh.source, coordinate_zones=names)
+                                   if names else None)
+            local = {} if loaded is None else {z.name: z.coordinates for z in loaded.zones if z.name in names}
+        else:
+            pieces = self._checked(lambda: [
+                {z.name: z.coordinates for i,z in enumerate(complete.zones) if owners[i] == rank}
+                for rank in range(self.comm.size)] if self.comm.rank == 0 else None)
+            local = self.comm.scatter(pieces, root=0)
         for zone in self.mesh.zones:
             zone.coordinates = local.get(zone.name)
         self._mesh_owners = owners
@@ -793,7 +812,8 @@ class CFL3D:
         if stamp == self._loaded_grid_stamp:
             return False
         if stamp is not None:
-            mesh = self._checked(lambda: CGNSMesh.from_file(stamp[0])
+            mesh = self._checked(lambda: CGNSMesh.from_file(
+                                     stamp[0], coordinate_zones=None if self.comm is None else ())
                                  if self.comm is None or self.comm.rank == 0 else None)
             if self.comm is None:
                 self.mesh = mesh
@@ -900,18 +920,24 @@ class CFL3D:
 
     def writeRestartFile(self, filename=None):
         """Save a portable whole-case checkpoint; collective when using MPI."""
-        from .restart import write_restart, merge_states
+        from .restart import write_restart, write_restart_partitioned
         self._checked(lambda: self._require_flow_state())
         self._checked(lambda: self._flow_state.validate(self._last_mesh, self._last_options))
-        states = self.comm.gather(self._flow_state, root=0) if self.comm is not None else None
-        def write():
-            if self.comm is not None and self.comm.rank != 0:
-                return None
-            path = self._output_path(filename, self._last_output_names["checkpoint"] if self._last_result else "")
-            state = merge_states(states, self._last_mesh) if states is not None else self._flow_state
-            write_restart(path, state)
-            return path
-        return self._checked(write)
+        path = self._checked(lambda: self._output_path(
+            filename, self._last_output_names["checkpoint"] if self._last_result else "")
+            if self.comm is None or self.comm.rank == 0 else None)
+        if self.comm is None:
+            write_restart(path, self._flow_state)
+        else:
+            write_restart_partitioned(path, self._flow_state, self._last_mesh, self.comm, self._checked)
+        return path
+
+    def _restart_owners(self, owners=None):
+        if owners is None:
+            owners = getattr(self, "_zone_owners", None)
+        if owners is None or len(owners) != len(self.mesh.zones):
+            owners = tuple(1+i % (self.comm.size-1) for i in range(len(self.mesh.zones)))
+        return owners
 
     def _require_flow_state(self):
         if self._flow_state is None:
@@ -921,12 +947,7 @@ class CFL3D:
         from .restart import partition_state
         if self.comm is None:
             return state
-        if owners is None:
-            owners = getattr(self, "_zone_owners", None)
-        if owners is None or len(owners) != len(self.mesh.zones):
-            # Before the first native partition, distribute the input file once.
-            # The native solve will replace this with its actual load-balancer map.
-            owners = tuple(1 + i % (self.comm.size-1) for i in range(len(self.mesh.zones)))
+        owners = self._restart_owners(owners)
         pieces = self._checked(lambda: partition_state(state, self.mesh, owners, self.comm.size)
                                if self.comm.rank == 0 else None)
         return self.comm.scatter(pieces, root=0)
@@ -941,35 +962,38 @@ class CFL3D:
         if state is None:
             self._checked(lambda: path.unlink(missing_ok=True) if self.comm.rank == 0 else None)
             return
+        from ._streaming import byte_chunks, transfer_bytes
         parts = self._checked(lambda: zone_payloads(state, self.mesh))
-        all_indices = self.comm.allgather(tuple(parts))
-        owners = {index: rank for rank, indices in enumerate(all_indices) for index in indices}
+        descriptions = self.comm.allgather({i:len(data) for i,data in parts.items()})
+        owners = {i:rank for rank,indices in enumerate(descriptions) for i in indices}
+        lengths = {i:size for indices in descriptions for i,size in indices.items()}
         stream = self._checked(lambda: path.open("wb") if self.comm.rank == 0 else None)
+        transfer_comm = self.comm.Dup()
         try:
             for index in range(len(self.mesh.zones)):
                 owner = owners[index]
-                # An error is agreed before the next send so peers do not hang in recv.
-                payload = self._checked(lambda: bytes(parts[index]) if self.comm.rank == owner else None)
-                if owner != 0:
-                    if self.comm.rank == owner:
-                        self.comm.send(payload, dest=0, tag=91)
-                    elif self.comm.rank == 0:
-                        payload = self.comm.recv(source=owner, tag=91)
-                self._checked(lambda: stream.write(payload) if self.comm.rank == 0 else None)
+                chunks = byte_chunks(parts[index]) if self.comm.rank == owner else None
+                transfer_bytes(transfer_comm, owner, 0, chunks,
+                               lambda chunk: stream.write(chunk), lengths[index], self._checked)
         finally:
-            self._checked(lambda: stream.close() if stream is not None else None)
+            try:
+                self._checked(lambda: stream.close() if stream is not None else None)
+            finally:
+                transfer_comm.Free()
 
     def _prepare_flow_state(self, discard_cached=False):
-        from .restart import read_restart
+        from .restart import read_restart, read_restart_partitioned
         restart_file = str(Path(self.options.restartFile).resolve()) if self.options.restartFile is not None else None
         reload_file = restart_file is not None and restart_file != self._loaded_restart_file
         if self.comm is not None:
             reload_file = any(self.comm.allgather(reload_file))
         state = None if discard_cached else self._flow_state
         if reload_file:
-            state = self._checked(lambda: read_restart(restart_file,self.mesh,self.options)
-                                  if self.comm is None or self.comm.rank == 0 else None)
-            state = self._scatter_state(state)
+            if self.comm is None:
+                state = read_restart(restart_file, self.mesh, self.options)
+            else:
+                state = read_restart_partitioned(restart_file, self.mesh, self.options,
+                                                 self._restart_owners(), self.comm, self._checked)
             self._loaded_restart_file = restart_file
         self._checked(lambda: state.validate(self.mesh,self.options) if state is not None else None)
         if self.comm is not None:
@@ -1022,16 +1046,68 @@ class CFL3D:
 
     def writeVolumeSolution(self, filename=None):
         """Write whole-case CGNS/ADF; collective when using MPI."""
-        from .solution_io import write_volume
-        fields = self.gatherFields()
-        mesh = self._gather_mesh(self._last_mesh)
-        def write():
-            if self.comm is not None and self.comm.rank != 0:
-                return None
-            path = self._output_path(filename, self._last_output_names["volume"])
-            write_volume(path, mesh, fields, self._last_options)
-            return path
-        return self._checked(write)
+        from .solution_io import volume_output
+        self._checked(self._require_result)
+        path = self._checked(lambda: self._output_path(filename, self._last_output_names["volume"])
+                             if self.comm is None or self.comm.rank == 0 else None)
+        self._write_zones(lambda: volume_output(path, self._last_mesh, self._last_options))
+        return path
+
+    def _write_zones(self, output, *, coordinates=True):
+        """Drive a root writer collectively, retaining at most one received zone.
+
+        This bounds Python output temporaries by the largest zone rather than
+        the global case. CGNS and PLOT3D still need zone-sized conversion arrays.
+        Root I/O errors close the atomic output with the exception on every rank.
+        """
+        from ._streaming import array_chunks, transfer_bytes
+        stack = ExitStack()
+        transfer_comm = self.comm.Dup() if self.comm is not None else None
+        try:
+            writer = self._checked(lambda: stack.enter_context(output())
+                                   if self.comm is None or self.comm.rank == 0 else None)
+            for zone in self._last_mesh.zones:
+                if self.comm is None:
+                    writer(zone, self._last_fields[zone.name])
+                    continue
+                owner = self._last_zone_owners[zone.name]
+                xyz = q = None
+                for is_coordinate in ((True, False) if coordinates else (False,)):
+                    shape = (*zone.dimensions, 3) if is_coordinate else (*tuple(n-1 for n in zone.dimensions), 5)
+                    order = "F" if is_coordinate else "C"
+                    def buffers():
+                        source = (zone.coordinates if is_coordinate else self._last_fields[zone.name]) \
+                                 if self.comm.rank == owner else None
+                        if self.comm.rank == owner and (source is None or source.shape != shape
+                                                        or source.dtype != np.float64):
+                            raise ValueError(f"Invalid output array for zone {zone.name}")
+                        target = np.empty(shape, dtype=np.float64, order=order) if self.comm.rank == 0 else None
+                        return source, target
+                    source, target = self._checked(buffers)
+                    position = 0
+                    def consume(chunk):
+                        nonlocal position
+                        view = memoryview(target.ravel(order=order)).cast("B")
+                        view[position:position+len(chunk)] = chunk
+                        position += len(chunk)
+                    chunks = array_chunks(source, fortran_order=is_coordinate) if self.comm.rank == owner else None
+                    transfer_bytes(transfer_comm, owner, 0, chunks, consume,
+                                   int(np.prod(shape))*8, self._checked)
+                    if is_coordinate:
+                        xyz = target
+                    else:
+                        q = target
+                    del source, target, chunks
+                self._checked(lambda: writer(replace(zone, coordinates=xyz), q) if self.comm.rank == 0 else None)
+                del xyz, q
+            self._checked(stack.close)
+        except BaseException:
+            error = sys.exc_info()
+            self._checked(lambda: stack.__exit__(*error))
+            raise
+        finally:
+            if transfer_comm is not None:
+                transfer_comm.Free()
 
     def writeSurfaceAnalysis(self, prefix=None):
         """Write registered lift distributions and slices as Tecplot ASCII .dat files.
@@ -1041,6 +1117,10 @@ class CFL3D:
         This operation is collective in MPI, including deferred output.
         """
         if self.comm is not None and self._surface_context is None:
+            self._checked(self._require_result)
+            self._check_surface_requests()
+            if not self.nLiftDist and not self.nSlice:
+                return {}
             return self._surface_collective(lambda: self.writeSurfaceAnalysis(prefix))
         if self._last_result is None:
             raise RuntimeError("Call solve() before writing surface analysis")
@@ -1060,7 +1140,17 @@ class CFL3D:
     def writeTecplotSurfaceSolution(self, filename=None, groupName=None):
         """Write wall quads as Tecplot ASCII; collective in MPI, including analyses."""
         if self.comm is not None and self._surface_context is None:
-            return self._surface_collective(lambda: self.writeTecplotSurfaceSolution(filename, groupName))
+            from .solution_io import write_surface_partitioned
+            self._checked(self._require_result)
+            members = self._checked(lambda: self._group_members(groupName))
+            wall_keys = {key for part in self.comm.allgather(tuple(self._last_wall_fields)) for key in part}
+            members = members & wall_keys
+            path = self._checked(lambda: self._output_path(filename, self._last_output_names["surface"])
+                                 if self.comm.rank == 0 else None)
+            self.writeSurfaceAnalysis(None if filename is None else Path(filename).with_suffix(""))
+            write_surface_partitioned(path, self._last_mesh, self._last_wall_fields, members,
+                                      self._last_zone_owners, self.comm, self._checked)
+            return path
         path = self._output_path(filename, self._last_output_names["surface"] if self._last_result else "")
         from .solution_io import write_surface
         members = self._group_members(groupName)
@@ -1073,17 +1163,16 @@ class CFL3D:
 
     def writeFlowSolution(self, prefix=None):
         """Write whole-case native PLOT3D .x/.q; collective when using MPI."""
-        from .solution_io import write_flow
-        fields = self.gatherFields()
-        mesh = self._gather_mesh(self._last_mesh)
-        def write():
-            if self.comm is not None and self.comm.rank != 0:
-                return None
+        from .solution_io import flow_output
+        self._checked(self._require_result)
+        def paths():
             target = self._output_path(prefix, self._last_output_names["flow_prefix"])
             for suffix in (".x", ".q"):
                 self._output_path(str(target)+suffix, "")
-            return write_flow(target, mesh, fields, self._last_options, self._last_final_alpha)
-        return self._checked(write)
+            return target
+        target = self._checked(lambda: paths() if self.comm is None or self.comm.rank == 0 else None)
+        self._write_zones(lambda: flow_output(target, self._last_mesh, self._last_options, self._last_final_alpha))
+        return (Path(str(target)+".x"), Path(str(target)+".q")) if target is not None else None
 
     def _cgns_surface_groups(self):
         families, zones, boundaries, qualified = {}, {}, {}, {}
@@ -1722,11 +1811,13 @@ class CFL3D:
             wall_force_values = _native.py_get_wall_forces(local_wall_cells)
             # CL control can update final_alpha after force evaluation: use the force-time angles.
             force_angles = _native.py_get_force_angles()
-            from .restart import FlowState, metadata
-            checkpoint = self._checked(lambda: FlowState(checkpoint_path.read_bytes(),
-                                      metadata(self.mesh,self.options), {}) if rank == 0 else None)
-            checkpoint = self._scatter_state(checkpoint, self._zone_owners)
-            self._checked(lambda: checkpoint.validate(self.mesh,self.options))
+            from .restart import FlowState, metadata, read_restart_partitioned
+            if self.comm is None:
+                checkpoint = FlowState(checkpoint_path.read_bytes(), metadata(self.mesh,self.options), {})
+                checkpoint.validate(self.mesh, self.options)
+            else:
+                checkpoint = read_restart_partitioned(checkpoint_path, self.mesh, self.options,
+                                                       self._zone_owners, self.comm, self._checked)
             self._checked(lambda: checkpoint_path.unlink(missing_ok=True) if rank == 0 else None)
             _native.py_release_buffers()
         finally:
@@ -1782,6 +1873,9 @@ class CFL3D:
         self._last_final_alpha, self._last_output_directory = final_alpha, output_directory
         self._last_base_groups, self._last_options = base_groups, self.options.snapshot()
         self._last_result = result
+        # SolverResult is caller-owned; deferred collectives must not depend on
+        # edits to its public ownership dictionary.
+        self._last_zone_owners = dict(result.zone_owners)
         if self.comm is not None:
             self._cache_wall_areas()
         self._last_output_names = output_names
@@ -1794,15 +1888,12 @@ class CFL3D:
         self._successful_mesh_signature = mesh_signature
         checkpoint.fields = self._last_fields
         self._flow_state = checkpoint
-        # Global volume arrays exist only during an explicitly requested output.
-        output_fields = self.gatherFields() if self.options.writevolumesolution else None
-        def write_outputs():
-            if rank != 0:
-                return
-            replace(result, fields=output_fields or {}).save(
-                self._output_path(None, output_names["solution"]), include_volume=self.options.writevolumesolution)
-        self._checked(write_outputs)
-        del output_fields  # Release volume collection before gathering any wall data.
+        from .solution_io import result_output
+        path = self._checked(lambda: self._output_path(None, output_names["solution"]) if rank == 0 else None)
+        if self.options.writevolumesolution:
+            self._write_zones(lambda: result_output(path, result._saved_values()), coordinates=False)
+        else:
+            self._checked(lambda: result.save(path, include_volume=False) if rank == 0 else None)
         if self.options.writeTecplotSurfaceSolution:
             self.writeTecplotSurfaceSolution()
         elif self.nLiftDist or self.nSlice:

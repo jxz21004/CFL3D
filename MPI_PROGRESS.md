@@ -575,3 +575,56 @@ worker 坐标分别 190896、116400 bytes，壁面场+面载荷分别 3840、768
 剩余主进程网格设置、checkpoint/可视化 I/O 的临时全量内存仍需后续优化。
 完整说明与复现命令见 docs/distributed-storage.md；日志前缀 build/native-output-distributed2-*。
 本轮未下载依赖，未自动提交。
+
+
+## 第十六轮：checkpoint 主进程峰值内存（2026-10-19）
+
+- 前两阶段已提交为 0cfc1e7；本轮在其后继续修改 Python 层，原生 API 保持 12，
+  不需要重新编译原生扩展；NPZ checkpoint 格式版本仍为 1。
+- 新增有界 byte stream：单块最多 1 MiB，使用独立通信器与确认消息。每个数据项结束时
+  集体检查异常，不对每个数据块调用 allgather。读写错误能通知对端停止，避免等待下一块。
+- 原生结果文件只扫描 record marker、小头信息和 zone 范围，随后流式传给 owner；
+  去掉 MPI 路径的整份 read_bytes()、全量 FlowState 广播/散发。校验和随原生字节传输计算，
+  不额外整文件读取一次来计算 SHA256。
+- 压缩 NPZ 的 native.npy 分块解压到 TemporaryFile，校验 SHA256 后按 zone 分发；
+  读入续算时跳过冗余 field_* 平均流 readout。临时文件随成功/异常关闭。
+- writeRestartFile() 直接流式写 NPZ 的 native.npy 和各 zone field_*.npy，ZIP64 保留原有
+  metadata/native/sha256/field_* 格式，不 gather 完整 state 或体数组；元数据一致性只交换摘要，
+  避免每个 rank 重复收集整份全局元数据。C/F/strided 数组按正确字节次序分块序列化。
+- 缓存续算写内部原生文件及原生 .bin 导出也使用有界 stream，主进程不再接收整个 zone 的
+  pickle 字节数组；显式安装完整串行 FlowState 的旧兼容转换路径仍保留，不属于可扩展使用方式。
+
+验证：65 项单元/串行回归，62 通过、3 项可选 HDF5 跳过；索引/压缩提取覆盖全部九个
+模型名；三进程 gamma-theta 续算/输出与单核一致；三进程及两个独立子通信器中注入读取和
+写入故障，均集体退出、保留旧文件、清理临时输出，并能成功重试及继续计算；旧 NPZ 读法
+和新文件互通。测试禁止 checkpoint 的 Path.read_bytes、整份 np.load 及原有 merge/scatter
+路径，最大实际传输块 1048576 bytes。排除 world rank 0 的 gamma-theta 动态工况、物理
+重置及网格重载回归通过；三维不等块、y-up SST 的流式缓存/文件续算及旧读法兼容性通过。
+
+本轮限制：压缩输入需要临时磁盘空间（约一个完整未压缩 native payload，TMPDIR 应指向
+磁盘文件系统）；1 MiB 是单个数据块上限，不是进程 RSS。主进程网格设置和可视化输出的
+临时全量数组仍待后续处理。未自动提交本轮改动。
+日志前缀 build/native-output-streaming-*；复现见 docs/distributed-storage.md。
+
+
+阶段四：文件坐标选择性读入、逐区体输出与壁面流式输出（Native API 12 不变）
+
+- MPI 文件网格在 host 上只读拓扑，各 worker 只读取初始所属 zone 的坐标；网格重新加载
+  也走同一路径。显式传入完整 CGNSMesh 时仍保留原有兼容 scatter。
+- CGNS、PLOT3D、自动 *_solution.npz 不再 gather 全域流场/坐标，改为每次接收并写出
+  一个 zone。写完立即释放；host 临时内存按最大 zone 及格式转换缓冲计算，非固定 1 MiB。
+- 表面 ASCII 在所属核逐 patch 序列化，再用 <=1 MiB 数据块写到 host 文件；超过 1 MiB
+  的 patch spool 使用临时磁盘，不再为单纯壁面输出收集整份表面网格和数据。
+- 输出异常集体退出，清理临时文件；已有目标文件保留，可用 deferred writer 重试。
+  返回的 SolverResult.zone_owners 被外部修改，也不会改变内部 deferred writer 路由。
+- 将上一阶段 checkpoint streaming 的已验证修改一并纳入本次提交。
+
+验证：66 项单元/串行回归，63 通过、3 项可选 HDF5 跳过；原生读取调用拦截确认 metadata
+不读坐标、选区读取不访问其他区。三核和两组独立二核通信器中，输出路径禁用全域 gather，
+NPZ/PLOT3D/壁面字节与串行一致，CGNS 数组一致；注入 CGNS、壁面 spool、NPZ 故障后
+集体退出且可重试。已有截面/升力分布、编号及追加历史回归通过；三维不等块 y-up SST
+输出/续算通过，排除 world rank 0 的 gamma-theta 动态参数及网格重载也通过。
+
+剩余限制：原生网格准备仍在 host 汇集完整坐标并保留 py_xyz；截面及升力分布分析仍
+临时汇集表面。尚未做生产网格 RSS/峰值内存测量；本次没有宣称整体迁移已完成。
+日志 build/native-output-output-streaming-*；复现及边界见 docs/distributed-storage.md。

@@ -1,11 +1,14 @@
 """Write solver snapshots without re-entering the CFD core or MPI collectives."""
-from contextlib import contextmanager
+from contextlib import contextmanager, ExitStack
 import ctypes as C
 import json
+import io
 import os
 from pathlib import Path
 import struct
 import tempfile
+import sys
+import zipfile
 
 import numpy as np
 
@@ -24,7 +27,21 @@ def _temporary_output(path):
         temporary.unlink(missing_ok=True)
 
 
-def write_volume(path, mesh, fields, options):
+@contextmanager
+def result_output(path, values):
+    """Write the solution NPZ a zone at a time, with the usual NumPy layout."""
+    with _temporary_output(path) as temporary:
+        with zipfile.ZipFile(temporary, "w", compression=zipfile.ZIP_DEFLATED, allowZip64=True) as archive:
+            def array(name, value):
+                with archive.open(name+".npy", "w", force_zip64=True) as member:
+                    np.lib.format.write_array(member, np.asarray(value), allow_pickle=False)
+            for name, value in values.items():
+                array(name, value)
+            yield lambda zone, q: array("zone_"+zone.name, q)
+
+
+@contextmanager
+def volume_output(path, mesh, options):
     """CGNS/ADF: original vertices/BC/connectivity, cell-centered primitive fields."""
     from ._cgns_native import library, _LOCK
     api = library()
@@ -64,7 +81,7 @@ def write_volume(path, mesh, fields, options):
 
             bc_types = {api.lib.cg_BCTypeName(i).decode(): i
                         for i in range(api.constant("NofValidBCTypes"))}
-            for zone in mesh.zones:
+            def write_zone(zone, q):
                 z = integer()
                 dims = zone.dimensions
                 sizes = (api.index*9)(*dims, *(n-1 for n in dims), 0, 0, 0)
@@ -93,7 +110,6 @@ def write_volume(path, mesh, fields, options):
                              connection.donor.encode(), left, right, transform, C.byref(index))
                 solution = integer()
                 api.call("cg_sol_write", fn, base, z, b"FlowSolution", api.constant("CellCenter"), C.byref(solution))
-                q = fields[zone.name]
                 values = {name: q[...,i] for i,name in enumerate(
                     ("Density", "VelocityX", "VelocityY", "VelocityZ", "Pressure"))}
                 values["Temperature"] = options.temperature * options.gamma * q[...,4]/q[...,0]
@@ -112,6 +128,14 @@ def write_volume(path, mesh, fields, options):
                     "purpose": "Visualization output, not a CFL3D restart file",
                 }
                 api.call("cg_descriptor_write", b"CFL3DUnits", json.dumps(description).encode())
+
+            yield write_zone
+
+
+def write_volume(path, mesh, fields, options):
+    with volume_output(path, mesh, options) as write_zone:
+        for zone in mesh.zones:
+            write_zone(zone, fields[zone.name])
 
 
 def wall_vertices(zone, boundary):
@@ -133,19 +157,79 @@ def write_surface(path, mesh, walls, members, *, vertices=None):
                 if key not in walls or key not in members:
                     continue
                 xyz = wall_vertices(zone, boundary) if vertices is None else vertices[key]
-                a,b = xyz.shape[:2]
-                values = walls[key]
-                # JSON string escaping is also valid for the simple CGNS names in Tecplot titles.
-                stream.write(f'ZONE T={json.dumps("/".join(key))}, N={a*b}, E={(a-1)*(b-1)}, '
-                             'ZONETYPE=FEQUADRILATERAL, DATAPACKING=BLOCK, VARLOCATION=([4-9]=CELLCENTERED)\n')
-                for column in range(3):
-                    np.savetxt(stream, xyz[...,column].ravel(order="F"), fmt="%.16e")
-                for column in range(6):
-                    np.savetxt(stream, values[...,column].ravel(order="F"), fmt="%.16e")
-                for j in range(b-1):
-                    for i in range(a-1):
-                        p = i+a*j+1
-                        stream.write(f"{p} {p+1} {p+1+a} {p+a}\n")
+                write_surface_patch(stream, key, xyz, walls[key])
+
+
+def write_surface_patch(stream, key, xyz, values):
+    a,b = xyz.shape[:2]
+    # JSON string escaping is also valid for the simple CGNS names in Tecplot titles.
+    stream.write(f'ZONE T={json.dumps("/".join(key))}, N={a*b}, E={(a-1)*(b-1)}, '
+                 'ZONETYPE=FEQUADRILATERAL, DATAPACKING=BLOCK, VARLOCATION=([4-9]=CELLCENTERED)\n')
+    for column in range(3):
+        np.savetxt(stream, xyz[...,column].ravel(order="F"), fmt="%.16e")
+    for column in range(6):
+        np.savetxt(stream, values[...,column].ravel(order="F"), fmt="%.16e")
+    for j in range(b-1):
+        for i in range(a-1):
+            p = i+a*j+1
+            stream.write(f"{p} {p+1} {p+1+a} {p+a}\n")
+
+
+def write_surface_partitioned(path, mesh, walls, members, owners, comm, checked):
+    """Serialize each wall on its owner, then stream ASCII to the output rank.
+
+    The temporary patch spool spills to disk above 1 MiB. No complete wall mesh
+    or global wall-field dictionary is assembled by this writer.
+    """
+    from ._streaming import CHUNK_BYTES, file_chunks, transfer_bytes
+    if len(set(comm.allgather(tuple(sorted(members))))) != 1:
+        raise RuntimeError("Surface output groups differ within comm")
+    stack = ExitStack()
+    transfer_comm = comm.Dup()
+    try:
+        def open_output():
+            if comm.rank != 0:
+                return None
+            temporary = stack.enter_context(_temporary_output(path))
+            stream = stack.enter_context(temporary.open("wb"))
+            stream.write(b'TITLE = "CFL3D wall solution"\n')
+            stream.write(b'VARIABLES = "X", "Y", "Z", "Cp", "T", "Cfx", "Cfy", "Cfz", "y+"\n')
+            return stream
+        destination = checked(open_output)
+        for zone in mesh.zones:
+            owner = owners[zone.name]
+            for boundary in zone.boundaries:
+                key = zone.name, boundary.name
+                if key not in members:
+                    continue
+                def spool_patch():
+                    if comm.rank != owner:
+                        return None
+                    spool = tempfile.SpooledTemporaryFile(max_size=CHUNK_BYTES, mode="w+b")
+                    text = io.TextIOWrapper(spool, encoding="utf-8", newline="\n")
+                    try:
+                        write_surface_patch(text, key, wall_vertices(zone, boundary), walls[key])
+                        text.flush()
+                        text.detach()
+                        return spool
+                    except BaseException:
+                        text.close()
+                        raise
+                spool = checked(spool_patch)
+                try:
+                    length = comm.bcast(spool.tell() if comm.rank == owner else None, root=owner)
+                    chunks = file_chunks(spool, 0, length) if comm.rank == owner else None
+                    transfer_bytes(transfer_comm, owner, 0, chunks,
+                                   lambda chunk: destination.write(chunk), length, checked)
+                finally:
+                    checked(lambda: spool.close() if spool is not None else None)
+        checked(stack.close)
+    except BaseException:
+        error = sys.exc_info()
+        checked(lambda: stack.__exit__(*error))
+        raise
+    finally:
+        transfer_comm.Free()
 
 
 def _record(stream, values, dtype):
@@ -160,7 +244,8 @@ def _record_bytes(stream, data):
     stream.write(marker); stream.write(data); stream.write(marker)
 
 
-def write_flow(prefix, mesh, fields, options, final_alpha):
+@contextmanager
+def flow_output(prefix, mesh, options, final_alpha):
     """CFL3D IPtype=1 PLOT3D: int32 record markers/IBLANK, float64 coordinates/Q.
 
     Serialize cached values using plot3d.F's packing. No Fortran COMMON state
@@ -174,11 +259,10 @@ def write_flow(prefix, mesh, fields, options, final_alpha):
             for stream in (xfile,qfile):
                 _record(stream, [len(mesh.zones)], np.int32)
                 _record(stream, dimensions, np.int32)
-            for zone in mesh.zones:
+            def write_zone(zone, q):
                 xyz = zone.coordinates
                 centers = sum(xyz[i:xyz.shape[0]-1+i,j:xyz.shape[1]-1+j,k:xyz.shape[2]-1+k]
                               for i,j,k in np.ndindex(2,2,2))/8.
-                q = fields[zone.name]
                 conservative = q.copy()
                 conservative[...,1:4] *= q[...,0,None]
                 conservative[...,4] = q[...,4]/(options.gamma-1) + .5*q[...,0]*np.sum(q[...,1:4]**2, axis=-1)
@@ -193,7 +277,15 @@ def write_flow(prefix, mesh, fields, options, final_alpha):
                 _record_bytes(xfile, coordinate_data+blank)
                 _record(qfile, [options.mach,final_alpha,options.reynolds,0.0], np.float64)
                 _record(qfile, conservative, np.float64)
-    return x_path, q_path
+            yield write_zone
+
+
+
+def write_flow(prefix, mesh, fields, options, final_alpha):
+    with flow_output(prefix, mesh, options, final_alpha) as write_zone:
+        for zone in mesh.zones:
+            write_zone(zone, fields[zone.name])
+    return Path(str(prefix)+".x"), Path(str(prefix)+".q")
 
 
 def write_lift_distributions(path, distributions):

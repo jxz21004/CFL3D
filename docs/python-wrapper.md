@@ -497,6 +497,21 @@ model records are checked before native execution; Python checkpoints additional
 check stored metadata. Raw native files do not carry the full Python configuration,
 so the caller must supply matching axis conventions and physical references.
 
+MPI checkpoint input/output streams native and mean-flow payloads in chunks of at
+most 1 MiB; root does not gather complete state arrays. Raw native input is indexed
+and sent to owners directly. Compressed NPZ input is incrementally extracted to a
+temporary file and checksum-checked before distribution. Its redundant mean-flow
+readouts are skipped during restart loading. New NPZ outputs keep the same format
+and remain readable by older serial readers.
+
+Compressed input requires temporary disk space for the uncompressed native
+payload. Use a disk-backed Python temporary directory (`TMPDIR`) for large cases.
+This is separate from the internal `.cfl3d-state.bin` used by native continuation.
+It reduces checkpoint payload RAM. Native grid setup and slice/lift analysis still
+need whole-case temporary storage on root. Volume output retains at most one
+received zone plus conversion buffers;
+wall ASCII output streams serialized patches from their owners.
+
 `*_solution.npz` and visualization CGNS are not full-state restart inputs.
 `setFlowState()` must be applied on every participating rank with that rank's own
 snapshot from the same completed solve. Collectively installed complete serial
@@ -543,7 +558,7 @@ use the collective checkpoint writer for a portable whole-case state.
 | `getFlowState()`, `setFlowState()` | Local; install matching owned shards on every rank before the next solve |
 | `getSolution()` | Local cached integral query |
 | `addLiftDistribution()`, `addSlices()`, `getLiftDistribution()`, `getSlices()` | Every rank; only the request/section/strip results are broadcast |
-| `writeTecplotSurfaceSolution()`, `writeSurfaceAnalysis()` | Every rank; root temporarily collects wall data and writes |
+| `writeTecplotSurfaceSolution()`, `writeSurfaceAnalysis()` | Every rank; wall ASCII streams from owners; registered analyses temporarily collect wall data on root |
 | `clearSurfaceAnalysis()` | Clear on every rank; consistency is checked before solving/output |
 
 Native API 12 replaces the former root-only surface registration/query/writer
@@ -551,10 +566,13 @@ contract. Call those methods outside `if rank == 0` blocks. Detailed wall geomet
 and fields are collected only for the operation and then released; querying
 `getSolution()` still needs no collective.
 
-Native grid setup, global array collection, and portable file I/O can temporarily
-assemble data on the host. Peak host memory is therefore not yet bounded by its
-owned zones. See [distributed-storage.md](distributed-storage.md) for the remaining
-work and measured payload sizes.
+File input reads global topology on root and coordinates on their initial owners.
+Native grid setup, explicit global array collection and slice/lift analysis can
+still temporarily assemble global data on the host. Normal MPI checkpoint I/O
+uses bounded streaming. Volume output writes one zone at a time; wall ASCII output
+streams from owners. Peak host memory is therefore not yet bounded by its owned
+zones. See [distributed-storage.md](distributed-storage.md) for remaining work and
+measured payload sizes.
 
 
 Omitting `comm` automatically selects the MPI path under an MPI launch or an
@@ -802,8 +820,11 @@ change. Explicit filenames/prefixes are caller-controlled; relative explicit pat
 are relative to the caller's working directory. Automatic/default paths are based
 on the solve output directory. Visualization writers use temporary files followed
 by replacement and protect the original CGNS input from overwrite. In MPI,
-all deferred writers must be called by every solver rank. Surface writers collect
-only wall vertices and detailed wall data, without gathering the volume mesh.
+all deferred writers must be called by every solver rank. CGNS, PLOT3D and automatic
+solution NPZ writers receive and release one zone at a time. The wall ASCII writer
+serializes patches on their owners and streams them to root, without gathering the
+volume mesh or complete wall arrays. Registered surface analyses remain separate
+operations that temporarily collect wall geometry and detailed data on root.
 
 ### File formats
 
