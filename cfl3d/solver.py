@@ -16,7 +16,12 @@ from .cgns import CGNSMesh
 
 _NATIVE_LOCK = threading.Lock()
 _AUTO_COMM = object()
-_MODELS = {"euler": 0, "laminar": 1, "sa": 5, "sst": 7, "komega": 6}
+_MODELS = {"euler": 0, "laminar": 1, "sa": 5, "sst": 7, "komega": 6, "gamma-theta": 40,
+           "bsl": 7, "sst2003": 7, "wilcox2006": 6}
+# Distinct model names keep restart metadata and cold-start decisions unambiguous,
+# even when native IVISC is shared. Values are I_BSL, ISST2003, I_WILCOX06.
+_MODEL_FLAGS = {"bsl": (1, 0, 0), "sst2003": (0, 1, 0), "wilcox2006": (0, 0, 1)}
+_AMBIENT_MODELS = frozenset(name for name, code in _MODELS.items() if code in (6, 7, 40))
 _SURFACE_COEFFICIENTS = ("CL", "CD", "CX", "CY", "CZ", "Cmx", "Cmy", "Cmz", "CDp", "CDv")
 _BC_TYPES = {"BCFarfield": (1003, ()), "BCSymmetryPlane": (1001, ()),
              "BCWallInviscid": (1005, ()), "BCOutflowSupersonic": (1002, ()),
@@ -129,6 +134,9 @@ class SolverOptions:
     flow_prefix: str | Path | None = None
     restartFile: str | Path | None = None
     flow_mode: str = "steady"  # Implicit steady solve; time-accurate Python support is not implemented.
+    freestream_turbulence_intensity: float | None = None  # Percent, not a fraction; native defaults if None.
+    freestream_eddy_viscosity: float | None = None  # mu_t / mu_inf, dimensionless.
+    keep_ambient_turbulence: bool = False
 
     def __setattr__(self, key, value):
         name = _OPTION_NAMES.get(key.casefold()) if isinstance(key, str) else None
@@ -204,7 +212,8 @@ _OPTION_DEFAULTS = {name: definition.default for name, definition in SolverOptio
 # 数值控制、积分参考量和输出设置不丢弃流场。比较基准是上次成功计算的独立副本。
 _OPTION_CATEGORIES = {
     "physics": frozenset(("flow_mode", "mach", "reynolds", "temperature", "gamma", "turbulence",
-                          "full_navier_stokes", "y_up")),
+                          "full_navier_stokes", "y_up", "freestream_turbulence_intensity",
+                          "freestream_eddy_viscosity", "keep_ambient_turbulence")),
     "operating_point": frozenset(("alpha", "beta", "target_cl", "alpha_relaxation",
                                   "alpha_step_limit", "alpha_update_interval")),
     "reference": frozenset(("sref", "cref", "bref", "moment_center", "freestream_pressure")),
@@ -259,6 +268,17 @@ def _validate_options(values):
         raise ValueError("multigrid_levels must be 1..5; cycle must be 1 (V) or 2 (W)")
     if values["turbulence"].lower() not in _MODELS:
         raise ValueError(f"Supported models: {', '.join(_MODELS)}")
+    for name in ("freestream_turbulence_intensity", "freestream_eddy_viscosity"):
+        if values[name] is not None:
+            _finite(values[name], name)
+            if values[name] <= 0:
+                raise ValueError(f"{name} must be positive or None")
+    if not isinstance(values["keep_ambient_turbulence"], bool):
+        raise ValueError("keep_ambient_turbulence must be a boolean")
+    if (values["freestream_turbulence_intensity"] is not None
+            or values["freestream_eddy_viscosity"] is not None or values["keep_ambient_turbulence"]):
+        if values["turbulence"].lower() not in _AMBIENT_MODELS:
+            raise ValueError("Freestream turbulence controls require a k-omega/SST-family model")
     for name in ("mach", "alpha", "beta", "reynolds", "temperature", "cfl", "turbulence_cfl",
                  "eddy_viscosity_limit", "gamma", "sref", "cref", "bref", "cfl_ramp_factor",
                  "alpha_relaxation", "alpha_step_limit"):
@@ -1293,7 +1313,11 @@ class CFL3D:
                     stages=stages, keywords=np.array([int(o.full_navier_stokes and model != 0), o.turbulence_subiterations,
                         o.turbulence_cfl, o.eddy_viscosity_limit, o.gamma,
                         99999.0 if o.target_cl is None else o.target_cl,
-                        o.alpha_relaxation, o.alpha_step_limit, o.alpha_update_interval]),
+                        o.alpha_relaxation, o.alpha_step_limit, o.alpha_update_interval,
+                        -1. if o.freestream_turbulence_intensity is None else o.freestream_turbulence_intensity,
+                        -1. if o.freestream_eddy_viscosity is None else o.freestream_eddy_viscosity,
+                        int(o.keep_ambient_turbulence),
+                        *_MODEL_FLAGS.get(o.turbulence.lower(), (0, 0, 0))]),
                     scheme=np.array([*_directions(o.inversion, "inversion"),
                                      *_directions(o.limiter, "limiter")], dtype=np.int32),
                     flux=np.array(_directions(o.flux, "flux"), dtype=np.int32),
@@ -1354,7 +1378,7 @@ class CFL3D:
                                    + (" --mpi" if self.comm is not None else "")) from exc
             if bool(module.py_build_info()) != (self.comm is not None):
                 raise RuntimeError("Native extension MPI mode does not match the solver")
-            if getattr(module, "py_api_version", lambda: 0)() != 8:
+            if getattr(module, "py_api_version", lambda: 0)() != 10:
                 raise RuntimeError("Native interface changed; rebuild with python tools/build_python.py"
                                    + (" --mpi" if self.comm is not None else "") + " and restart Python")
             return module

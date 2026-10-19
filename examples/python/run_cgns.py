@@ -7,7 +7,7 @@ from numerical_options import add_numerical_options, numerical_options
 def main():
     p = argparse.ArgumentParser(description="Run CFL3D directly from a structured CGNS mesh (ADF or HDF5)")
     p.add_argument("mesh")
-    p.add_argument("--model", choices=("euler", "laminar", "sa", "sst", "komega"), default="sa")
+    p.add_argument("--model", choices=("euler", "laminar", "sa", "sst", "komega", "gamma-theta", "bsl", "sst2003", "wilcox2006"), default="sa")
     p.add_argument("--mach", type=float, default=.5)
     p.add_argument("--alpha", type=float, default=0.)
     p.add_argument("--beta", type=float, default=0.)

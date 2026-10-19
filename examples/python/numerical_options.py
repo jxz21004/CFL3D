@@ -7,6 +7,9 @@ def add_numerical_options(parser):
     parser.add_argument("--write-surface", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--write-flow", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--freestream-pressure", type=float, help="Static pressure in Pa; enables SI loads")
+    parser.add_argument("--freestream-turbulence-intensity", type=float, help="SST-family free-stream Tu in percent")
+    parser.add_argument("--freestream-eddy-viscosity", type=float, help="SST-family free-stream mu_t/mu_inf")
+    parser.add_argument("--keep-ambient-turbulence", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--group", help="CGNS force group; default: all integrated surfaces")
     parser.add_argument("--sref", type=float, default=1., help="Reference area in m^2")
     parser.add_argument("--cref", type=float, default=1., help="Reference chord in m")
@@ -35,7 +38,8 @@ def numerical_options(parser, args):
     if args.group is not None and args.freestream_pressure is None:
         parser.error("--group requires --freestream-pressure in Pa for dimensional loads")
     result = {name: getattr(args, name) for name in (
-        "freestream_pressure", "sref", "cref", "bref",
+        "freestream_pressure", "sref", "cref", "bref", "freestream_turbulence_intensity",
+        "freestream_eddy_viscosity", "keep_ambient_turbulence",
         "target_cl", "alpha_relaxation", "alpha_step_limit", "alpha_update_interval",
         "multigrid_levels", "multigrid_cycle", "mesh_sequence", "coarse_iterations",
         "first_order_iterations", "coarse_first_order_iterations", "multigrid_up_iterations",

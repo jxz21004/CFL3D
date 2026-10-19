@@ -478,3 +478,46 @@ build/native-output-mpi-split.log。源码与说明已更新，未下载依赖�
 日志：build/native-output-dynamic-full.log、build/native-output-dynamic-final-targeted.log、
 build/native-output-dynamic-mpi3.log、build/native-output-dynamic-mpi-split.log。
 本轮未下载依赖。
+
+## 第十二轮：gamma-Re_theta 四方程转捩接口（2026-10-19）
+
+- Python 新增 turbulence="gamma-theta"，使用原生 IVISC=40 的 Langtry-Menter
+  gamma-Re_theta v1.1；未改写模型方程，不与原生 IVISC=30 三方程模型混用。
+- 新增 freestream_turbulence_intensity（百分数）、freestream_eddy_viscosity
+  （mu_t/mu_inf）和 keep_ambient_turbulence。这三个设置用于 komega/SST/gamma-theta，
+  默认沿用原生初始化；修改时按物理参数策略重新初始化流场。
+- 原生接口升级为 API 9，将环境湍流设置通过 f2py 传入 readkey.F。串行和 Intel MPI
+  扩展均已重编译；接续计算与文件 restart 保留全部四个输运变量和边界状态。
+- 修复 foureqn.F 的 RANS 分支可能读取不存在的 DES 数组 fdsav 的问题：Fortran 的
+  .and. 不保证短路，改为先判断 ides、再访问数组。原问题在调试版原生对照中触发崩溃。
+- 修复后的调试版原生程序与 Python 在三层多重网格/网格序列的平均流场、收敛历史和
+  四个模型变量完全一致，最大差值为 0。完整回归 59 项，56 项通过、3 项 HDF5 跳过。
+- 三进程自动 MPI 的缓存/文件续算、显式工况修改、物理重置和网格重载均与串行一致；
+  四方程状态也逐值相同。新增三维计算、模型切换和环境参数校验测试。
+- 当前验证证明接口、数值执行及状态接续一致，尚未完成转捩位置的实验验证。
+  体场可视化仍只导出已有平均流变量，暂未增加 gamma/Re_theta 独立可视化字段。
+
+最终日志：build/native-output-gamma-theta-final-tests.log、
+build/native-output-gamma-theta-parity-fixed.log、
+build/native-output-gamma-theta-mpi-fixed.log。
+可重复原生对照脚本：tests/python/validate_transition_parity.py。
+本轮未下载依赖。
+
+## 第十三轮：基础两方程变体（2026-10-19）
+
+- 新增 turbulence="bsl"、"sst2003"、"wilcox2006"，分别映射原生 I_BSL、
+  ISST2003、I_WILCOX06；原有 "sst"、"komega" 默认模型不变。
+- 用互斥模型名表达变体，不开放互相冲突的原生开关组合。每次配置显式重置全部变体标志，
+  切回旧模型不遗留前次设置；Wilcox 2006 保留原生涡伸展修正默认值。
+- 原生 API 升至 10，串行和 Intel MPI 扩展均已重编译。环境湍流参数同时支持三个新变体。
+- 缓存和 NPZ 重启保持完整模型名。切换变体按物理模型改变冷启动；即使 IVISC 相同，
+  不同变体的 NPZ 重启也会拒绝。原生裸二进制头只有 IVISC，不能单凭它辨别变体。
+- 新增模型标志隔离、版本切换、文件接续、两输运变量逐值对照测试，并扩展缓存续算测试。
+- 调试版原生程序对照覆盖 gamma-theta、BSL、SST-2003、Wilcox 2006；三层多重网格/
+  网格序列下的平均流场、历史及输运变量最大差值均为 0。
+- 四个模型各自通过三进程自动 MPI 回归，覆盖可变参数、显式攻角、物理重置、网格重载、
+  缓存和文件续算，与串行一致。完整回归 62 项，59 项通过、3 项可选 HDF5 跳过。
+
+日志：build/native-output-variants-full-tests.log、build/native-output-variants-parity.log、
+build/native-output-variants-mpi-{bsl,sst2003,wilcox2006,gamma-theta}.log。
+本轮未下载依赖，其他模型暂未扩展。

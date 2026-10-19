@@ -73,7 +73,7 @@ class ContinuationTests(unittest.TestCase):
     def test_split_iterations_equal_uninterrupted_for_all_models(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            for model in ("euler", "laminar", "sa", "sst", "komega"):
+            for model in ("euler", "laminar", "sa", "sst", "komega", "bsl", "sst2003", "wilcox2006"):
                 with self.subTest(model=model):
                     mesh = grouped_plate()
                     if model == "euler":

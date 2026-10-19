@@ -1,9 +1,11 @@
 # Python interface reference
 
-This document describes the current Python API, native interface version **8**.
+This document describes the current Python API, native interface version **10**.
 For the project motivation, requirements, and build commands, see the
 [README](../README.md). Validation records are maintained in
 [MPI_PROGRESS.md](../MPI_PROGRESS.md).
+Confirmed implementation constraints and remaining validation work are collected
+in [Known limitations and validation gaps](limitations.md).
 
 Python reads CGNS coordinates, boundaries, and connections and passes NumPy arrays
 to the Fortran solver through f2py. No `.inp` deck or intermediate PLOT3D input is
@@ -132,7 +134,10 @@ a `SolverOptions` object. `snapshot()` makes an independent copy when needed.
 | `reynolds` | `1e6` | Reynolds number per mesh length unit; per metre for metre-based grids |
 | `temperature` | `288.15` | Positive freestream static temperature, K |
 | `gamma` | `1.4` | Specific heat ratio, greater than 1 |
-| `turbulence` | `"sa"` | `euler`, `laminar`, `sa`, `komega`, or `sst` |
+| `turbulence` | `"sa"` | `euler`, `laminar`, `sa`, `komega`, `wilcox2006`, `sst`, `bsl`, `sst2003`, or `gamma-theta` |
+| `freestream_turbulence_intensity` | `None` | Positive free-stream turbulence intensity in percent; None retains native defaults |
+| `freestream_eddy_viscosity` | `None` | Positive free-stream viscosity ratio mu_t/mu_inf; None retains native defaults |
+| `keep_ambient_turbulence` | `False` | Prevent ambient turbulence decay using native KEEPAMBIENT |
 | `full_navier_stokes` | `True` | Full N-S terms for viscous models; disabled internally for Euler |
 | `y_up` | `False` | False: alpha in the x-z plane; True: native y-up coordinate convention |
 
@@ -157,9 +162,80 @@ needed for time-accurate continuation are not yet exposed.
 | `laminar` | 1 |
 | `sa` | 5 |
 | `komega` | 6 |
+| `wilcox2006` | 6 + I_WILCOX06=1 |
 | `sst` | 7 |
+| `bsl` | 7 + I_BSL=1 |
+| `sst2003` | 7 + ISST2003=1 |
+| `gamma-theta` | 40 |
 
 For extruded 2D grids, viscosity is disabled in the two-plane i direction.
+
+### Two-equation variants
+
+Select each variant through `turbulence`, rather than combining model flags:
+
+```python
+solver.setOption("turbulence", "sst2003")  # Alternatives: "bsl", "wilcox2006"
+result = solver.solve()
+```
+
+`sst` retains the original native SST defaults, including vorticity-based
+production and the original eddy-viscosity limiter. `komega` retains the native
+Wilcox 1988 defaults. Existing scripts selecting these names keep their model.
+
+* `bsl` selects Menter's baseline model through I_BSL=1.
+* `sst2003` selects the complete native SST-2003 switch, including strain-based
+  production/eddy-viscosity limiting, the production limiter of 10 in both
+  equations, and the revised constants and cross-diffusion floor. It does not
+  simply change one model constant.
+* `wilcox2006` selects native Wilcox 2006, retaining its default vortex-stretching
+  correction (I_WILCOX06_CHIW=1).
+
+Model names are case-insensitive. Switching variants starts a fresh calculation,
+even when the variants share IVISC=6 or 7. Each configuration resets all variant
+flags, so switching back cannot inherit a previous model's settings. Python NPZ
+checkpoints record the full model name and reject a different variant. Raw native
+restart headers contain only IVISC and cannot establish which variant produced
+the file; use NPZ checkpoints when variant identity must be checked.
+
+### Gamma-Re_theta transition model
+
+`turbulence="gamma-theta"` selects the existing native Langtry-Menter four-equation
+SST transition model, IVISC=40 (gamma-Re_theta v1.1). It transports omega, k,
+intermittency, and the transition Reynolds-number variable. It is separate from
+the undocumented native three-equation IVISC=30 model. CFL3D's own notes mark
+this implementation as under development.
+
+```python
+solver = CFL3D(options={
+    "input_grid": "mesh.cgns",
+    "turbulence": "gamma-theta",
+    "freestream_turbulence_intensity": 0.2,  # 0.2 percent, not 20 percent
+    "freestream_eddy_viscosity": 1.0,       # mu_t / mu_inf
+    "keep_ambient_turbulence": True,
+    "iterations": 1000,
+})
+result = solver.solve()
+```
+
+The three ambient controls are supported for `komega`, `wilcox2006`, `sst`, `bsl`,
+`sst2003`, and `gamma-theta`.
+Their defaults preserve native initialization. Supply measured/case-specific
+ambient conditions for transition predictions: the example values are not a
+universal calibration. `gamma` remains the gas specific-heat ratio, not an input
+for the intermittency field. The native model initializes free-stream intermittency
+to 1 and computes the initial Re_theta variable from turbulence intensity.
+
+Changes to the model or these ambient controls start a fresh flow by the normal
+physics-change policy. Cached and file restarts preserve all four transported
+variables and their ghost states. Standard Python volume output still exposes
+the existing mean-flow variables; separate intermittency/Re_theta visualization
+fields are not yet exported. Numerical execution and restart tests do not validate
+transition onset against experimental data.
+
+For the original implementation and its development status, see the
+[CFL3D transition-model notes](https://nasa.github.io/CFL3D/Cfl3dv6/cfl3dv6_new.html#transmod).
+Rebuild both native extensions after updating to interface version 10.
 
 ### Operating point and lift matching
 
@@ -356,7 +432,7 @@ its original value before the next call therefore does not discard the flow.
 
 | Category | Default behavior after a change |
 | --- | --- |
-| Physical model / freestream scales | Mach, Reynolds number, temperature, gamma, turbulence model, full N-S, or y-up changes initialize from freestream |
+| Physical model / freestream scales | Mach, Reynolds number, temperature, gamma, turbulence model, ambient turbulence controls, full N-S, or y-up changes initialize from freestream |
 | Numerical controls | Retain the finest-grid flow and apply new iteration, CFL, scheme, or multigrid settings |
 | Operating point | Retain flow; apply alpha, beta, and CL-control changes, with explicit alpha edits taking precedence over saved trim angles |
 | Reference quantities | Retain flow; integrate subsequent results using the new references |
@@ -776,7 +852,12 @@ From a built environment at the repository root:
 
 ```bash
 python -m unittest discover -s tests/python -v
+python tools/build_python.py --standalone --debug --fc gfortran --jobs 8
+PYTHONPATH=tests/python python tests/python/validate_transition_parity.py --directory build/transition-parity-check
+PYTHONPATH=tests/python python tests/python/validate_transition_parity.py --models bsl sst2003 wilcox2006 --directory build/variant-parity-check
 PYTHONPATH=tests/python mpirun -np 3 python tests/python/validate_runtime_mpi.py --auto --directory build/mpi-runtime-check
+PYTHONPATH=tests/python mpirun -np 3 python tests/python/validate_runtime_mpi.py --auto --model gamma-theta --directory build/mpi-transition-check
+PYTHONPATH=tests/python mpirun -np 3 python tests/python/validate_runtime_mpi.py --auto --model sst2003 --directory build/mpi-sst2003-check
 PYTHONPATH=tests/python mpirun -np 4 python tests/python/validate_runtime_mpi.py --split --directory build/mpi-runtime-check
 PYTHONPATH=tests/python mpirun -np 3 python tests/python/validate_solution_io_mpi.py --directory build/mpi-io-check
 ```
@@ -804,7 +885,7 @@ and long-run convergence require case-specific assessment.
 The core uses process-global COMMON state, so simultaneous solves in one Python
 process are unsupported. Native execution temporarily changes the process working
 directory; other threads should not depend on relative paths during a solve.
-Serial native errors return RuntimeError through a C guard, but may leave native
+Intercepted serial native errors return RuntimeError through a C guard, but may leave native
 allocations behind: start a fresh Python process after such an error. Native MPI
 errors abort the job. Python-side configuration errors are checked collectively
 before native entry.

@@ -20,13 +20,13 @@ def compare(result, reference):
         np.testing.assert_array_equal(result.wall_forces[name], reference.wall_forces[name])
 
 
-def run(comm, root, automatic):
+def run(comm, root, automatic, model='sst'):
     color = comm.Get_rank()  # Only for rank-varying spelling below, never numerical settings.
     root.mkdir(parents=True, exist_ok=True)
     options = dict(
         input_grid=root / "mesh.cgns",
         output_directory=root / "mpi-first",
-        turbulence="sst",
+        turbulence=model,
         mach=0.2,
         alpha=2.0,
         iterations=5,
@@ -35,6 +35,9 @@ def run(comm, root, automatic):
         writevolumesolution=False,
         writeTecplotSurfaceSolution=False,
     )
+    if model in ('gamma-theta', 'bsl', 'sst2003', 'wilcox2006'):
+        options.update(freestream_turbulence_intensity=.2, freestream_eddy_viscosity=1.,
+                       keep_ambient_turbulence=True)
     reference = error = None
     if comm.rank == 0:
         try:
@@ -105,6 +108,15 @@ def run(comm, root, automatic):
     new_grid = solver.solve(output_directory=root/'mpi-new-mesh')
     assert new_grid.start_mode == 'cold' and 'input_grid' in new_grid.reset_reasons
     solver._checked(lambda: compare(new_grid,reference))
+    if model == 'gamma-theta':
+        from test_transition import transition_fields
+        expected = comm.bcast(transition_fields(serial.getFlowState(), serial.mesh)
+                              if comm.rank == 0 else None, root=0)
+        def check_transition():
+            actual = transition_fields(solver.getFlowState(), solver.mesh)
+            for zone in expected:
+                np.testing.assert_array_equal(actual[zone], expected[zone])
+        solver._checked(check_transition)
     # Cached states are also checked before native collectives.
     if comm.rank == comm.size - 1:
         other._flow_state = None
@@ -116,7 +128,7 @@ def run(comm, root, automatic):
         raise AssertionError("Expected cached flow state mismatch")
     comm.Barrier()
     if comm.rank == 0:
-        print(f"RUNTIME_PASS world_rank={MPI.COMM_WORLD.rank} comm_size={comm.size} auto={automatic}: mutable controls, explicit trim angles, physical resets and mesh reloads match serial", flush=True)
+        print(f"RUNTIME_PASS world_rank={MPI.COMM_WORLD.rank} comm_size={comm.size} auto={automatic} model={model}: mutable controls, explicit trim angles, physical resets and mesh reloads match serial", flush=True)
 
 
 def main():
@@ -125,24 +137,25 @@ def main():
     parser.add_argument("--auto", action="store_true")
     parser.add_argument("--exclude", action="store_true")
     parser.add_argument("--split", action="store_true")
+    parser.add_argument("--model", choices=('sst', 'gamma-theta', 'bsl', 'sst2003', 'wilcox2006'), default='sst')
     args = parser.parse_args()
     world = MPI.COMM_WORLD
     if args.exclude:
         assert world.size == 4
         comm = world.Split(MPI.UNDEFINED if world.rank == 0 else 0, world.rank)
         if world.rank != 0:
-            run(comm, args.directory.resolve() / "exclude", False)
+            run(comm, args.directory.resolve() / "exclude", False, args.model)
             comm.Free()
         else:
             assert sum(i * i for i in range(1000)) == 332833500  # This rank creates no CFL3D object.
     elif args.split:
         assert world.size == 4
         comm = world.Split(world.rank // 2, world.rank)
-        run(comm, args.directory.resolve() / f"group-{world.rank // 2}", False)
+        run(comm, args.directory.resolve() / f"group-{world.rank // 2}", False, args.model)
         comm.Free()
     else:
         assert world.size in (2, 3)
-        run(world, args.directory.resolve() / f"auto-{world.size}", args.auto)
+        run(world, args.directory.resolve() / f"auto-{world.size}", args.auto, args.model)
     world.Barrier()
 
 

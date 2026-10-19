@@ -16,7 +16,8 @@ import numpy as np
 from .solution_io import _temporary_output
 
 FORMAT_VERSION = 1
-MODELS = {"euler": 0, "laminar": 1, "sa": 5, "komega": 6, "sst": 7}
+MODELS = {"euler": 0, "laminar": 1, "sa": 5, "komega": 6, "sst": 7, "gamma-theta": 40,
+          "bsl": 7, "sst2003": 7, "wilcox2006": 6}
 
 
 def metadata(mesh, options):

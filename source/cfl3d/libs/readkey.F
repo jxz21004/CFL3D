@@ -1041,6 +1041,22 @@ c     Native CL matching adjusts alpha during the solve, not between runs.
       rlxalph = py_keywords(7)
       dalim = py_keywords(8)
       icycupdt = int(py_keywords(9))
+c     Expose the native SST-family ambient conditions without an input deck.
+c     readkey runs before xmach is assigned: use the configured Python Mach.
+c     None arrives as -1, retaining the original init.F defaults.
+      if (py_keywords(10).gt.0.) then
+         tur10(2)=1.5*py_flow(1)**2*(py_keywords(10)/100.)**2
+      end if
+      if (py_keywords(11).gt.0.) then
+         if (tur10(2).lt.0.) tur10(2)=9.e-9
+         tur10(1)=tur10(2)/py_keywords(11)
+      end if
+      keepambient = int(py_keywords(12))
+c     Mutually exclusive two-equation variants. Reset all flags each solve
+c     so switching back to the original SST/Wilcox model cannot retain them.
+      i_bsl = int(py_keywords(13))
+      isst2003 = int(py_keywords(14))
+      i_wilcox06 = int(py_keywords(15))
       dalpha = 0.0
       gm1 = gamma-1.
       gp1 = gamma+1.

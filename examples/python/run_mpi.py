@@ -13,7 +13,7 @@ def main():
     parser = argparse.ArgumentParser(__doc__)
     parser.add_argument("mesh")
     parser.add_argument("--output", default="cfl3d-mpi-output")
-    parser.add_argument("--model", default="sa", choices=("euler", "laminar", "sa", "sst", "komega"))
+    parser.add_argument("--model", default="sa", choices=("euler", "laminar", "sa", "sst", "komega", "gamma-theta", "bsl", "sst2003", "wilcox2006"))
     parser.add_argument("--mach", type=float, default=.5)
     parser.add_argument("--alpha", type=float, default=0.)
     parser.add_argument("--iterations", type=int, default=100)

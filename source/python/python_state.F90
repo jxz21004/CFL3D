@@ -7,7 +7,7 @@ module cfl3d_python_state
   real(8), allocatable :: py_wall(:,:),py_wall_forces(:,:)
   integer, allocatable :: py_walloffset(:)
   integer, allocatable :: py_offsets(:), py_qoffsets(:)
-  real(8) :: py_flow(7), py_reference(6), py_time(6), py_keywords(9)
+  real(8) :: py_flow(7), py_reference(6), py_time(6), py_keywords(15)
   integer :: py_run(8), py_mg(5), py_scheme(6), py_flux(3), py_smoothing(5,5)
   real(8) :: py_rkap(3), py_final_alpha=0.0d0
   real(8) :: py_force_angles(2)=0.0d0
@@ -179,7 +179,7 @@ end module
 subroutine py_api_version(version)
   implicit none
   integer, intent(out) :: version
-  version=8
+  version=10
 end subroutine
 
 subroutine py_set_restart_controls(override_alpha)
@@ -336,7 +336,7 @@ subroutine py_configure(dims,counts,bcs,bcdata,blocks,connections,flow,reference
   integer, intent(in) :: dims(3,ngrid),counts(6,ngrid),bcs(8,nbc),blocks(7,ngrid)
   integer, intent(in) :: connections(10,2,nconn),run_control(8),mg(5),stages(4,mseq)
   integer, intent(in) :: scheme(6),flux(3),smoothing(5,5)
-  real(8), intent(in) :: bcdata(12,nbc),flow(7),reference(6),time_control(6),keywords(9),rkap(3)
+  real(8), intent(in) :: bcdata(12,nbc),flow(7),reference(6),time_control(6),keywords(15),rkap(3)
   integer, intent(out) :: status
   integer :: g,p,c
   status=0

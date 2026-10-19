@@ -52,7 +52,7 @@ python module _native
             integer dimension(5),intent(in) :: mg
             integer dimension(5,5),intent(in) :: smoothing
             integer dimension(4,mseq),intent(in) :: stages
-            real(kind=8) dimension(9),intent(in) :: keywords
+            real(kind=8) dimension(15),intent(in) :: keywords
             integer dimension(6),intent(in) :: scheme
             integer dimension(3),intent(in) :: flux
             real(kind=8) dimension(3),intent(in) :: rkap
