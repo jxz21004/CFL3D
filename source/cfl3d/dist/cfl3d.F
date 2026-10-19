@@ -399,8 +399,46 @@ c
       common /unit5/ iunit5
       common /wrestq/ irest,irest2
 #ifdef PYTHON_API
+      integer py_capacity,py_old_capacity
       save
-      if (py_resuming) go to 9102
+      if (py_resuming) then
+c        These routines have returned, so no live explicit-shape history
+c        dummy still refers to old storage. Grow histories before re-entry;
+c        the native grid/work/hierarchy allocations are never resized here.
+         if (py_stages(1,1).gt.ncycmax) then
+            py_old_capacity=ncycmax
+            py_capacity=py_stages(1,1)
+            if (ncycmax.le.huge(ncycmax)/2)
+     .          py_capacity=max(py_capacity,2*ncycmax)
+            call py_grow_history(rms,py_capacity)
+            call py_grow_history(clw,py_capacity)
+            call py_grow_history(cdw,py_capacity)
+            call py_grow_history(cdpw,py_capacity)
+            call py_grow_history(cdvw,py_capacity)
+            call py_grow_history(cxw,py_capacity)
+            call py_grow_history(cyw,py_capacity)
+            call py_grow_history(czw,py_capacity)
+            call py_grow_history(cmxw,py_capacity)
+            call py_grow_history(cmyw,py_capacity)
+            call py_grow_history(cmzw,py_capacity)
+            call py_grow_history(chdw,py_capacity)
+            call py_grow_history(swetw,py_capacity)
+            call py_grow_history(fmdotw,py_capacity)
+            call py_grow_history(cfttotw,py_capacity)
+            call py_grow_history(cftmomw,py_capacity)
+            call py_grow_history(cftpw,py_capacity)
+            call py_grow_history(cftvw,py_capacity)
+            call py_grow_history(timekeep,py_capacity)
+            call py_grow_history(clcd,py_capacity)
+            call py_grow_history(aehist,py_capacity)
+c           Update the caller's saved capacity as well as re-entry shapes.
+            ncycmax=py_capacity
+            py_resident_capacity=ncycmax
+            memuse=memuse+(ncycmax-py_old_capacity)*
+     .             (19+2*n_clcd+3*nmds*maxaes)*8
+         end if
+         go to 9102
+      end if
 #endif
 c
 c***********************************************************************

@@ -296,7 +296,13 @@ c     NKEY sizes the MPI buffer below; read the initialized COMMON value.
       allocatable :: nneg(:,:)
 #ifdef PYTHON_API
       save
-      if (py_resuming) go to 9103
+      if (py_resuming) then
+c        Match the caller's grown history capacity before entering mgblk.
+         memuse=memuse+(ncycmax-size(rmstr,1))*nummem*12
+         call py_grow_history(rmstr,ncycmax)
+         call py_grow_history(nneg,ncycmax)
+         go to 9103
+      end if
 #endif
 c
 c***********************************************************************
@@ -901,7 +907,12 @@ c
      .              yorgae0,zorgae0,icouple,iprnsurf,nblelst,iskmax,
      .              jskmax,kskmax,ue,nummem)
 #ifdef PYTHON_API
-         if (py_resident_paused) return
+         if (py_resident_paused) then
+            if (py_resident_open_ended.and.myid.eq.myhost)
+     .          call py_write_resident_history(ncycmax,nummem,rms,
+     .               clw,cdw,cxw,cyw,czw,cmxw,cmyw,cmzw,rmstr,nneg)
+            return
+         end if
 #endif
 c
          do iii = 1,mworki
@@ -1100,12 +1111,18 @@ c   meshdef = 1 if flow solution is to be bipassed, and mesh deformation only:
 c
       if(meshdef.eq.1) goto 8110
 c
+#ifdef PYTHON_API
+      if (.not.(py_resident_enabled.and.py_resident_open_ended)) then
+#endif
       call histout(ihstry,rms,clw,cdw,cdpw,cdvw,cxw,cyw,czw,
      .             cmxw,cmyw,cmzw,n_clcd,clcd,nblocks_clcd,blocks_clcd,
      .             chdw,swetw,fmdotw,cfttotw,
      .             cftmomw,cftpw,cftvw,rmstr,nneg,
      .             ncycmax,aehist,aesrfdat,nmds,maxaes,
      .             timekeep,nummem)
+#ifdef PYTHON_API
+      end if
+#endif
 #   ifdef CMPLX
 c
 c     derivative convergence history

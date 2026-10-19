@@ -138,6 +138,7 @@ class SolverOptions:
     freestream_turbulence_intensity: float | None = None  # Percent, not a fraction; native defaults if None.
     freestream_eddy_viscosity: float | None = None  # mu_t / mu_inf, dimensionless.
     keep_ambient_turbulence: bool = False
+    resident: bool = False  # Opt-in native workspace lifetime; see docs/distributed-storage.md.
 
     def __setattr__(self, key, value):
         name = _OPTION_NAMES.get(key.casefold()) if isinstance(key, str) else None
@@ -220,6 +221,7 @@ _OPTION_CATEGORIES = {
     "reference": frozenset(("sref", "cref", "bref", "moment_center", "freestream_pressure")),
     "mesh": frozenset(("input_grid",)),
     "restart": frozenset(("restartFile",)),
+    "runtime": frozenset(("resident",)),
     "io": frozenset(("name", "output_directory", "numberSolutions", "writevolumesolution",
                      "writeTecplotSurfaceSolution", "writeflowsolution", "volume_filename",
                      "surface_filename", "flow_prefix")),
@@ -246,9 +248,13 @@ def _validate_options(values):
             continue
         if not isinstance(value, (str, Path)) or not str(value).strip():
             raise ValueError(f"{name} must be a nonempty path")
-    for name in ("writevolumesolution", "writeTecplotSurfaceSolution", "writeflowsolution", "numberSolutions"):
+    for name in ("writevolumesolution", "writeTecplotSurfaceSolution", "writeflowsolution", "numberSolutions", "resident"):
         if not isinstance(values[name], bool):
             raise ValueError(f"{name} must be a boolean")
+    if values["resident"] and (values["mesh_sequence"] or values["multigrid_stages"] is not None):
+        raise NotImplementedError("resident=True currently requires mesh_sequence=False and no custom multigrid_stages")
+    if values["resident"] and values["restartFile"] is not None:
+        raise NotImplementedError("File restart initialization is not yet implemented for resident=True")
     ints = ("iterations", "multigrid_levels", "coarse_iterations", "multigrid_cycle",
             "turbulence_subiterations", "cfl_ramp_steps",
             "first_order_iterations", "coarse_first_order_iterations")
@@ -258,8 +264,9 @@ def _validate_options(values):
             raise ValueError(f"{name} must be an integer")
     if values["iterations"] < 1 or values["coarse_iterations"] < 0 or values["turbulence_subiterations"] < 1:
         raise ValueError("Invalid iteration count")
-    if values["cfl_ramp_steps"] < 0 or not 0 <= values["first_order_iterations"] <= values["iterations"]:
-        raise ValueError("Require nonnegative CFL ramp steps and first_order_iterations <= iterations")
+    if (values["cfl_ramp_steps"] < 0 or values["first_order_iterations"] < 0
+            or (not values["resident"] and values["first_order_iterations"] > values["iterations"])):
+        raise ValueError("Require nonnegative CFL ramp steps and first_order_iterations <= iterations unless resident=True")
     if not 0 <= values["coarse_first_order_iterations"] <= values["coarse_iterations"]:
         raise ValueError("coarse_first_order_iterations must be within coarse_iterations")
     if values["restart_interval"] is not None and (isinstance(values["restart_interval"], bool)
@@ -339,7 +346,11 @@ def _stage_schedule(values):
                                    values["coarse_first_order_iterations"])
                      for level in range(1, values["multigrid_levels"])) + (
             MultigridStage(values["iterations"], values["multigrid_levels"], values["first_order_iterations"]),)
-    return (MultigridStage(values["iterations"], values["multigrid_levels"], values["first_order_iterations"]),)
+    # Resident chunk length can be shorter than the original startup period.
+    # Reserve enough native stage capacity for startup, without resetting its
+    # counter or changing the number of cycles requested by a public solve().
+    budget = max(values["iterations"], values["first_order_iterations"]) if values["resident"] else values["iterations"]
+    return (MultigridStage(budget, values["multigrid_levels"], values["first_order_iterations"]),)
 
 
 def _stage_smoothing(values, stage, available_levels):
@@ -546,6 +557,8 @@ class CFL3D:
         self._surface_analysis_mesh = None
         self._surface_context = None
         self._flow_state = None
+        self._resident_context = None
+        self._last_runtime_info = {"active": False}
         self._loaded_restart_file = None
         self._successful_options = None
         self._successful_mesh_signature = None
@@ -890,19 +903,23 @@ class CFL3D:
             return json.dumps(value, default=str)
         changed = tuple(sorted(key for key in self.options if
                                token(key, self.options[key]) != token(key, previous[key])))
-        reset = set(changed) & (_OPTION_CATEGORIES["physics"] | _OPTION_CATEGORIES["mesh"])
+        reset = set(changed) & (_OPTION_CATEGORIES["physics"] | _OPTION_CATEGORIES["mesh"] | _OPTION_CATEGORIES["runtime"])
         if mesh_signature != self._successful_mesh_signature:
             reset.add("mesh")
         return changed, tuple(sorted(reset))
 
     def getFlowState(self):
         """Return an independent Python snapshot, including native turbulence/ghost state."""
+        if self.options.resident or self._resident_context is not None:
+            raise NotImplementedError("Full-state memory snapshots are not yet implemented for resident=True")
         if self._flow_state is None:
             raise RuntimeError("Call solve() before retrieving flow state")
         return deepcopy(self._flow_state)
 
     def setFlowState(self, state):
         """Install this rank's snapshot; call on every rank before the next solve."""
+        if self.options.resident or self._resident_context is not None:
+            raise NotImplementedError("Full-state memory snapshots are not yet implemented for resident=True")
         from .restart import FlowState
         if not isinstance(state, FlowState):
             raise TypeError("state must be returned by getFlowState()")
@@ -912,6 +929,7 @@ class CFL3D:
 
     def resetFlow(self):
         """Start the next solve from freestream instead of cached state or restartFile."""
+        self.close()
         self._flow_state = None
         self._continuing = False
         self._loaded_restart_file = None
@@ -940,6 +958,8 @@ class CFL3D:
         return owners
 
     def _require_flow_state(self):
+        if self.options.resident or self._resident_context is not None:
+            raise NotImplementedError("Full-state checkpoint export is not yet implemented for resident=True")
         if self._flow_state is None:
             raise RuntimeError("No flow state is available")
 
@@ -1693,40 +1713,44 @@ class CFL3D:
                     rkap=np.array(_directions(o.kappa, "kappa")),
                     npoints=len(xyz), ncells=int(np.prod(dims-1, axis=0).sum())), xyz
 
-    def solve(self, *, output_directory=None):
-        self._last_result = None  # Failed solves must not expose an older run's loads.
-        self._surface_analysis_mesh = None
-        self.checkOptions()
-        self._check_surface_requests()
-        self._refresh_grid()
-        mesh_signature = (self._checked(self._mesh_signature) if self.comm is None
-                          else self._distributed_mesh_signature())
-        changed_options, reset_reasons = self._checked(
-            lambda: self._configuration_changes(mesh_signature))
-        if self.comm is not None:
-            decisions = self.comm.allgather((changed_options, reset_reasons, mesh_signature))
-            if len(set(decisions)) != 1:
-                raise RuntimeError("CFL3D configuration/mesh change decisions differ within comm")
-        if self.comm is not None and len(set(self.comm.allgather(self._solve_counter))) != 1:
-            raise RuntimeError("CFL3D solve counters differ within comm")
-        state = self._prepare_flow_state(discard_cached=bool(reset_reasons))
-        self._continuing = state is not None
-        if reset_reasons and (self.comm is None or self.comm.rank == 0):
-            print("CFL3D: reinitializing after changes to " + ", ".join(reset_reasons)
-                  + ("; loading requested restartFile" if self._continuing else "; starting from freestream"), flush=True)
-        rank = self.comm.Get_rank() if self.comm is not None else 0
-        output_directory = self._checked(lambda: Path(
-            self.options.output_directory if output_directory is None else output_directory).resolve())
-        if self.comm is not None:
-            output_directory = self.comm.bcast(output_directory if rank == 0 else None, root=0)
-        selected = self._checked(lambda: self._select_output(output_directory, self._continuing) if rank == 0 else None)
-        if self.comm is not None:
-            selected = self.comm.bcast(selected, root=0)
-        solve_index, append_output, iteration_offset, output_identity = selected
-        output_names = self._checked(lambda: self._numbered_output_names(solve_index))
-        stem = f"{self.name}_{solve_index:03d}"
-        # Legacy filename fields are 80 bytes; reserve room for auxiliary suffixes.
-        self._checked(lambda: self._validate_native_stem(stem))
+    def _native_module(self):
+        from importlib import import_module
+        name = "_native_mpi" if self.comm is not None else "_native"
+        try:
+            module = import_module(f".{name}", __package__)
+        except ImportError as exc:
+            raise RuntimeError("Build the extension with python tools/build_python.py"
+                               + (" --mpi" if self.comm is not None else "")) from exc
+        if bool(module.py_build_info()) != (self.comm is not None):
+            raise RuntimeError("Native extension MPI mode does not match the solver")
+        if getattr(module, "py_api_version", lambda: 0)() != 15:
+            raise RuntimeError("Native interface changed; rebuild with python tools/build_python.py"
+                               + (" --mpi" if self.comm is not None else "") + " and restart Python")
+        return module
+
+    def _read_native_result(self, _native, arrays, nrows):
+        rank = self.comm.rank if self.comm is not None else 0
+        zone_owners, local_cells, local_wall_cells = _native.py_get_partition(len(self.mesh.zones))
+        self._zone_owners = tuple(map(int, zone_owners))
+        q = _native.py_get_solution(local_cells)
+        history = _native.py_get_history(nrows)
+        final_alpha = float(_native.py_get_final_alpha())
+        surface_values = _native.py_get_surface_coefficients(arrays["bcs"].shape[1])
+        wall_counts = (arrays["bcs"][4]-arrays["bcs"][3])*(arrays["bcs"][6]-arrays["bcs"][5])
+        wall_mask = np.isin(np.abs(arrays["bcs"][2]), (1005,1006,2004,2014,2024,2034,2016))
+        wall_mask &= np.asarray(self._zone_owners)[arrays["bcs"][0]-1] == rank
+        wall_counts = np.where(wall_mask, wall_counts, 0)
+        if int(wall_counts.sum()) != local_wall_cells:
+            raise RuntimeError("Native wall partition differs from Python metadata")
+        wall_values = _native.py_get_wall_data(local_wall_cells)
+        wall_force_values = _native.py_get_wall_forces(local_wall_cells)
+        # CL control can update final_alpha after force evaluation: use the force-time angles.
+        force_angles = _native.py_get_force_angles()
+        return q, history, final_alpha, surface_values, wall_counts, wall_values, wall_force_values, force_angles
+
+    def _solve_legacy_native(self, state, output_directory, output_names, stem,
+                             changed_options, append_output, iteration_offset):
+        rank = self.comm.rank if self.comm is not None else 0
         arrays, xyz = self._native_arrays()
         if state is not None:
             arrays["time_control"][1] = -1  # Native full-state restart, without old convergence history.
@@ -1737,22 +1761,7 @@ class CFL3D:
                 fingerprint.update(np.asarray(value).tobytes())
             if len(set(self.comm.allgather(fingerprint.hexdigest()))) != 1:
                 raise RuntimeError("CFL3D mesh/boundary/native configuration differs within comm")
-        base_groups = self._checked(self._cgns_surface_groups)
-        def native_module():
-            from importlib import import_module
-            name = "_native_mpi" if self.comm is not None else "_native"
-            try:
-                module = import_module(f".{name}", __package__)
-            except ImportError as exc:
-                raise RuntimeError("Build the extension with python tools/build_python.py"
-                                   + (" --mpi" if self.comm is not None else "")) from exc
-            if bool(module.py_build_info()) != (self.comm is not None):
-                raise RuntimeError("Native extension MPI mode does not match the solver")
-            if getattr(module, "py_api_version", lambda: 0)() != 13:
-                raise RuntimeError("Native interface changed; rebuild with python tools/build_python.py"
-                                   + (" --mpi" if self.comm is not None else "") + " and restart Python")
-            return module
-        _native = self._checked(native_module)
+        _native = self._checked(self._native_module)
         # Native ranks retain independent work directories while using the same case/index.
         local_directory = output_directory if rank == 0 else output_directory / f"rank-{rank:04d}"
         self._checked(lambda: local_directory.mkdir(parents=True, exist_ok=True))
@@ -1769,6 +1778,8 @@ class CFL3D:
         native_comm = None
         try:
             def check_lock():
+                from ._runtime import check_owner
+                check_owner(self)
                 if not acquired:
                     raise RuntimeError("CFL3D uses process-global Fortran state; concurrent solves are unsupported")
             self._checked(check_lock)
@@ -1797,22 +1808,7 @@ class CFL3D:
             if status:
                 error_file = output_names["preprocess_error" if status == -99 else "error"]
                 raise RuntimeError(f"CFL3D failed with status {status}; inspect {local_directory / error_file}")
-            zone_owners, local_cells, local_wall_cells = _native.py_get_partition(len(self.mesh.zones))
-            self._zone_owners = tuple(map(int, zone_owners))
-            q = _native.py_get_solution(local_cells)
-            history = _native.py_get_history(nrows)
-            final_alpha = float(_native.py_get_final_alpha())
-            surface_values = _native.py_get_surface_coefficients(arrays["bcs"].shape[1])
-            wall_counts = (arrays["bcs"][4]-arrays["bcs"][3])*(arrays["bcs"][6]-arrays["bcs"][5])
-            wall_mask = np.isin(np.abs(arrays["bcs"][2]), (1005,1006,2004,2014,2024,2034,2016))
-            wall_mask &= np.asarray(self._zone_owners)[arrays["bcs"][0]-1] == rank
-            wall_counts = np.where(wall_mask, wall_counts, 0)
-            if int(wall_counts.sum()) != local_wall_cells:
-                raise RuntimeError("Native wall partition differs from Python metadata")
-            wall_values = _native.py_get_wall_data(local_wall_cells)
-            wall_force_values = _native.py_get_wall_forces(local_wall_cells)
-            # CL control can update final_alpha after force evaluation: use the force-time angles.
-            force_angles = _native.py_get_force_angles()
+            q, history, final_alpha, surface_values, wall_counts, wall_values, wall_force_values, force_angles = self._read_native_result(_native, arrays, nrows)
             from .restart import FlowState, metadata, read_restart_partitioned
             if self.comm is None:
                 checkpoint = FlowState(checkpoint_path.read_bytes(), metadata(self.mesh,self.options), {})
@@ -1828,6 +1824,128 @@ class CFL3D:
                 native_comm.Free()
             if acquired:
                 _NATIVE_LOCK.release()
+        return arrays, q, history, final_alpha, surface_values, wall_counts, wall_values, wall_force_values, force_angles, checkpoint
+
+    def _solve_resident_native(self, output_directory, stem,
+                               changed_options, append_output, iteration_offset):
+        from ._runtime import ResidentContext
+        rank = self.comm.rank if self.comm is not None else 0
+        directory = output_directory if rank == 0 else output_directory / f"rank-{rank:04d}"
+        # A recoverable directory failure must not leave an unstarted context
+        # that a later call mistakes for a resumable native workspace.
+        self._checked(lambda: directory.mkdir(parents=True, exist_ok=True))
+        xyz = None
+        if self._resident_context is None:
+            arrays, xyz = self._native_arrays()
+            native = self._checked(self._native_module)
+            self._resident_context = ResidentContext(self, native, arrays)
+        context = self._resident_context
+        try:
+            values = context.advance(directory, stem, append_output, iteration_offset,
+                                     xyz=xyz, changed_cfl="cfl" in changed_options)
+        except BaseException:
+            if not context.started:
+                self._resident_context = None
+            raise
+        self._last_runtime_info = context.info()
+        return context.arrays, values
+
+    def getRuntimeInfo(self):
+        """Return local resident counters; work_bytes is workspace capacity, not RSS."""
+        return (self._resident_context.info() if self._resident_context is not None
+                else dict(self._last_runtime_info))
+
+    def close(self):
+        """Collectively release a resident workspace; the next solve starts fresh.
+
+        Last result readouts remain available for queries and deferred output.
+        Closing does not create a full-state restart snapshot.
+        """
+        self._check_resident_members()
+        if self._resident_context is not None:
+            context = self._resident_context
+            context.close()
+            self._last_runtime_info = context.info()
+            self._resident_context = None
+        return self
+
+    def _check_resident_members(self):
+        if self.comm is not None:
+            context = self._resident_context
+            state = None if context is None else (context.started, context.cycles)
+            states = self.comm.allgather(state)
+            if any(item != states[0] for item in states):
+                raise RuntimeError("CFL3D resident lifecycle states differ within comm")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.close()
+        return False
+
+    def solve(self, *, output_directory=None):
+        from ._runtime import check_owner
+        self._checked(lambda: check_owner(self))
+        self._check_resident_members()
+        self._last_result = None  # Failed solves must not expose an older run's loads.
+        self._surface_analysis_mesh = None
+        self.checkOptions()
+        self._check_surface_requests()
+        self._refresh_grid()
+        mesh_signature = (self._checked(self._mesh_signature) if self.comm is None
+                          else self._distributed_mesh_signature())
+        changed_options, reset_reasons = self._checked(
+            lambda: self._configuration_changes(mesh_signature))
+        # The resident prototype exposes only these updates without rebuilding.
+        # All other native controls conservatively start a new cold context.
+        # This is distinct from legacy restart-based numerical continuation.
+        if self._resident_context is not None:
+            warm = _OPTION_CATEGORIES["io"] | {"iterations", "cfl", "freestream_pressure"}
+            reset_reasons = tuple(sorted(set(reset_reasons) | (set(changed_options)-warm)))
+        if self.comm is not None:
+            decisions = self.comm.allgather((changed_options, reset_reasons, mesh_signature))
+            if len(set(decisions)) != 1:
+                raise RuntimeError("CFL3D configuration/mesh change decisions differ within comm")
+        if self.comm is not None and len(set(self.comm.allgather(self._solve_counter))) != 1:
+            raise RuntimeError("CFL3D solve counters differ within comm")
+        if reset_reasons and self._resident_context is not None:
+            self.close()
+        if self.options.resident:
+            def check_state():
+                if self._flow_state is not None and not reset_reasons:
+                    raise NotImplementedError("Call resetFlow() before enabling resident mode on a cached restart state")
+            self._checked(check_state)
+            state = None
+            self._continuing = self._resident_context is not None
+        else:
+            state = self._prepare_flow_state(discard_cached=bool(reset_reasons))
+            self._continuing = state is not None
+        if reset_reasons and (self.comm is None or self.comm.rank == 0):
+            print("CFL3D: reinitializing after changes to " + ", ".join(reset_reasons)
+                  + ("; loading requested restartFile" if self._continuing else "; starting from freestream"), flush=True)
+        rank = self.comm.Get_rank() if self.comm is not None else 0
+        output_directory = self._checked(lambda: Path(
+            self.options.output_directory if output_directory is None else output_directory).resolve())
+        if self.comm is not None:
+            output_directory = self.comm.bcast(output_directory if rank == 0 else None, root=0)
+        selected = self._checked(lambda: self._select_output(output_directory, self._continuing) if rank == 0 else None)
+        if self.comm is not None:
+            selected = self.comm.bcast(selected, root=0)
+        solve_index, append_output, iteration_offset, output_identity = selected
+        output_names = self._checked(lambda: self._numbered_output_names(solve_index))
+        stem = f"{self.name}_{solve_index:03d}"
+        # Legacy filename fields are 80 bytes; reserve room for auxiliary suffixes.
+        self._checked(lambda: self._validate_native_stem(stem))
+        if self.options.resident:
+            arrays, values = self._solve_resident_native(output_directory, stem,
+                                                        changed_options, append_output, iteration_offset)
+            q, history, final_alpha, surface_values, wall_counts, wall_values, wall_force_values, force_angles = values
+            checkpoint = None
+        else:
+            arrays, q, history, final_alpha, surface_values, wall_counts, wall_values, wall_force_values, force_angles, checkpoint = self._solve_legacy_native(
+                state, output_directory, output_names, stem, changed_options, append_output, iteration_offset)
+        base_groups = self._checked(self._cgns_surface_groups)
         self._redistribute_coordinates(self._zone_owners)
         fields = {}; offset = 0
         for zone_index, z in enumerate(self.mesh.zones):
@@ -1888,19 +2006,20 @@ class CFL3D:
         self._output_session_history = result.cumulative_history.copy()
         self._successful_options = dict(self.options)
         self._successful_mesh_signature = mesh_signature
-        checkpoint.fields = self._last_fields
+        if checkpoint is not None:
+            checkpoint.fields = self._last_fields
         self._flow_state = checkpoint
         from .solution_io import result_output
         path = self._checked(lambda: self._output_path(None, output_names["solution"]) if rank == 0 else None)
         if self.options.writevolumesolution:
             self._write_zones(lambda: result_output(path, result._saved_values()), coordinates=False)
-        else:
+        elif not self.options.resident:
             self._checked(lambda: result.save(path, include_volume=False) if rank == 0 else None)
         if self.options.writeTecplotSurfaceSolution:
             self.writeTecplotSurfaceSolution()
         elif self.nLiftDist or self.nSlice:
             self.writeSurfaceAnalysis()
-        if self.options.writevolumesolution or self.options.writeflowsolution:
+        if checkpoint is not None and (self.options.writevolumesolution or self.options.writeflowsolution):
             self._stage_flow_state(checkpoint, output_directory / output_names["restart"])
         if self.options.writevolumesolution:
             self.writeVolumeSolution()

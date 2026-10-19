@@ -1,7 +1,8 @@
 python module _native
     interface
-        subroutine py_start_resident(cycles,status)
+        subroutine py_start_resident(cycles,open_ended,status)
             integer intent(in) :: cycles
+            integer optional,intent(in) :: open_ended=0
             integer intent(out) :: status
         end subroutine py_start_resident
         subroutine py_advance_resident(cycles,cfl,status,nrows)

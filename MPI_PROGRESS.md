@@ -1,6 +1,6 @@
 # CFL3D Python/MPI 第十一轮检查点（动态参数与分类初始化策略）— 2026-10-16
 
-最新动态参数及自动初始化策略见文末“第十一轮”；前面保留此前各轮记录。
+最新状态见文末“阶段五第三步：公开驻留对象生命周期（Native API 15）”；前面保留各阶段历史记录。
 
 本轮在 `CFL3D/` 修改；旧的 `CFL3D-f2py-CGNS-source/` 保留作为参考。
 MPI 已通过下述内存网格验收；本轮又补齐 CGNS/ADF 文件入口的串行和 MPI 验收。
@@ -659,3 +659,63 @@ NASA SA/SST 基准与普通 Python 路径的流场、历史最大差值均为 0�
 补充：在 gamma-theta 驻留回归最后一步显式请求一次原生 checkpoint，用其完整 native
 payload 与连续计算逐字节比较，通过；其中包含四个模型输运变量、粘性和 ghost/wall
 记录。此前各分段边界均无内部 restart 文件。该测试不等于公开 FlowState 内存快照已实现。
+
+
+阶段五第二步：驻留上下文可延长推进（Native API 14）
+
+- 上一步原生驻留基础已提交 dd47b69；本节是该提交之后的新进展。
+- py_start_resident 新增可选 open_ended=1。每个请求结束后保持暂停，后续可超过初始
+  迭代预算；必须显式 py_close_resident。默认 bounded 行为保持兼容。
+- 进入下一段以前，仅在容量不足时按几何增长扩容全部 history 数组，包括湍流残差、
+  力/力矩、时间和辅助历史；在重新建立显式形状 dummy 关联之前完成扩容。
+- 不重新分区、setup 或重建网格层级，不调整原生主工作区；first-order、CFL ramp、
+  定升计数保留。无效请求及整数计数溢出在修改状态前拒绝。
+- 历史仍为累计记录，内存随总步数增长；这不是常量内存或无限容量承诺。扩容时每次
+  只暂存一个旧/新 history 数组，不复制网格/流场工作区。
+
+验证：完整串行/单元回归 73 项，70 通过、3 项可选 HDF5 跳过。初始只预留 2 步，按
+2+3+1+7+16 推进到 29 步；SA/SST/gamma-theta 的 V/W 循环与连续计算的历史和最终
+流场逐元素一致，另测定升控制及动态 CFL 与初始容量无关。三核 SST、两组独立二核
+gamma-theta 的三维不等块 y-up/侧滑回归通过，history 容量 2→5→10→20→40，setup
+只一次、原生分区和主工作区容量不变，分段期间没有内部 restart 文件。
+
+两种扩展及独立程序已重编译。API 14 需要重启已有 Python 进程。公开 CFL3D.solve
+尚未接入驻留驱动；对象/communicator 生命周期、完整内存快照、编号输出及多阶段初始
+mesh sequencing 仍是后续工作。此第二步与下一节公开驻留接口一并提交。
+日志 build/native-output-resident-grow-*；使用边界见 docs/distributed-storage.md。
+
+
+阶段五第三步：公开驻留对象生命周期（Native API 15）
+
+- 增加 options["resident"]=True，默认 False。公开 solve()/__call__ 共用驻留推进路径：
+  首次准备网格/初始化，后续只推进目标步数；原生分区、粗层和工作区、累计计数保留。
+- 增加 close()/with 上下文和 getRuntimeInfo()。comm 副本随上下文持有，关闭时集体释放；
+  不释放用户 comm、不 Finalize MPI。进程内活动 owner 阻止其他对象覆盖 COMMON。
+- 同一个对象各 rank 的生命周期状态、步数及 options 必须一致。CFL/步数/I/O/量纲压力
+  可以接续；其他参数或网格变化保守地关闭并冷初始化，mode 切换同样冷初始化。
+- first_order_iterations 可以超过一次驻留 chunk 的步数；启动期可以跨多次公开调用，
+  更新 iterations 不会重置启动计数。完整 history 数组沿用上一阶段的动态扩容。
+- 复用原有本地结果、积分查询、deferred writer 和自动表面/截面/升力分布输出。编号切换
+  旋转原生日志；关闭编号则追加日志和 history。增加暂停点的只读 history 序列化，避免
+  原生 histout 只在最终退出时写 .res/.turres、以及关闭时重复写全历史的问题。
+- 修复 resp.F 中 MPI tag spacing 覆盖 Python 迭代输出 offset 的问题，仅影响诊断编号，
+  不改变消息 tag 值和数值计算。原生 standalone 分支保持原路径。
+- 驻留模式无内部 restart staging/缓存 payload；体结果关闭时也不强制输出 solution NPZ。
+  原生文本日志仍有 I/O。getFlowState/setFlowState/writeRestartFile 暂明确拒绝，不能拿
+  均值流场 readout 冒充完整湍流/ghost 状态。可视化仍可在关闭后从缓存补写。
+
+验证：最终完整回归 82 项，79 通过、3 项可选 HDF5 跳过。公开路径 SA/SST/gamma-theta
+的 V/W 循环，2+3+1+7+16 与连续 29 步的历史/最终流场/壁面逐元素一致；覆盖动态 CFL、
+1+1+5 步跨启动期、原生只初始化一次、不重复调用网格准备/文件网格读取、不走 restart
+staging、编号和追加历史、deferred 输出、输出故障重试、参数/层级/网格变化重新初始化。
+真实 MPI 三核 SST、两组独立二核 gamma-theta、排除 world rank 0 的三核 gamma-theta
+均通过；检查 owner 分区、comm 复用、rank-local 结果、组间隔离、选项不一致集体失败、
+关闭后可执行其他算例及 MPI 仍有效。重编译 standalone，NASA SA/SST 对照流场和历史
+最大差值为 0。
+
+剩余：驻留完整内存快照/文件 restart 初始化、多阶段初始粗到细 sequencing、更广的动态
+数值控制、生产网格 RSS/性能、初始 host 网格峰值及表面分析临时汇集。当前为显式选择的
+驻留模式，尚不替换默认 restart 路径。两种本地扩展已重编译为 API 15，已有 Python 进程
+需重启。本次提交包含本轮及上一节 API 14 的扩容改动；原生驻留基础提交为 dd47b69。
+日志 build/native-output-resident-public-*；接口示例见 docs/python-wrapper.md 的 Resident
+calculation chunks，原生设计及边界见 docs/distributed-storage.md。

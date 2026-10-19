@@ -20,15 +20,96 @@ module cfl3d_python_state
   logical :: py_append_output=.false.
   logical :: py_override_restart_alpha=.false.
   integer :: py_iteration_offset=0
-  ! Experimental resident driver. Enabled only through the explicit native API;
-  ! CFL3D.solve still uses its established restart path until integration checks.
+  ! Resident driver, enabled by options['resident'] or the explicit native API.
+  ! Default public solves retain the established restart-based path.
   logical :: py_resident_enabled=.false.,py_resident_paused=.false.
   logical :: py_resuming=.false.,py_resident_closing=.false.
+  logical :: py_resident_open_ended=.false.
+  logical :: py_resident_output_changed=.false.
   integer :: py_resident_stop=0,py_resident_done=0
+  integer :: py_resident_written=0
   integer :: py_resident_initializations=0,py_resident_capacity=0
   integer(kind=8) :: py_resident_work_bytes=0
   real(8) :: py_resident_cfl=0.d0
+  interface py_grow_history
+    module procedure py_grow_history_1,py_grow_history_2,py_grow_history_3,py_grow_history_4,py_grow_history_int
+  end interface
 contains
+  subroutine py_write_resident_history(capacity,nummem,rms,cl,cd,cx,cy,cz,cmx,cmy,cmz,turres,nneg)
+    integer, intent(in) :: capacity,nummem,nneg(capacity,nummem)
+    real(8), intent(in) :: rms(capacity),cl(capacity),cd(capacity),cx(capacity),cy(capacity),cz(capacity)
+    real(8), intent(in) :: cmx(capacity),cmy(capacity),cmz(capacity),turres(capacity,nummem)
+    integer :: n,l
+    ! Standalone histout runs only at final cleanup and can modify zero RMS
+    ! entries. Emit completed rows at each resident boundary without changing
+    ! authoritative histories or writing them a second time at close.
+    write(12,'(a)') '# it log(res) CL CD CX CY CZ Cmx Cmy Cmz'
+    write(13,'(a)') '# it log(turbulence residuals...) negative-counts...'
+    do n=py_resident_written+1,py_resident_done
+      write(12,'(i12,9es16.8)') n+py_iteration_offset,log10(merge(rms(n),1.d0,rms(n)>0.d0)), &
+                               cl(n),cd(n),cx(n),cy(n),cz(n),cmx(n),cmy(n),cmz(n)
+      if (maxval(py_blocks(5:7,:)) > 2) then
+        write(13,'(i12,*(es16.8,1x))',advance='no') n+py_iteration_offset, &
+                         (log10(merge(turres(n,l),1.d0,turres(n,l)>0.d0)),l=1,nummem)
+        write(13,'(1x,*(i12,1x))') (nneg(n,l),l=1,nummem)
+      end if
+    end do
+    py_resident_written=py_resident_done
+  end subroutine
+
+  ! Only iteration histories grow. Geometry, native work arrays and the MG
+  ! hierarchy keep their addresses and contents across an extension. Move one
+  ! history at a time to bound temporary memory to the largest history array.
+  subroutine py_grow_history_1(values,capacity)
+    real(8), allocatable, intent(inout) :: values(:)
+    integer, intent(in) :: capacity
+    real(8), allocatable :: grown(:)
+    if (size(values) >= capacity) return
+    allocate(grown(capacity)); grown=0.d0
+    grown(:size(values))=values
+    call move_alloc(grown,values)
+  end subroutine
+
+  subroutine py_grow_history_2(values,capacity)
+    real(8), allocatable, intent(inout) :: values(:,:)
+    integer, intent(in) :: capacity
+    real(8), allocatable :: grown(:,:)
+    if (size(values,1) >= capacity) return
+    allocate(grown(capacity,size(values,2))); grown=0.d0
+    grown(:size(values,1),:)=values
+    call move_alloc(grown,values)
+  end subroutine
+
+  subroutine py_grow_history_int(values,capacity)
+    integer, allocatable, intent(inout) :: values(:,:)
+    integer, intent(in) :: capacity
+    integer, allocatable :: grown(:,:)
+    if (size(values,1) >= capacity) return
+    allocate(grown(capacity,size(values,2))); grown=0
+    grown(:size(values,1),:)=values
+    call move_alloc(grown,values)
+  end subroutine
+
+  subroutine py_grow_history_3(values,capacity)
+    real(8), allocatable, intent(inout) :: values(:,:,:)
+    integer, intent(in) :: capacity
+    real(8), allocatable :: grown(:,:,:)
+    if (size(values,3) >= capacity) return
+    allocate(grown(size(values,1),size(values,2),capacity)); grown=0.d0
+    grown(:,:,:size(values,3))=values
+    call move_alloc(grown,values)
+  end subroutine
+
+  subroutine py_grow_history_4(values,capacity)
+    real(8), allocatable, intent(inout) :: values(:,:,:,:)
+    integer, intent(in) :: capacity
+    real(8), allocatable :: grown(:,:,:,:)
+    if (size(values,1) >= capacity) return
+    allocate(grown(capacity,size(values,2),size(values,3),size(values,4))); grown=0.d0
+    grown(:size(values,1),:,:,:)=values
+    call move_alloc(grown,values)
+  end subroutine
+
   function py_output_name(legacy) result(name)
     character(len=*), intent(in) :: legacy
     character(len=80) :: name
@@ -55,6 +136,17 @@ contains
     else
       open(unit=unit,file=name,form='formatted',status='replace')
     end if
+  end subroutine
+
+  subroutine py_flush_resident_output()
+    integer :: unit
+    logical :: connected
+    do unit=11,99
+      ! Flush connected native diagnostics at a Python boundary. Do not create
+      ! a fort.N file by flushing an unconnected worker unit.
+      inquire(unit=unit,opened=connected)
+      if (connected) flush(unit)
+    end do
   end subroutine
 
   integer function py_bcindex(grid,face,seg) result(idx)
@@ -220,7 +312,7 @@ end module
 subroutine py_api_version(version)
   implicit none
   integer, intent(out) :: version
-  version=13
+  version=15
 end subroutine
 
 subroutine py_set_restart_controls(override_alpha)
@@ -231,13 +323,45 @@ subroutine py_set_restart_controls(override_alpha)
 end subroutine
 
 subroutine py_set_output_names(stem,append_output,iteration_offset)
-  use cfl3d_python_state, only: py_output_stem,py_append_output,py_iteration_offset
+  use cfl3d_python_state
   implicit none
   character(len=*), intent(in) :: stem
   integer, intent(in) :: append_output,iteration_offset
   py_output_stem=stem
   py_append_output=append_output/=0
   py_iteration_offset=iteration_offset
+  if (py_resident_enabled .and. py_resident_paused) py_resident_output_changed=.true.
+end subroutine
+
+subroutine py_rotate_resident_output()
+  use cfl3d_python_state
+  implicit none
+  integer :: nnodes,myhost,myid,mycomm
+  common /mydist2/ nnodes,myhost,myid,mycomm
+  character(80) :: grid,plt3dg,plt3dq,output,residual,turbres,blomx,output2,printout,pplunge, &
+                  ovrlap,patch,restrt,subres,subtur,grdmov,alphahist,errfile,preout,aeinp,aeout,sdhist,avgg,avgq
+  common /filenam/ grid,plt3dg,plt3dq,output,residual,turbres,blomx,output2,printout,pplunge, &
+                  ovrlap,patch,restrt,subres,subtur,grdmov,alphahist,errfile,preout,aeinp,aeout,sdhist,avgg,avgq
+  if (.not.py_resident_output_changed) return
+  py_resident_output_changed=.false.
+  call py_flush_resident_output()
+  ! Rotate diagnostics only. Setup's patch/overlap files remain attached to
+  ! their original units; reopening those would disturb the retained context.
+  errfile=py_output_name('cfl3d.error')
+  call py_open_text(99,errfile)
+  if (myid /= myhost) return
+  output=py_output_name('cfl3d.out'); call py_open_text(11,output)
+  residual=py_output_name('cfl3d.res'); call py_open_text(12,residual)
+  turbres=py_output_name('cfl3d.turres'); call py_open_text(13,turbres)
+  blomx=py_output_name('cfl3d.blomax'); call py_open_text(14,blomx)
+  output2=py_output_name('cfl3d.out15'); call py_open_text(15,output2)
+  printout=py_output_name('cfl3d.prout'); call py_open_text(17,printout)
+  pplunge=py_output_name('cfl3d.out20'); call py_open_text(20,pplunge)
+  subres=py_output_name('cfl3d.subit_res'); call py_open_text(23,subres)
+  subtur=py_output_name('cfl3d.subit_turres'); call py_open_text(24,subtur)
+  grdmov=py_output_name('cfl3d.dynamic_patch'); call py_open_text(25,grdmov)
+  alphahist=py_output_name('cfl3d.alpha'); call py_open_text(27,alphahist)
+  write(11,'(/,a,i12)') 'Python resident continuation; completed native cycles: ',py_resident_done
 end subroutine
 
 subroutine py_get_force_angles(angles)
@@ -462,10 +586,10 @@ subroutine py_release_buffers()
   if (allocated(py_history)) deallocate(py_history)
 end subroutine
 
-subroutine py_start_resident(cycles,status)
+subroutine py_start_resident(cycles,open_ended,status)
   use cfl3d_python_state
   implicit none
-  integer, intent(in) :: cycles
+  integer, intent(in) :: cycles,open_ended
   integer, intent(out) :: status
   status=1
   if (py_used /= 0 .or. py_resident_enabled .or. cycles < 1) return
@@ -474,12 +598,15 @@ subroutine py_start_resident(cycles,status)
   ! First stage: steady cold start with one mesh-sequence stage, including
   ! multilevel V/W cycling. Initial coarse-to-fine sequencing comes later.
   if (size(py_stages,2) /= 1) return
-  if (cycles > sum(py_stages(1,:))) return
-  ! This prototype reserves a finite total schedule using the existing history
-  ! sizing. Growing that capacity is a separate step, not a hidden reinitialize.
+  if (open_ended /= 0 .and. open_ended /= 1) return
+  if (open_ended == 0 .and. cycles > sum(py_stages(1,:))) return
+  py_resident_open_ended=(open_ended == 1)
+  if (py_resident_open_ended) py_stages(1,1)=max(py_stages(1,1),cycles)
   py_resident_enabled=.true.; py_resident_paused=.false.
+  py_resident_output_changed=.false.
   py_resuming=.false.; py_resident_closing=.false.
   py_resident_stop=cycles; py_resident_done=0
+  py_resident_written=0
   py_resident_initializations=0; py_resident_capacity=0
   py_resident_work_bytes=0; py_resident_cfl=0.d0
   py_write_restart=.false.
@@ -496,7 +623,13 @@ subroutine py_advance_resident(cycles,cfl,status,nrows)
   status=1; nrows=py_nhistory
   if (.not.py_resident_enabled .or. .not.py_resident_paused .or. py_used /= 0) return
   if (cycles < 1 .or. .not.ieee_is_finite(cfl) .or. .not.(cfl >= 0.d0)) return
-  if (cycles > sum(py_stages(1,:))-py_resident_done) return
+  ! Check before adding: the original driver uses default integer counters.
+  if (cycles > huge(cycles)-py_resident_done) return
+  if (py_resident_open_ended) then
+    py_stages(1,1)=max(py_stages(1,1),py_resident_done+cycles)
+  else
+    if (cycles > sum(py_stages(1,:))-py_resident_done) return
+  end if
   py_resident_stop=py_resident_done+cycles
   py_resident_cfl=cfl
   py_resuming=.true.; py_resident_paused=.false.

@@ -177,9 +177,12 @@ c
 #if defined DIST_MPI
 c     set baseline tag values
 c
+#ifndef PYTHON_API
       ioffset = maxbl
+#endif
+c     Tag spacing must not overwrite Python's output iteration offset.
       itag_rms   = 1
-      itag_fcoef = itag_rms + ioffset
+      itag_fcoef = itag_rms + maxbl
 c
 #endif
       if (real(dt).lt.0. .and.   nt.eq.1) then

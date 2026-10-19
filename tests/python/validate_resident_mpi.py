@@ -14,7 +14,7 @@ def digest(array):
     return hashlib.sha256(array.tobytes()).hexdigest()
 
 
-def run(comm, root, model):
+def run(comm, root, model, open_ended=False):
     mesh = grouped_plate(split=25)
     # Unequal 3D blocks, with y-up input and sideslip, test the coordinate path.
     for zone in mesh.zones:
@@ -30,7 +30,7 @@ def run(comm, root, model):
         zone.coordinates[..., 1] = xyz[..., 2]
         zone.coordinates[..., 2] = -xyz[..., 1]
     options = dict(turbulence=model, mach=.2, alpha=2., beta=3., y_up=True,
-        cfl=1., iterations=9, multigrid_levels=3, multigrid_cycle=2,
+        cfl=1., iterations=29 if open_ended else 9, multigrid_levels=3, multigrid_cycle=2,
         first_order_iterations=2, cfl_ramp_steps=3, cfl_ramp_factor=2.,
         writevolumesolution=False, writeTecplotSurfaceSolution=False)
     reference = error = None
@@ -45,6 +45,8 @@ def run(comm, root, model):
     error, reference = comm.bcast((error, reference), root=0)
     if error:
         raise RuntimeError(error)
+    if open_ended:
+        options['iterations'] = 2  # Reserve only the first chunk, not the final budget.
     solver = CFL3D(mesh, options, comm=comm)
     arrays, xyz = solver._native_arrays()
     original_directory = Path.cwd()
@@ -57,7 +59,7 @@ def run(comm, root, model):
         native.py_set_coordinates(xyz)
         del xyz
         native.py_set_output_names('resident', 0, 0)
-        assert native.py_start_resident(2) == 0
+        assert native.py_start_resident(2, int(open_ended)) == 0
         os.chdir(directory)
         status, rows = native.py_solve()
         assert (status, rows) == (0, 2)
@@ -65,9 +67,15 @@ def run(comm, root, model):
         if comm.size == 3:
             assert tuple(owners) == (2, 1)  # Original native load balancer, unequal fixture.
         solver._redistribute_coordinates(tuple(owners))
+        initial_info = native.py_resident_info()
+        capacities = [initial_info[4]]
         def check(total, final=False):
             info = native.py_resident_info()
-            assert info[:4] == (0 if final else 1, 0 if final else 1, total, 1), info
+            closed = final and not open_ended
+            assert info[:4] == (0 if closed else 1, 0 if closed else 1, total, 1), info
+            assert info[5:] == initial_info[5:]
+            assert info[4] >= total
+            capacities.append(info[4])
             assert info[6] == 0  # No retained whole-case input coordinates.
             assert native.py_get_partition(len(mesh.zones))[0].tolist() == owners.tolist()
             history = native.py_get_history(total)
@@ -98,18 +106,22 @@ def run(comm, root, model):
                         np.testing.assert_array_equal(coefficients[:,column], reference[2][key])
         solver._checked(lambda: check(2))
         assert native.py_set_communicator(comm.py2f()) != 0  # Borrowed context must stay intact.
-        for chunk, total in ((3,5), (1,6), (3,9)):
+        schedule = ((3,5),(1,6),(7,13),(16,29)) if open_ended else ((3,5),(1,6),(3,9))
+        for chunk, total in schedule:
             assert native.py_advance_resident(chunk, 0.) == (0, total)
-            solver._checked(lambda: check(total, total == 9))
+            solver._checked(lambda: check(total, total == schedule[-1][1]))
             comm.Barrier()  # Python MPI operations remain usable between native chunks.
+        if open_ended:
+            assert len(set(capacities)) > 1
         assert native.py_close_resident() == 0
+        assert native.py_resident_info()[:4] == (0,0,schedule[-1][1],1)
         native.py_release_buffers()
         # Early close must not advance a cycle or reduce published forces twice.
         arrays, xyz = solver._native_arrays()
         assert native.py_configure(**arrays) == 0
         native.py_set_coordinates(xyz)
         del xyz
-        assert native.py_start_resident(2) == 0
+        assert native.py_start_resident(2, int(open_ended)) == 0
         assert native.py_solve() == (0, 2)
         before = native.py_get_surface_coefficients(len(solver._surface_keys))
         assert native.py_close_resident() == 0
@@ -123,7 +135,9 @@ def run(comm, root, model):
             os.chdir(original_directory)
             native_comm.Free()
     if comm.rank == 0:
-        print('RESIDENT_PASS', model, root, 'setup=1, chunks=2+3+1+3, no retained input xyz', flush=True)
+        print('RESIDENT_PASS', model, root, 'open_ended=', open_ended,
+              'setup=1, cycles=', schedule[-1][1], 'capacities=', capacities,
+              'no retained input xyz', flush=True)
 
 
 if __name__ == '__main__':
@@ -131,6 +145,7 @@ if __name__ == '__main__':
     parser.add_argument('--directory', type=Path, required=True)
     parser.add_argument('--model', default='sst')
     parser.add_argument('--split', action='store_true')
+    parser.add_argument('--open-ended', action='store_true')
     args = parser.parse_args()
     world = MPI.COMM_WORLD
     if world.size not in (2,3) and not (world.size == 4 and args.split):
@@ -138,7 +153,7 @@ if __name__ == '__main__':
     color = world.rank//2 if args.split else 0
     comm = world.Split(color, world.rank) if args.split else world
     try:
-        run(comm, args.directory.resolve()/f'group-{color}', args.model)
+        run(comm, args.directory.resolve()/f'group-{color}', args.model, args.open_ended)
     except BaseException:
         import traceback
         traceback.print_exc()

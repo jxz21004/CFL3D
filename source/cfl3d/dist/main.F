@@ -1114,6 +1114,7 @@ c***********************************************************************
 c
 #ifdef PYTHON_API
  9101 continue
+      call py_rotate_resident_output()
 #endif
       call cfl3d(mwork,mworki,nplots,minnode,iitot,intmax,
      .           maxxe,mxbli,nsub1,lbcprd,lbcemb,lbcrad,maxbl,
@@ -1147,7 +1148,10 @@ c
 #endif
 c
 #ifdef PYTHON_API
-      if (py_resident_paused) return
+      if (py_resident_paused) then
+         call py_flush_resident_output()
+         return
+      end if
       py_resident_enabled=.false.
 #endif
       if (allocated(blocks_clcd)) then

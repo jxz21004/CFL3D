@@ -1,6 +1,6 @@
 # Python interface reference
 
-This document describes the current Python API, native interface version **12**.
+This document describes the current Python API, native interface version **15**.
 For the project motivation, requirements, and build commands, see the
 [README](../README.md). Validation records are maintained in
 [MPI_PROGRESS.md](../MPI_PROGRESS.md).
@@ -412,6 +412,7 @@ the new reference is applied by the next solve.
 | --- | --- | --- |
 | `input_grid` | `None` | CGNS input path; required when no mesh argument is supplied |
 | `restartFile` | `None` | Python checkpoint or native full-state restart input |
+| `resident` | `False` | Retain native workspace between chunks; restricted cold-start mode described below |
 | `output_directory` | `"cfl3d-output"` | Automatic output directory |
 | `name` | `"out"` | Case name used in automatic filenames |
 | `numberSolutions` | `True` | Allocate a new output number; False can append a continued calculation |
@@ -439,6 +440,10 @@ its original value before the next call therefore does not discard the flow.
 | Output settings | Retain flow; change file writing and naming |
 | Mesh / boundary configuration | Reload or use the current geometry, rebuild computational data, and initialize again |
 | New restart input | Load and validate the explicitly requested state |
+| Runtime mode | Changing `resident` cold initializes the next calculation |
+
+This table describes default restart-based continuation. Resident mode uses the
+narrower warm-update policy in [Resident calculation chunks](#resident-calculation-chunks).
 
 `CFL3D.getOptionCategories()` returns the complete option classification.
 `result.start_mode` is `"cold"` or `"restart"`; `changed_options` lists changed option
@@ -467,6 +472,8 @@ checks. There is currently no option to force continuation across arbitrary
 physical-model changes.
 
 ### State access and restart files
+
+This complete-state workflow applies to `resident=False`.
 
 ```python
 state = solver.getFlowState()            # Independent native bytes and field arrays
@@ -512,14 +519,11 @@ need whole-case temporary storage on root. Volume output retains at most one
 received zone plus conversion buffers;
 wall ASCII output streams serialized patches from their owners.
 
-Continuation currently re-enters native initialization on every `solve()`. Keeping
-a cached `FlowState` does not retain the native multigrid workspace. Short-chunk
-adaptive control therefore still incurs setup and internal checkpoint I/O; the
-[resident-runtime design](distributed-storage.md#resident-runtime-design-for-the-next-stage)
-describes the intended replacement. API 13 contains an explicit native prototype;
-it is not yet connected to `CFL3D.solve()`. Rebuild both native extensions and
-restart Python after updating from API 12; this update does not enable resident
-continuation automatically.
+The default `resident=False` path re-enters native initialization on every
+`solve()`, using the cached complete `FlowState` and internal checkpoint I/O.
+For compatible short calculation chunks, API 15 provides the opt-in resident mode
+below. Rebuild both native extensions and restart existing Python processes after
+updating from an earlier native API.
 
 `*_solution.npz` and visualization CGNS are not full-state restart inputs.
 `setFlowState()` must be applied on every participating rank with that rank's own
@@ -532,6 +536,75 @@ whole-case files and can be loaded with a different worker count.
 the host. It remains available when all visualization output flags are False. This
 replaces the former root-only writer; the host no longer retains a full restart
 payload between calls.
+
+### Resident calculation chunks
+
+Set `resident=True` to retain the native workspace between calls. The default is
+False, so the full-state restart workflow above remains available.
+
+```python
+resident_options = {
+    **options,
+    "resident": True,
+    "iterations": 50,
+    "mesh_sequence": False,
+    "multigrid_stages": None,
+    "restartFile": None,
+    "writevolumesolution": False,
+    "writeTecplotSurfaceSolution": False,
+    "writeflowsolution": False,
+}
+
+with CFL3D(options=resident_options) as solver:
+    first = solver.solve()                 # Initialize once, then advance 50 cycles
+    solver.setOptions({"cfl": 1.0, "iterations": 25})
+    second = solver()                      # Advance 25 more cycles in memory
+    print(solver.getRuntimeInfo())          # Local counters/capacities, not RSS
+    loads = solver.getSolution()
+    solver.writeVolumeSolution()           # Optional explicit visualization
+# Workspace and borrowed MPI communicator are released collectively here.
+```
+
+The resident mode currently supports implicit steady cold initialization with
+one initial mesh-sequence stage. Multilevel V/W cycles are supported; their
+coarse-level state/work arrays remain alive. Initial coarse-to-fine sequencing,
+custom `multigrid_stages`, file restart initialization and full-state snapshot
+operations (`getFlowState`, `setFlowState`, `writeRestartFile`) are not yet
+implemented for this mode and raise explicit errors. Volume/PLOT3D visualization
+is supported, but no automatic native `_restart.bin` accompanies it.
+
+Each solve returns that call's history rows and consumes the usual output index.
+`start_mode="restart"` is retained as the continuation label; a resident advance
+does not use a restart file. With `numberSolutions=False`, logs/history append to
+the active index while visualizations update. With True, diagnostics and outputs
+use new numbered names. Initial preprocessing logs belong to the initial index;
+compatible later calls do not preprocess again. Registered slices/lift
+distributions still write their Tecplot files automatically after each solve.
+
+With all visualization flags False and no registered surface analyses, a resident
+advance writes no grid, internal restart or automatic solution NPZ. Native text
+logs and residual/turbulence/alpha histories still write. `restart_interval`
+does not enable internal checkpoints in this mode. History arrays grow as needed
+and retain all completed rows; their memory grows with total cycles.
+
+Warm resident updates currently cover `cfl`, `iterations`, I/O settings and
+`freestream_pressure` (dimensional post-processing only). Changing other settings
+or the mesh closes the old context and cold initializes a new one, reporting
+`reset_reasons`. Switching `resident` modes also cold initializes. Unchanged
+startup/ramp/lift-control counters survive warm calls;
+changing CFL while a ramp is active has not been validated. Chunk length can be
+shorter than the configured first-order startup period without restarting it.
+
+`close()` releases the authoritative native state without advancing or exporting
+a snapshot. Last result readouts remain available for queries/deferred output;
+another solve after close starts cold. `resetFlow()` also closes the context and
+clears restart inputs, preserving output numbering. An active resident owner must
+close before another object solves in that Python process. The owner is retained
+until explicit close; use a `with` block for a defined lifetime. In MPI, calls,
+updates and cleanup involve every member of `solver.comm`. One duplicated native
+communicator lives across the chunks; closing does not finalize MPI or free the
+user's communicator. See [distributed-storage.md](distributed-storage.md) for the
+native boundaries and regression evidence.
 
 ## MPI
 
@@ -954,6 +1027,7 @@ PYTHONPATH=tests/python mpirun -np 3 python tests/python/validate_runtime_mpi.py
 PYTHONPATH=tests/python mpirun -np 3 python tests/python/validate_runtime_mpi.py --auto --model sst2003 --directory build/mpi-sst2003-check
 PYTHONPATH=tests/python mpirun -np 4 python tests/python/validate_runtime_mpi.py --split --directory build/mpi-runtime-check
 PYTHONPATH=tests/python mpirun -np 3 python tests/python/validate_solution_io_mpi.py --directory build/mpi-io-check
+PYTHONPATH=tests/python mpirun -np 3 python tests/python/validate_resident_runtime_mpi.py --directory build/mpi-resident-check
 ```
 
 Use fresh validation output directories for scripts that assert initial output

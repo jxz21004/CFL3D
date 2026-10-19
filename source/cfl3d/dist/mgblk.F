@@ -431,6 +431,12 @@ c     at this boundary; caller-owned arrays and scalar state remain resident.
             ncyc=icyc
             go to 7011
          end if
+c        Open-ended sessions extend this same stage, preserving icyc/ntt,
+c        startup counters, CFL ramps and all coarse-grid work arrays.
+         if (py_resident_open_ended) then
+            ncyc1(iseq)=py_stages(1,1)
+            ncyc=ncyc1(iseq)
+         end if
          if (py_resident_cfl.gt.0.d0) then
             dt=-py_resident_cfl
             dt0=dt
@@ -2504,7 +2510,8 @@ c
 #ifdef PYTHON_API
       if (py_resident_enabled) then
          py_resident_done=ntt
-         if (ntt.ge.py_resident_stop .and. icyc.lt.ncyc) then
+         if (ntt.ge.py_resident_stop .and.
+     .       (py_resident_open_ended .or. icyc.lt.ncyc)) then
             py_resident_paused=.true.
             return
          end if
