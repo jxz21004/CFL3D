@@ -42,7 +42,7 @@ options = {
     "y_up": False,
     "cfl": 2.0,                         # Native DT=-2: local time stepping
     "iterations": 1000,
-    "limiter": 2,
+    "limiter": 4,
     "multigrid_levels": 1,
     "numberSolutions": True,
     "writevolumesolution": True,
@@ -205,8 +205,8 @@ that saved angle while retaining the flow as an initial guess.
 | `first_order_iterations` | `0` | NITFO on the final/default stage |
 | `coarse_first_order_iterations` | `0` | NITFO on each preliminary mesh-sequence stage |
 | `restart_interval` | `None` | NWREST checkpoint frequency; None uses the configured stage-iteration total |
-| `limiter` | `0` | IFLIM: 0..4, scalar or `(i,j,k)` |
-| `flux` | `1` | IFDS: 0 or 1, scalar or `(i,j,k)` |
+| `limiter` | `4` | IFLIM: smooth limiter tuned to kappa=1/3 and invariant under block splitting; 0..4, scalar or `(i,j,k)` |
+| `flux` | `1` | IFDS: 0 van Leer flux-vector splitting, 1 Roe flux-difference splitting; scalar or `(i,j,k)` |
 | `inversion` | `1` | IDIAG: 0 block-tridiagonal, 1 scalar-tridiagonal; scalar or `(i,j,k)` |
 | `kappa` | `1/3` | RKAP reconstruction parameter, scalar or `(i,j,k)` |
 | `turbulence_subiterations` | `1` | Positive turbulence subiteration count |
@@ -218,6 +218,42 @@ zone. Options dictionaries also accept three-element lists. First-order counts
 must not exceed their corresponding stage counts. `restart_interval` must be
 positive when specified; complete state is cached at the end of every solve even
 when visualization outputs are disabled.
+
+`limiter=4` is the default for newly constructed solvers. It is the corrected
+multi-block version of limiter 3, with a cutoff based on the total cell count.
+Both are tuned to `kappa=1/3`; their limited reconstruction does not use an
+arbitrary user-supplied kappa in the same way as the unlimited scheme. Set
+`limiter=0` explicitly for unlimited reconstruction, including reproduction of
+older runs that relied on the previous default of 0. Changing this default can
+change convergence histories and computed loads. Explicit limiter values are
+preserved.
+
+`flux` selects the inviscid numerical flux used to form the residual. `inversion`
+selects how the implicit update is solved in each grid direction: 0 uses coupled
+5-by-5 block-tridiagonal systems, while 1 uses a diagonalized scalar-tridiagonal
+approximation to reduce the cost per iteration. Both are implicit; these options
+do not select steady versus unsteady flow. The default `flux=1, inversion=1`
+uses Roe fluxes and scalar inversions.
+
+`restart_interval` controls native binary checkpoint updates during a solve, not
+the frequency of Python CGNS, Tecplot, or PLOT3D snapshots. Those exports are
+written after each completed `solve()`, according to their output flags. The
+native checkpoint uses the internal temporary `.cfl3d-state.bin`; a completed
+solve caches its bytes and removes that temporary file. Numbered restart exports
+are separate final snapshots. For
+example, to write every 100 fine-grid iterations across ten continued calls:
+
+```python
+solver.setOptions({"iterations": 100, "numberSolutions": True})
+for _ in range(10):
+    result = solver.solve()
+```
+
+Each call uses the cached flow after the first and allocates another output
+index. Explicit multigrid stages override `iterations`; an initial mesh sequence
+can also add preliminary coarse-grid work. The interface currently has no
+within-call visualization output interval. Native NPLOT3D/NPRINT count requested
+output data sets, rather than specifying an iteration interval.
 
 ### Multigrid and mesh sequencing
 

@@ -51,7 +51,7 @@ def main():
         "full_navier_stokes": True,
         "cfl": 1.0,
         "iterations": args.iterations,
-        "limiter": 2,                       # 也可设为 (i, j, k) 三元组
+        "limiter": 4,                       # kappa=1/3 平滑限制器；也可设为 (i, j, k)
         "flux": 1,
         "inversion": 1,
         "kappa": 1.0 / 3.0,

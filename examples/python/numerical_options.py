@@ -15,7 +15,7 @@ def add_numerical_options(parser):
     parser.add_argument("--alpha-relaxation", type=float, default=1.)
     parser.add_argument("--alpha-step-limit", type=float, default=.2, help="Degrees per CL-control update")
     parser.add_argument("--alpha-update-interval", type=int, default=1)
-    parser.add_argument("--limiter", type=int, nargs="+", default=[0], choices=range(5),
+    parser.add_argument("--limiter", type=int, nargs="+", default=[4], choices=range(5),
                         help="One value for all directions, or three values in i j k order")
     parser.add_argument("--flux", type=int, nargs="+", default=[1], choices=(0, 1))
     parser.add_argument("--inversion", type=int, nargs="+", default=[1], choices=(0, 1))

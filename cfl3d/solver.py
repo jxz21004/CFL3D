@@ -100,7 +100,7 @@ class SolverOptions:
     turbulence_cfl: float = 5.0
     eddy_viscosity_limit: float = 1e5  # 按用户要求保留较保守的 Python 默认值。
     gamma: float = 1.4
-    limiter: int | tuple[int, int, int] = 0
+    limiter: int | tuple[int, int, int] = 4  # Smooth kappa=1/3 limiter, invariant under block splitting.
     flux: int | tuple[int, int, int] = 1
     kappa: float | tuple[float, float, float] = 1.0 / 3.0
     y_up: bool = False

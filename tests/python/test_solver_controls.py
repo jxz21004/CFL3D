@@ -29,10 +29,26 @@ class ControlValidationTests(unittest.TestCase):
             with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
                 CFL3D(box_mesh(), SolverOptions(**kwargs))
         self.assertEqual(SolverOptions().eddy_viscosity_limit, 1e5)
+        self.assertEqual(SolverOptions().limiter, 4)
 
 
 @unittest.skipUnless(importlib.util.find_spec("cfl3d._native"), "Build the native extension first")
 class NativeControlTests(unittest.TestCase):
+    def test_default_limiter_matches_explicit_four_and_allows_unlimited(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            options = SolverOptions(turbulence="sst", iterations=5, cfl=1., multigrid_levels=2,
+                                    writevolumesolution=False, writeTecplotSurfaceSolution=False)
+            default = CFL3D(flatplate_mesh(), options).solve(output_directory=root / "default")
+            explicit = CFL3D(flatplate_mesh(), replace(options, limiter=(4, 4, 4))).solve(
+                output_directory=root / "explicit")
+            np.testing.assert_array_equal(default.history, explicit.history)
+            np.testing.assert_array_equal(default.fields['flatplate'], explicit.fields['flatplate'])
+            unlimited = CFL3D(flatplate_mesh(), replace(options, limiter=0)).solve(
+                output_directory=root / "unlimited")
+            self.assertTrue(np.isfinite(unlimited.fields['flatplate']).all())
+            self.assertGreater(np.max(np.abs(default.fields['flatplate']-unlimited.fields['flatplate'])), 0.)
+
     def test_cl_updates_respect_step_limit_interval_and_reset(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
