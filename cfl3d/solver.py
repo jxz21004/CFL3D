@@ -531,8 +531,10 @@ class SolverResult:
 class CFL3D:
     """Native solver with an optional collective mpi4py communicator.
 
-    Solves are serialized because the legacy core uses COMMON state. After a
-    native failure, start a fresh Python process before attempting another solve.
+    Disjoint MPI communicators can solve independent cases simultaneously.
+    Within one Python process, native calls share COMMON state and are serialized;
+    one resident object owns that rank until close. After a native failure, start
+    a fresh Python process before attempting another solve.
     """
 
     def __init__(self, mesh=None, options=None, *, boundary_overrides=None, comm=_AUTO_COMM, groups=None, name=None):
@@ -1781,7 +1783,7 @@ class CFL3D:
                 from ._runtime import check_owner
                 check_owner(self)
                 if not acquired:
-                    raise RuntimeError("CFL3D uses process-global Fortran state; concurrent solves are unsupported")
+                    raise RuntimeError("CFL3D uses process-global Fortran state; concurrent native solves within one Python process are unsupported")
             self._checked(check_lock)
             if self.comm is not None:
                 # 给核心独立的消息空间；它借用这个副本，Python 负责释放，且不 Finalize MPI。
@@ -1797,7 +1799,7 @@ class CFL3D:
                 _native.py_set_restart_controls(int("alpha" in changed_options))
                 status = _native.py_configure(**arrays)
                 if status == 3:
-                    raise RuntimeError("A resident native context is active; close it before configuring another solver")
+                    raise RuntimeError("A resident native context is active in this Python process; close it before configuring another solver")
                 if status:
                     raise RuntimeError(f"Native configuration failed ({status}); start a fresh interpreter")
                 _native.py_set_coordinates(xyz)

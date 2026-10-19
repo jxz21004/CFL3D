@@ -180,7 +180,10 @@ are not part of this proposed design.
 Communicators remain valid for the lifetime of the native context, rather than
 being duplicated/freed per calculation chunk. The public lifecycle enforces one
 resident owner per process: the legacy COMMON state is process-global, and another
-object must not overwrite it. Automatic context switching is not implemented.
+object in that process must not overwrite it. Disjoint communicators have separate
+processes and can run their cases simultaneously. This is a per-rank ownership
+rule, not a job-wide serialization requirement. Automatic context switching within
+one process is not implemented.
 History capacity, convergence normalization, CFL-ramp counters, first-order
 startup and lift-control counters must also survive calculation boundaries or be
 updated according to a documented explicit option change.
@@ -290,8 +293,9 @@ Current prototype boundaries:
   does not establish arbitrary runtime option-update semantics.
 - One active native context per process. It borrows a communicator that must stay
   alive until close. The public object retains one duplicated communicator and
-  releases it collectively at close. Other objects cannot solve until the owner
-  closes; implicit swapping of native contexts is not implemented.
+  releases it collectively at close. Independent cases on disjoint communicators
+  solve simultaneously. Other objects in the same process wait until their local
+  owner closes; implicit swapping of native contexts is not implemented.
 - Resident `FlowState` snapshots and file restart initialization are not implemented.
   Public result queries, deferred visualization, numbered/append output and
   registered slices/lift distributions use the existing rank-local readouts.

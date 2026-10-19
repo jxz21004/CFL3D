@@ -600,7 +600,8 @@ a snapshot. Last result readouts remain available for queries/deferred output;
 another solve after close starts cold. `resetFlow()` also closes the context and
 clears restart inputs, preserving output numbering. An active resident owner must
 close before another object solves in that Python process. The owner is retained
-until explicit close; use a `with` block for a defined lifetime. In MPI, calls,
+until explicit close; use a `with` block for a defined lifetime. Independent cases
+on disjoint communicators can remain resident and solve simultaneously. In MPI, calls,
 updates and cleanup involve every member of `solver.comm`. One duplicated native
 communicator lives across the chunks; closing does not finalize MPI or free the
 user's communicator. See [distributed-storage.md](distributed-storage.md) for the
@@ -682,23 +683,46 @@ Root changes are not silently broadcast over explicit rank-local options. Passin
 `options=None` on a non-root rank is a compatibility shorthand for inheriting the
 root's initial options.
 
-Use subcommunicators to run independent cases or exclude processes assigned to
-other work. For example, with four processes, two cases can each use two ranks:
+### Independent cases on disjoint communicators
+
+Independent cases can solve simultaneously in one MPI job by assigning each case
+a communicator with a disjoint set of ranks. Each MPI rank is a Python process;
+the restriction is one active resident case per process, not one case for the
+entire MPI job. Rank membership is distinct from physical CPU-core affinity.
+Separate case names and output directories keep their files independent.
+
+For example, with four processes, world ranks 0-1 solve case 0 while world ranks
+2-3 solve case 1. Each case has its own native host and worker:
 
 ```python
 world = MPI.COMM_WORLD
 case_id = world.rank // 2
 case_comm = world.Split(case_id, world.rank)
-case_options = {**options, "output_directory": f"case-{case_id}-results"}
-solver = CFL3D(options=case_options, comm=case_comm)
-result = solver()
-case_comm.Free()
+case_options = {
+    **options,
+    "name": f"case_{case_id}",
+    "output_directory": f"case-{case_id}-results",
+    "resident": True,
+}
+try:
+    with CFL3D(options=case_options, comm=case_comm) as solver:
+        result = solver()
+        # Further solves and option updates involve this case_comm only.
+finally:
+    case_comm.Free()  # Release after the resident context has closed.
 ```
+
+All members of a case communicator call that case's collective operations. Ranks
+assigned to other cases do not join them. Communicators for simultaneously active
+cases must not share ranks. Within one process, another object may solve after
+the resident owner closes; changing names/directories alone does not isolate its
+Fortran COMMON state. This limit does not serialize the independent cases above.
 
 An excluded rank can use `MPI.UNDEFINED` in `Split` and must not construct or call a
 solver on `MPI.COMM_NULL`. The object checks membership in its supplied communicator,
-not the entire world. It duplicates that communicator for native messages and
-releases the duplicate afterward; it does not finalize MPI.
+not the entire world. It duplicates that communicator for native messages. With
+`resident=True`, the duplicate remains valid across chunks and is freed at close;
+the default nonresident path frees it after each solve. Neither path finalizes MPI.
 
 Ranks retain their owned coordinate/flow/wall/restart arrays. Automatic files are
 written by comm root; workers have separate `rank-0001/` work directories.
@@ -1050,9 +1074,11 @@ loads, and the flow before treating a result as converged. Validation to date
 includes interface consistency and short calculations; production-scale behavior
 and long-run convergence require case-specific assessment.
 
-The core uses process-global COMMON state, so simultaneous solves in one Python
-process are unsupported. Native execution temporarily changes the process working
-directory; other threads should not depend on relative paths during a solve.
+Independent cases on disjoint MPI communicators can solve simultaneously. Within
+one Python process, native calls are serialized because COMMON state is shared;
+one active resident case occupies that rank until close. Native execution temporarily
+changes the process working directory; other threads should not depend on relative
+paths during a solve.
 Intercepted serial native errors return RuntimeError through a C guard, but may leave native
 allocations behind: start a fresh Python process after such an error. Native MPI
 errors abort the job. Python-side configuration errors are checked collectively

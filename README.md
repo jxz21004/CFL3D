@@ -20,7 +20,8 @@ This project retains the Fortran solver and provides a programmable interface fo
   opt-in resident mode retains the native workspace across calculation chunks.
   Parameter changes can continue a calculation or trigger initialization.
 - **Parallel workflows:** an explicit MPI communicator defines which processes
-  belong to a case, including independent cases within one MPI job.
+  belong to a case. Disjoint communicators can solve independent cases
+  simultaneously within one MPI job, with one active resident case per MPI rank.
 - **Data access:** flow arrays, convergence histories, component loads, Cp sections,
   and lift distributions are available to Python for subsequent analysis.
 - **Controlled output:** computation and file writing can be separated, with

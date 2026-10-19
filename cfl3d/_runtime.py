@@ -2,7 +2,8 @@
 
 The strong owner reference is deliberate: garbage collection must not release
 an MPI communicator while Fortran still borrows it. Close collectively, preferably
-using ``with CFL3D(...):``. The native solver remains process-global.
+using ``with CFL3D(...):``. Ownership is local to each Python process/MPI rank;
+disjoint communicators can run independent cases simultaneously.
 """
 from pathlib import Path
 import os
@@ -12,7 +13,7 @@ _active_context = None
 
 def check_owner(solver):
     if _active_context is not None and _active_context.solver is not solver:
-        raise RuntimeError("Another CFL3D object owns the resident native context; close it collectively first")
+        raise RuntimeError("Another CFL3D object in this Python process owns the resident native context; close it collectively first")
 
 
 class ResidentContext:
@@ -42,7 +43,7 @@ class ResidentContext:
             def validate():
                 check_owner(solver)
                 if not acquired:
-                    raise RuntimeError("CFL3D uses process-global Fortran state; concurrent solves are unsupported")
+                    raise RuntimeError("CFL3D uses process-global Fortran state; concurrent native solves within one Python process are unsupported")
                 if not first:
                     info = self.info()
                     if not info['active'] or not info['paused'] or info['cycles'] != self.cycles:
