@@ -588,7 +588,7 @@ class CFL3D:
                 return Path(stem+default)
             path = Path(configured)
             return path.with_name(stem+"_"+path.name)
-        surface = filename(self.options.surface_filename, "_surf.dat")
+        surface = filename(self.options.surface_filename, "_surf.plt")
         return {"volume": filename(self.options.volume_filename, "_volume.cgns"),
                 "surface": surface,
                 "slices": surface.parent/(stem+"_slices.dat"),
@@ -849,7 +849,7 @@ class CFL3D:
         return files
 
     def writeTecplotSurfaceSolution(self, filename=None, groupName=None):
-        """Write cached wall quads and registered analyses for the same solve index."""
+        """Write cached wall quads as Tecplot ASCII (default .plt) and registered analyses."""
         if self.comm is not None and self.comm.Get_rank() != 0:
             return None
         path = self._output_path(filename, self._last_output_names["surface"] if self._last_result else "")

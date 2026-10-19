@@ -74,13 +74,13 @@ def main():
                 np.testing.assert_allclose(solver.getLiftDistribution()['bin_'+name].sum(),total['Wing_'+name],
                                            rtol=2e-13,atol=2e-14)
             output = result.output_directory
-            for name in ('out_000_volume.cgns','out_000_surf.dat','out_000_flow.x','out_000_flow.q','out_000_restart.bin'):
+            for name in ('out_000_volume.cgns','out_000_surf.plt','out_000_flow.x','out_000_flow.q','out_000_restart.bin'):
                 assert not (output/name).exists(),name
             # Root-only deferred writes must not contain any MPI collective.
             solver.writeVolumeSolution()
             solver.writeTecplotSurfaceSolution()
             solver.writeFlowSolution()
-            for name in ('out_000_surf.dat','out_000_lift.dat','out_000_slices.dat','out_000_flow.x','out_000_flow.q'):
+            for name in ('out_000_surf.plt','out_000_lift.dat','out_000_slices.dat','out_000_flow.x','out_000_flow.q'):
                 assert (output/name).read_bytes()==(root/'serial'/name).read_bytes(),name
             loaded = CGNSMesh.from_file(output/'out_000_volume.cgns')
             for a,b in zip(loaded.zones,solver.mesh.zones):
@@ -96,7 +96,7 @@ def main():
     second_reference = None
     if comm.rank == 0:
         first_files = {name:(result.output_directory/name).read_bytes() for name in
-                       ('out_000_surf.dat','out_000_slices.dat','out_000_lift.dat','out_000_solution.npz')}
+                       ('out_000_surf.plt','out_000_slices.dat','out_000_lift.dat','out_000_solution.npz')}
         serial.setOption('iterations',2)
         second_reference = serial.solve()
     second_reference = comm.bcast(second_reference,root=0)
@@ -112,7 +112,7 @@ def main():
                 assert (second.output_directory/name).read_bytes()==content,name
             for name in ('out_001_slices.dat','out_001_lift.dat','out_001_solution.npz'):
                 assert (second.output_directory/name).read_bytes()==(root/'serial'/name).read_bytes(),name
-            assert not (second.output_directory/'out_001_surf.dat').exists()
+            assert not (second.output_directory/'out_001_surf.plt').exists()
     solver._checked(check_second)
     # Keep this output number for a shorter continuation chunk on all ranks.
     append_reference = None

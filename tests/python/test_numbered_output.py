@@ -94,7 +94,7 @@ class NumberedOutputTests(unittest.TestCase):
             solver.addSlices("y", -0.5, "absolute", "Wing")
             first = solver.solve()
             self.assertEqual((first.name, first.solve_index, solver.nSolve), ("out", 0, 1))
-            self.assertFalse((root / "out_000_surf.dat").exists())
+            self.assertFalse((root / "out_000_surf.plt").exists())
             saved = {}
             for name in ("out_000_slices.dat", "out_000_lift.dat", "out_000_solution.npz"):
                 saved[name] = (root / name).read_bytes()
@@ -114,7 +114,7 @@ class NumberedOutputTests(unittest.TestCase):
             second = solver.solve()
             self.assertEqual((second.solve_index, solver.nSolve), (1, 2))
             for name in (
-                "out_001_surf.dat",
+                "out_001_surf.plt",
                 "out_001_slices.dat",
                 "out_001_lift.dat",
                 "out_001_volume.cgns",
@@ -137,11 +137,11 @@ class NumberedOutputTests(unittest.TestCase):
                 self.assertEqual((root / name).read_bytes(), content)
             # Changing the live name cannot rename the cached result's deferred outputs.
             solver.name = "nextcase"
-            self.assertEqual(solver.writeTecplotSurfaceSolution().name, "out_002_surf.dat")
+            self.assertEqual(solver.writeTecplotSurfaceSolution().name, "out_002_surf.plt")
             self.assertEqual(solver.writeRestartFile().name, "out_002_restart.npz")
             fourth = solver.solve()
             self.assertEqual((fourth.name, fourth.solve_index), ("nextcase", 3))
-            self.assertTrue((root / "nextcase_003_surf.dat").exists())
+            self.assertTrue((root / "nextcase_003_surf.plt").exists())
             # Configuration errors do not consume an output index.
             solver.setOption("input_grid", "another.cgns")
             with self.assertRaises(FileNotFoundError):

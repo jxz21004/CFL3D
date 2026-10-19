@@ -566,7 +566,7 @@ separators. Different concurrent cases should use different names/directories.
 | Content | Default first output, name=out |
 | --- | --- |
 | Volume CGNS/ADF | `out_000_volume.cgns` |
-| Tecplot ASCII wall | `out_000_surf.dat` |
+| Tecplot ASCII wall | `out_000_surf.plt` |
 | Cp sections / lift distribution | `out_000_slices.dat` / `out_000_lift.dat` |
 | PLOT3D | `out_000_flow.x` / `out_000_flow.q` |
 | Python result | `out_000_solution.npz` |
@@ -574,6 +574,10 @@ separators. Different concurrent cases should use different names/directories.
 | Default `writeRestartFile()` checkpoint | `out_000_restart.npz` |
 | Native log / residual / turbulence / trim history | `out_000.out` / `.res` / `.turres` / `.alpha` |
 | Preprocessor log / last native status | `out_000_precfl3d.out` / `out_000.error` |
+
+The surface `.plt` file contains Tecplot ASCII text, not Tecplot binary data.
+The extension is a filename convention; slices and lift distributions retain
+their `.dat` extensions. Explicit surface filenames keep the suffix you provide.
 
 Fortran writes numbered logs from the beginning of computation. It does not first
 write a fixed `cfl3d.out` and copy it afterward. Existing files from older versions
