@@ -71,7 +71,7 @@ def main():
                         assert actual[key]==expected[key],key
             total = solver.getSolution('Wing')
             for name in ('CL','CD','CDp','CDv'):
-                np.testing.assert_allclose(solver.getLiftDistribution()['bin_'+name].sum(),total[name],
+                np.testing.assert_allclose(solver.getLiftDistribution()['bin_'+name].sum(),total['Wing_'+name],
                                            rtol=2e-13,atol=2e-14)
             output = result.output_directory
             for name in ('out_000_volume.cgns','out_000_surf.dat','out_000_flow.x','out_000_flow.q','out_000_restart.bin'):

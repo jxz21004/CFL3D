@@ -500,8 +500,10 @@ solver = CFL3D(options=options, groups={"Aircraft": ["Wing", "Tail"]})
 result = solver()
 print(solver.getGroupNames())
 loads = solver.getSolution("Aircraft")
-print(loads["CL"], loads["CD"], loads["CDp"], loads["CDv"], loads["Cmy"])
-print(loads["L"], loads["D"], loads["My"])
+print(loads["Aircraft_CL"], loads["Aircraft_CD"], loads["Aircraft_CDp"], loads["Aircraft_CDv"])
+print(loads["Aircraft_CX"], loads["Aircraft_CY"], loads["Aircraft_CZ"])
+print(loads["Aircraft_Fx"], loads["Aircraft_Fy"], loads["Aircraft_Fz"])
+print(loads["Aircraft_Cmy"], loads["Aircraft_My"], loads["Aircraft_wettedArea"])
 solver.addGroups({"WingOnly": ["Wing"]})
 ```
 
@@ -522,20 +524,37 @@ on the finest grid, before its arrays are released.
 
 | Field | Meaning / unit |
 | --- | --- |
-| `CL`, `CD`, `CY` | Lift, drag, and input-Y force coefficients |
+| `CL`, `CD` | Lift and drag coefficients in native wind axes |
+| `CX`, `CY`, `CZ` | Force coefficients along the input mesh x/y/z axes |
 | `CDp`, `CDv` | Pressure and viscous drag coefficients; `CD = CDp + CDv` |
 | `Cmx`, `Cmy`, `Cmz` | Moment coefficients in input coordinates |
-| `L`, `D`, `Y`, `Dp`, `Dv` | Corresponding forces, N |
+| `L`, `D`, `Dp`, `Dv` | Lift, drag, pressure drag, and viscous drag, N |
+| `Fx`, `Fy`, `Fz` | Forces along the input mesh x/y/z axes, N; `Fy` replaces the former `Y` key |
 | `Mx`, `My`, `Mz` | Corresponding moments, N*m |
+| `wettedArea` | Total selected wall area, m^2, including inviscid walls; no symmetry multiplier |
 | `units` | Unit dictionary for dimensional outputs |
 
-CL/CD/CDp/CDv follow native wind axes. CY and moments use input coordinates; with
-y-up grids CY is the vertical input-Y force, not a lateral side-force coefficient.
+The table lists keys for `groupName=None`. Supplying a group prefixes every
+numerical key with `<groupName>_`, including coefficients, dimensional loads, and
+area: `Wing_CL`, `Wing_Fy`, and `Wing_wettedArea`. The `units` dictionary remains
+named `units`, with matching prefixed entries such as `units["Wing_Fy"] == "N"`.
+
+CL/CD/CDp/CDv follow native wind axes. CX/CY/CZ and moments use input coordinates;
+with y-up grids CY is the vertical input-Y force, not a lateral side-force
+coefficient. Use the Cartesian components when comparing forces across span/axis
+conventions. Wetted area is computed from two triangles per cached wall quad;
+farfield, symmetry, and other non-wall boundaries contribute no area. Overlapping
+group members are counted once. Coordinates are assumed to be in metres.
 The dimensional conversion is `q_inf = 0.5 * gamma * p_inf * mach**2`,
 `force = coefficient * q_inf * sref`. Moment-reference lengths for x/y/z are
 `bref/cref/bref` when `y_up=False` and `bref/bref/cref` when True. Moments are about
-`moment_center`. Dimensional queries require `freestream_pressure`; nondimensional
-`result.coefficients` remains usable without it. Queries are local on any rank.
+`moment_center`. The pressure saved at solve time takes precedence. If it was not
+set, `getSolution()` also accepts `solver.options["freestream_pressure"]` supplied
+after the solve; all other conversion quantities still come from that solution's
+saved options. If neither supplies pressure, an English `RuntimeWarning` explains
+that absolute loads cannot be determined. The call returns coefficients and
+`wettedArea`, and omits all dimensional forces and moments. Queries are local on
+any rank and do not rerun the solver.
 
 ## Output numbering and deferred writing
 
@@ -645,7 +664,7 @@ result = solver()
 lift = solver.getLiftDistribution(0)
 print(lift["stations"], lift["dCL_ds"], lift["dCDp_ds"], lift["dCDv_ds"])
 print((lift["dCL_ds"] * lift["width"]).sum())
-print(solver.getSolution("Wing")["CL"])
+print(solver.getSolution("Wing")["Wing_CL"])
 sections = solver.getSlices()            # getSlices(0) returns one section
 print(sections[0]["coordinates"], sections[0]["Cp"])
 ```

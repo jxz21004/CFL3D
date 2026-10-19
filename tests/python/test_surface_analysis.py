@@ -128,9 +128,9 @@ class NativeAnalysisTests(unittest.TestCase):
             d = solver.getLiftDistribution()
             total = solver.getSolution("Wing")
             for key in ("CL", "CD", "CDp", "CDv"):
-                self.assertAlmostEqual(d["bin_" + key].sum(), total[key], places=13)
-                self.assertAlmostEqual(np.sum(d["d" + key + "_ds"] * d["width"]), total[key], places=13)
-            self.assertAlmostEqual(np.sum(d["dL_ds"] * d["width"]), total["L"], places=10)
+                self.assertAlmostEqual(d["bin_" + key].sum(), total['Wing_'+key], places=13)
+                self.assertAlmostEqual(np.sum(d["d" + key + "_ds"] * d["width"]), total['Wing_'+key], places=13)
+            self.assertAlmostEqual(np.sum(d["dL_ds"] * d["width"]), total["Wing_L"], places=10)
             self.assertGreater(abs(d["force_angles"][0] - result.final_alpha), 1e-4)
             cuts = solver.getSlices()
             for cut in cuts:
@@ -166,7 +166,7 @@ class NativeAnalysisTests(unittest.TestCase):
             self.assertEqual(len(solver.getSlices(3)["Cp"]), 0)
             solver.addLiftDistribution(7, "x", "Forward")
             self.assertAlmostEqual(
-                solver.getLiftDistribution(1)["bin_CL"].sum(), solver.getSolution("Forward")["CL"], places=13
+                solver.getLiftDistribution(1)["bin_CL"].sum(), solver.getSolution("Forward")["Forward_CL"], places=13
             )
             solver.writeTecplotSurfaceSolution(root / "custom.dat")
             self.assertTrue((root / "custom_slices.dat").exists())

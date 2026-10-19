@@ -3,6 +3,7 @@ import importlib.util
 from pathlib import Path
 import tempfile
 import unittest
+import warnings
 
 import numpy as np
 from cfl3d import CFL3D, CGNSMesh, SolverOptions
@@ -49,17 +50,19 @@ class SurfaceForceTests(unittest.TestCase):
             solver = CFL3D(path, options, groups={"Combined": ["Forward", "Aft"]})
             result = solver.solve(output_directory=root / "first")
             total = solver.getSolution()
-            combined = solver.getSolution("Combined")
-            family = solver.getSolution("Wing")
             solver.addGroups({"Overlap": ["Wing", "Forward", "Wing"]})
-            self.assertEqual(total, combined)
-            self.assertEqual(total, family)
-            self.assertEqual(total, solver.getSolution("Overlap"))
+            for group in ("Combined", "Wing", "Overlap"):
+                grouped = solver.getSolution(group)
+                self.assertEqual(set(grouped), {group+'_'+key for key in total if key != 'units'} | {'units'})
+                for key in total:
+                    if key != 'units':
+                        self.assertEqual(total[key], grouped[group+'_'+key])
+                self.assertEqual(grouped['units'], {group+'_'+key: unit for key, unit in total['units'].items()})
             a, b = solver.getSolution("Forward"), solver.getSolution("Aft")
             for key in total:
                 if key != "units":
-                    self.assertAlmostEqual(total[key], a[key]+b[key], places=11)
-            for key in ("CL", "CD", "CY", "Cmx", "Cmy", "Cmz"):
+                    self.assertAlmostEqual(total[key], a['Forward_'+key]+b['Aft_'+key], places=11)
+            for key in ("CL", "CD", "CX", "CY", "Cmx", "Cmy", "Cmz"):
                 native_key = key.upper() if key.startswith("Cm") else key
                 self.assertAlmostEqual(total[key], float(result.coefficients[native_key]), places=12)
             self.assertAlmostEqual(total["CD"], total["CDp"]+total["CDv"], places=13)
@@ -69,6 +72,19 @@ class SurfaceForceTests(unittest.TestCase):
             self.assertAlmostEqual(total["D"], total["CD"]*scale, places=12)
             self.assertAlmostEqual(total["Dp"]+total["Dv"], total["D"], places=11)
             self.assertAlmostEqual(total["My"], total["Cmy"]*scale*options.cref, places=12)
+            for axis in 'xyz':
+                self.assertAlmostEqual(total['F'+axis], total['C'+axis.upper()]*scale, places=12)
+            self.assertNotIn('Y', total)
+            mesh = solver._last_mesh
+            # This fixture is a planar plate: span times wall length is its exact area.
+            area = 0.
+            for zone in mesh.zones:
+                wall = next(bc for bc in zone.boundaries if bc.name == 'plate')
+                lo, hi = np.sort(wall.point_range, axis=1).T - 1
+                a0, b0 = zone.coordinates[tuple(lo)], zone.coordinates[tuple(hi)]
+                area += abs((b0[0]-a0[0])*(b0[1]-a0[1]))
+            self.assertAlmostEqual(total['wettedArea'], area, places=13)
+            self.assertEqual(total['units']['wettedArea'], 'm^2')
             self.assertEqual(total["units"]["D"], "N")
             self.assertEqual(total["units"]["My"], "N*m")
             with np.load(root / "first/out_000_solution.npz") as saved:
@@ -83,6 +99,11 @@ class SurfaceForceTests(unittest.TestCase):
                 self.assertEqual(doubled[key], total[key])
             for key in ("L", "D", "Dp", "Dv", "My"):
                 self.assertAlmostEqual(doubled[key], 2*total[key], places=11)
+            # Live edits cannot reinterpret pressure or geometry saved with an existing solution.
+            solver.options.freestream_pressure = 180000.
+            for zone in solver.mesh.zones:
+                zone.coordinates *= 2.
+            self.assertEqual(solver.getSolution(), total)
 
     def test_three_dimensional_moment_center_and_y_up(self):
         mesh = flatplate_mesh()
@@ -122,13 +143,33 @@ class SurfaceForceTests(unittest.TestCase):
                 expected = wall.copy()
                 expected[...,3], expected[...,4] = wall[...,4], -wall[...,3]
                 np.testing.assert_allclose(rotated.wall_fields[key], expected, rtol=2e-12, atol=1e-12)
+            np.testing.assert_allclose([c[k] for k in ('Fx', 'Fy', 'Fz')],
+                                       [a['Fx'], a['Fz'], -a['Fy']], rtol=2e-11, atol=1e-11)
+            self.assertAlmostEqual(c['wettedArea'], a['wettedArea'], places=13)
 
     def test_missing_pressure_and_unknown_group(self):
         with tempfile.TemporaryDirectory() as directory:
             solver = CFL3D(box_mesh(), SolverOptions(turbulence="euler", iterations=1))
             solver.solve(output_directory=directory)
-            with self.assertRaisesRegex(ValueError, "freestream_pressure"):
-                solver.getSolution()
+            with self.assertWarnsRegex(RuntimeWarning, "No freestream pressure.*absolute forces"):
+                loads = solver.getSolution()
+            self.assertEqual(set(loads), {'CL', 'CD', 'CX', 'CY', 'CZ', 'Cmx', 'Cmy', 'Cmz',
+                                         'CDp', 'CDv', 'wettedArea', 'units'})
+            self.assertEqual(loads['wettedArea'], 0.)
+            self.assertEqual(loads['units'], {'wettedArea': 'm^2'})
+            with self.assertWarns(RuntimeWarning):
+                grouped = solver.getSolution('zone0')
+            self.assertEqual(set(grouped), {'zone0_'+key for key in loads if key != 'units'} | {'units'})
+            self.assertEqual(grouped['units'], {'zone0_wettedArea': 'm^2'})
+            # Dimensional information can be supplied after solving, without touching cached flow.
+            solver.options.freestream_pressure = 90000.
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter('always')
+                dimensional = solver.getSolution()
+            self.assertFalse(caught)
+            scale = .5 * solver._last_options.gamma * 90000. * solver._last_options.mach**2 * solver._last_options.sref
+            for axis in 'xyz':
+                self.assertEqual(dimensional['F'+axis], loads['C'+axis.upper()]*scale)
             with self.assertRaisesRegex(ValueError, "Unknown surface group"):
                 solver.getSolution("missing")
 

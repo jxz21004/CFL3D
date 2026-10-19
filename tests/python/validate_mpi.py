@@ -80,15 +80,19 @@ def force_groups(enabled):
 
 def check_forces(solver, result):
     total = solver.getSolution()
-    assert total == solver.getSolution("Assembly") == solver.getSolution("Overlap") == solver.getSolution("Whole")
-    for key in ("CL", "CD", "CY", "Cmx", "Cmy", "Cmz"):
+    for group in ('Assembly', 'Overlap', 'Whole'):
+        grouped = solver.getSolution(group)
+        for key in total:
+            if key != 'units':
+                assert total[key] == grouped[group+'_'+key]
+    for key in ("CL", "CD", "CX", "CY", "Cmx", "Cmy", "Cmz"):
         native_key = key.upper() if key.startswith("Cm") else key
         np.testing.assert_allclose(total[key], result.coefficients[native_key], rtol=2e-11, atol=2e-13)
     np.testing.assert_allclose(total["CD"], total["CDp"]+total["CDv"], rtol=2e-11, atol=2e-13)
     parts = solver.getSolution("Part1"), solver.getSolution("Part2")
     for key in total:
         if key != "units":
-            np.testing.assert_allclose(total[key], sum(part[key] for part in parts), rtol=2e-11, atol=2e-11)
+            np.testing.assert_allclose(total[key], parts[0]['Part1_'+key]+parts[1]['Part2_'+key], rtol=2e-11, atol=2e-11)
     return total
 
 
@@ -215,7 +219,10 @@ def main():
             if comm.rank == 0:
                 # Only root calls these methods: they must never enter a collective.
                 solver.addGroups({"RootOnly": ["Part1"]})
-                assert solver.getSolution("RootOnly") == solver.getSolution("Part1")
+                root_loads, part_loads = solver.getSolution("RootOnly"), solver.getSolution("Part1")
+                for key in root_loads:
+                    if key != 'units':
+                        assert root_loads[key] == part_loads['Part1_'+key.removeprefix('RootOnly_')]
         comm.Barrier()  # Native solve must not finalize MPI.
     if comm.rank == 0:
         report_path = root / run_name / "report.json"

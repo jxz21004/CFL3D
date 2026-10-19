@@ -9,6 +9,7 @@ import threading
 import sys
 import json
 import hashlib
+import warnings
 from numbers import Real
 import numpy as np
 from .cgns import CGNSMesh
@@ -913,8 +914,11 @@ class CFL3D:
     def getSolution(self, groupName=None):
         """Return cached native pressure+viscous coefficients and SI loads after solve.
 
-        CL/CD/CDp/CDv use the native wind axes; CY and moments use the input
-        mesh axes. L/D/Y/Dp/Dv are N, moments Mx/My/Mz are N*m.
+        CL/CD/CDp/CDv use native wind axes; CX/CY/CZ and moments use input
+        mesh axes. Forces are N, moments N*m, and wettedArea m^2. Missing
+        freestream pressure warns and omits dimensional loads. A pressure added
+        to live options can supply missing dimensional information after solve.
+        A group prefixes all numerical keys and their entries in units.
         This is a local call: any rank may query without an MPI collective.
         """
         members = self._group_members(groupName)
@@ -922,20 +926,45 @@ class CFL3D:
                  if members else np.zeros(10))
         values = {name: float(total[index]) for index, name in enumerate(_SURFACE_COEFFICIENTS)}
         options = self._last_options
-        if options.freestream_pressure is None:
-            raise ValueError("Set SolverOptions(freestream_pressure=... in Pa) before solve() "
-                             "to obtain N and N*m; no static pressure is assumed")
-        dynamic_pressure = .5 * options.gamma * options.freestream_pressure * options.mach**2
-        scale = dynamic_pressure * options.sref
-        yref, zref = (options.bref, options.cref) if options.y_up else (options.cref, options.bref)
-        result = {name: values[name] for name in ("CL", "CD", "CY", "Cmx", "Cmy", "Cmz", "CDp", "CDv")}
-        result.update(L=values["CL"]*scale, D=values["CD"]*scale, Y=values["CY"]*scale,
-                      Dp=values["CDp"]*scale, Dv=values["CDv"]*scale,
-                      Mx=values["Cmx"]*scale*options.bref,
-                      My=values["Cmy"]*scale*yref, Mz=values["Cmz"]*scale*zref)
-        result["units"] = {name: "N" for name in ("L", "D", "Y", "Dp", "Dv")}
-        result["units"].update({name: "N*m" for name in ("Mx", "My", "Mz")})
-        return result
+        result = values.copy()
+        result["wettedArea"] = self._wetted_area(members)
+        units = {"wettedArea": "m^2"}
+        pressure = options.freestream_pressure
+        if pressure is None:
+            pressure = self.options.freestream_pressure
+        if pressure is None:
+            warnings.warn(
+                "No freestream pressure was set for the CFL3D calculation or provided in options; "
+                "absolute forces and moments cannot be determined. Returning coefficients and wetted area only.",
+                RuntimeWarning, stacklevel=2,
+            )
+        else:
+            dynamic_pressure = .5 * options.gamma * pressure * options.mach**2
+            scale = dynamic_pressure * options.sref
+            yref, zref = (options.bref, options.cref) if options.y_up else (options.cref, options.bref)
+            for force, coefficient in (("L", "CL"), ("D", "CD"), ("Dp", "CDp"), ("Dv", "CDv"),
+                                       ("Fx", "CX"), ("Fy", "CY"), ("Fz", "CZ")):
+                result[force] = values[coefficient] * scale
+                units[force] = "N"
+            for moment, coefficient, length in (("Mx", "Cmx", options.bref),
+                                                ("My", "Cmy", yref), ("Mz", "Cmz", zref)):
+                result[moment] = values[coefficient] * scale * length
+                units[moment] = "N*m"
+        prefix = "" if groupName is None else f"{groupName}_"
+        return {**{prefix + name: value for name, value in result.items()},
+                "units": {prefix + name: unit for name, unit in units.items()}}
+
+    def _wetted_area(self, members):
+        """Return selected cached wall area in m^2, counting overlapping members once."""
+        surface = self._analysis_surface(require_solution=True)
+        area = 0.0
+        for key in sorted(members & surface.patches.keys()):
+            quads = surface.patches[key].quads
+            # Sum both triangle areas so warped quads retain their geometric area.
+            for a, b in ((1, 2), (2, 3)):
+                area += .5 * float(np.linalg.norm(np.cross(
+                    quads[:, a] - quads[:, 0], quads[:, b] - quads[:, 0]), axis=1).sum())
+        return area
 
     def _group_members(self, groupName):
         if self._last_result is None:
