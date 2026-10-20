@@ -97,6 +97,25 @@ suite is not evidence that every legacy memory-access path has been audited.
 
 ## Resolved defects relevant to this work
 
+The resident-workspace changes incorrectly declared `mgblk` dummy arguments
+`timesave` and `ireq_qb` as allocatable, although `mgbl` passes slices of its
+real/integer work arrays through the legacy array-address interface. Intel
+Fortran Classic 18.0.5 was reported to reject the `timesave` declaration. A newer
+ifort can compile the files separately, but enabling interface checking exposes
+the invalid actual/dummy association as well. Both arguments now use their
+original explicit-shape declarations, without callee allocation/deallocation;
+the caller already retains their storage across resident pauses. This fixes the
+interface rather than suppressing COMMON alignment diagnostics. Rebuilding with
+18.0.5 remains to be confirmed on the production system.
+
+Local verification uses ifort 2021.13.2 and Intel MPI 2021.13: serial/MPI builds,
+generated-interface checks, and 16 resident lifecycle tests pass. On the three-rank
+SST fixture with three multigrid levels, 29 continuous MPI cycles and resident
+chunks of 2+3+1+7+16 match bit for bit. Intel serial/MPI results have small numeric
+differences (maximum 2.58e-15 in flow and 1.48e-14 in history on this fixture);
+the existing regression script requiring bitwise serial/MPI equality does not
+pass on this compiler combination. It has not been weakened for this check.
+
 The gamma-Re_theta integration exposed a native RANS path that could access the
 DES-only `fdsav` array through an `.and.` expression. Fortran does not guarantee
 short-circuit evaluation. This was fixed by nested tests in

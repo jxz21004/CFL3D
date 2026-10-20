@@ -133,19 +133,14 @@ c
      .          istat2_pe(istat_size,lbcprd*5)
       dimension w(mgwk),wk(nwork),lw(65,maxbl),lw2(43,maxbl),iwk(iwork)
       dimension iw(maxbl*7*3),lwdat(maxbl,maxseg,6)
-#ifdef PYTHON_API
-      allocatable :: timesave(:)
-#else
+c     These dummy arrays are slices of mgbl work/iwork, not allocatables.
+c     Keep the legacy array-address interface; mgbl retains both workspaces
+c     across resident pauses, so their contents already survive a return.
       dimension timesave(maxbl)
-#endif
       dimension inpl3d(nplots,11),inpr(nplots,11)
       dimension deltat(5),nptsr(20)
       dimension mblk2nd(maxbl),mytag_qb(13)
-#ifdef PYTHON_API
-      integer, allocatable :: ireq_qb(:)
-#else
       dimension ireq_qb(maxbl*13)
-#endif
       dimension iovrlp(maxbl),lig(maxbl),lbg(maxbl),ibpntsg(maxbl,4),
      .          iipntsg(maxbl),iibg(iitot),kkbg(iitot),jjbg(iitot),
      .          ibcg(iitot),dxintg(iitot),dyintg(iitot),dzintg(iitot),
@@ -444,7 +439,6 @@ c        startup counters, CFL ramps and all coarse-grid work arrays.
          end if
          go to 9104
       end if
-      allocate(timesave(maxbl),ireq_qb(maxbl*13))
       allocate(idimt(maxbl),jdimt(maxbl),kdimt(maxbl))
       allocate(nnegb(nummem),rmstb(nummem),sumn(nummem),negn(nummem))
 #endif
@@ -3378,7 +3372,7 @@ c
  3090 format(/37h***** ENDING TIME ADVANCEMENT, iseq =,i2,6h *****/)
 c
 #ifdef PYTHON_API
-      deallocate(timesave,ireq_qb,idimt,jdimt,kdimt)
+      deallocate(idimt,jdimt,kdimt)
       deallocate(nnegb,rmstb,sumn,negn)
 #endif
       return
