@@ -1,6 +1,6 @@
 # Python interface reference
 
-This document describes the current Python API, native interface version **15**.
+This document describes Python package **0.2.0**, native interface version **15**.
 For the project motivation, requirements, and build commands, see the
 [README](../README.md). Validation records are maintained in
 [MPI_PROGRESS.md](../MPI_PROGRESS.md).
