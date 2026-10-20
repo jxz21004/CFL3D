@@ -1237,6 +1237,107 @@ class CFL3D:
         base = self._last_base_groups if self._last_result is not None else self._cgns_surface_groups()
         return sorted(set(base) | self._group_definitions.keys())
 
+    def getSurfaceMesh(self, groupName=None):
+        """Return partitioned wall geometry before or after solve(), without I/O.
+
+        Collective within comm. Coordinates (N,3), in metres, contain unique
+        coupling nodes owned by this rank, ordered by stable int64 node_ids.
+        Connectivity (M,4) uses GLOBAL node IDs, including remote nodes; faces
+        follow native zone ownership. face_ids and face_keys identify each wall
+        cell. Host arrays can be empty. Node ownership stays fixed across the
+        first native load balance, so future MPhys vector shapes remain stable.
+
+        After solve, use its geometry snapshot, just as getSolution does. Node
+        IDs use CGNS topology, not coordinate merging, and are not compact indices.
+        Returned arrays are independent copies. This does not construct a zipper
+        or support periodic/nonconforming interfaces.
+        """
+        def validate():
+            if groupName is not None and not isinstance(groupName, str):
+                raise ValueError("groupName must be a CGNS/group name or None")
+        self._checked(validate)
+        if self.comm is not None and len(set(self.comm.allgather(groupName))) != 1:
+            raise RuntimeError("Surface groupName differs within comm")
+        from .surface_mesh import build_surface_mesh
+        members = self._checked(lambda: self._surface_group_members(groupName))
+        if self.comm is not None and len(set(self.comm.allgather(tuple(sorted(members))))) != 1:
+            raise RuntimeError("Surface group membership differs within comm")
+        solved = self._last_result is not None
+        mesh = self._last_mesh if solved else self.mesh
+        if self.comm is not None and not solved:
+            controls = self._checked(lambda: tuple(sorted(
+                (key, int(value[0])) for key, value in self.boundary_overrides.items())))
+            if len(set(self.comm.allgather(controls))) != 1:
+                raise RuntimeError("Surface boundary overrides differ within comm")
+
+        def wall_keys():
+            if solved:
+                return set(self._last_wall_fields)
+            return {(z.name, b.name) for z in mesh.zones if z.coordinates is not None
+                    for b in z.boundaries
+                    if abs(self.boundary_overrides.get(
+                        (z.name, b.name), _BC_TYPES.get(b.bc_type, (0, ())))[0])
+                    in (1005,1006,2004,2014,2024,2034,2016)}
+
+        owners = ((0,)*len(mesh.zones) if self.comm is None else
+                  tuple(self._last_result.zone_owners[z.name] for z in mesh.zones) if solved else
+                  self._mesh_owners)
+        return build_surface_mesh(mesh, members, self._checked(wall_keys), owners, self.comm, self._checked)
+
+    def getSurfaceForces(self, groupName=None, *, component="total"):
+        """Return owned nodal forces in N, aligned with getSurfaceMesh(groupName).
+
+        Collective within comm; call after a successful solve. The returned
+        independent (N,3) array uses the input Cartesian axes and the same local
+        node_ids/order as getSurfaceMesh. component is 'total', 'pressure', or
+        'viscous'. This is the nodal-force convention of ADflow's
+        forcesAsTractions=False, suitable for FUNtoFEM/MELD; it is not traction.
+
+        Each native wall quad contributes one quarter of its integrated force
+        to each corner. Shared nodes SUM the contributions across patches/ranks;
+        do not divide by area or by the number of adjacent cells. CFL3D computes
+        its moment arm at the mean of the four corner coordinates, so this
+        distribution preserves its total force and moment (up to roundoff and
+        the tolerance used to identify coincident connected vertices).
+
+        Use saved flow/reference settings, as getSolution does. If the solve had
+        no freestream_pressure, a pressure supplied in live options afterwards
+        may provide the dimensional scale. Without it this method raises: a
+        force array must not silently contain nondimensional coefficients.
+        No native solve, file output, or global surface gather is performed.
+        """
+        def controls():
+            if self._last_result is None:
+                raise RuntimeError("Call solve() successfully before querying surface forces")
+            if not isinstance(component, str) or component.lower() not in ("total", "pressure", "viscous"):
+                raise ValueError("component must be 'total', 'pressure', or 'viscous'")
+            options = self._last_options
+            pressure = options.freestream_pressure
+            if pressure is None:
+                pressure = self.options.freestream_pressure
+            if pressure is None:
+                raise ValueError("No freestream pressure was set for the CFL3D calculation or provided in options; "
+                                 "absolute nodal forces in N cannot be determined. Set freestream_pressure.")
+            # Native wall_forces are already integrated over each cell and
+            # divided by q_inf*Sref. Restore N once; never multiply by area again.
+            scale = .5 * options.gamma * pressure * options.mach**2 * options.sref
+            if not np.isfinite(scale) or scale <= 0:
+                raise ValueError("Dimensional force scale must be finite and positive")
+            return component.lower(), float(scale)
+
+        kind, scale = self._checked(controls)
+        if self.comm is not None and len(set(self.comm.allgather((kind, scale)))) != 1:
+            raise RuntimeError("Surface force component/dimensional scale differs within comm")
+        surface = self.getSurfaceMesh(groupName)
+        from .surface_mesh import distribute_surface_forces
+        values = distribute_surface_forces(self._last_mesh, surface, self._last_wall_forces,
+                                            scale, self.comm, self._checked)
+        if kind == "pressure":
+            return values[:, :3].copy()
+        if kind == "viscous":
+            return values[:, 3:].copy()
+        return values[:, :3] + values[:, 3:]
+
     def getSolution(self, groupName=None):
         """Return cached native pressure+viscous coefficients and SI loads after solve.
 
@@ -1402,19 +1503,23 @@ class CFL3D:
             return self._surface_analysis_mesh
         return SurfaceMesh(self.mesh, self._wall_geometry_fields(self.mesh), sref=self.options.sref)
 
-    def _analysis_members(self, groupName, surface):
+    def _surface_group_members(self, groupName):
         if self._last_result is not None:
             members = self._group_members(groupName)
         else:
             base = self._cgns_surface_groups()
             if groupName is None:
-                members = set(surface.patches)
+                members = set().union(*base.values()) if base else set()
             elif isinstance(groupName, str) and groupName in base:
                 members = base[groupName]
             elif isinstance(groupName, str) and groupName in self._group_definitions:
                 members = set().union(*(base[name] for name in self._group_definitions[groupName]))
             else:
                 raise ValueError(f"Unknown surface group {groupName!r}; inspect getGroupNames()")
+        return members
+
+    def _analysis_members(self, groupName, surface):
+        members = self._surface_group_members(groupName)
         members = frozenset(members) & surface.patches.keys()
         surface.selected(members)  # Reject groups with no walls before registering requests.
         return frozenset(members)

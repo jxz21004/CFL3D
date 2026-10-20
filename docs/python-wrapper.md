@@ -1,6 +1,8 @@
 # Python interface reference
 
-This document describes Python package **0.2.0**, native interface version **15**.
+This document describes the development tree following Python package **0.2.0**,
+native interface version **15**. Sections marked "after 0.2.0" are not included
+in the `v0.2.0` tag.
 For the project motivation, requirements, and build commands, see the
 [README](../README.md). Validation records are maintained in
 [MPI_PROGRESS.md](../MPI_PROGRESS.md).
@@ -1008,6 +1010,155 @@ queries are collective in MPI, as are both surface writers. Root-only registrati
 or querying from the earlier replicated-storage API must be updated. Computed
 strip/section results are returned on all participating ranks; writer paths are
 returned on root, with None on other ranks.
+
+## Partitioned surface mesh (after 0.2.0)
+
+```python
+# Can be called before the first solve, after a solve, or after close().
+# Under MPI every rank in solver.comm must call with the same groupName.
+surface = solver.getSurfaceMesh(groupName="Wing")
+x_local = surface["coordinates"]      # (N,3), metres; uniquely owned nodes only
+node_ids = surface["node_ids"]         # (N,), int64; sorted global identities
+faces = surface["connectivity"]        # (M,4), int64; GLOBAL node IDs
+
+# A future MPhys mesh component can use x_local.reshape(-1) as its local vector.
+local_node_count = len(node_ids)
+```
+
+The group selects the same CGNS names or custom groups accepted by
+`getSolution()`. None selects all wall boundaries, including inviscid walls.
+Unions count each boundary once. Unknown names and groups with no wall faces
+raise an error. No solve, file read/write, or native initialization is performed
+by this query; it uses the mesh already loaded in memory. It does not depend on
+MPhys or ADflow being installed.
+
+| Entry | Content |
+| --- | --- |
+| `coordinates` | `(N,3)` float64 input-axis coordinates in m; no ghost/duplicate nodes |
+| `node_ids` | `(N,)` int64 global node identities, ascending on each rank |
+| `node_owners` | `(N,)` int32 owner ranks in `solver.comm`; all entries equal this rank |
+| `connectivity` | `(M,4)` int64 global node IDs for locally owned wall quads, possibly referencing remote nodes |
+| `face_ids` | `(M,)` int64 global face identities, stable for unchanged topology/boundary ordering |
+| `face_keys` | M `(zone_name, boundary_name)` tuples, aligned with face rows |
+| `units` | `{"coordinates": "m"}` |
+
+**Connectivity is not an index into the local coordinate array.** In serial,
+build an ID-to-row map to index coordinates. In MPI, coordinates for referenced
+remote IDs are on their owners; any global assembly must be an explicit caller
+operation. All host arrays are empty in the native host/worker configuration.
+
+IDs are based on zero-based, C-ordered whole-volume vertex offsets and the
+smallest equivalent ID reached through CGNS one-to-one connections. They are
+not compact surface numbering. Shared edges and corners, signed/permuted
+transforms, and one-sided connection declarations are handled through topology.
+Coincident but topologically disconnected surfaces retain distinct IDs. The
+canonical vertex's coordinates are returned; connected copies must agree within
+the existing native-input interface tolerance.
+
+For MPI, the canonical zone index fixes each coupling node's owner:
+`1 + canonical_zone_index % (comm.size - 1)`. Serial ownership is rank 0.
+The ownership rule depends on the mesh and communicator, not the selected group
+or native load balance. Thus the local node IDs, order and vector sizes remain
+stable between setup and the first solve, even if native zone ownership changes.
+Faces follow the current zone-coordinate ownership and can move between ranks;
+their IDs and global connectivity remain stable. Shared-node coordinates are
+exchanged directly between the required owners. Full surface coordinates are
+neither gathered on root nor broadcast to all ranks.
+
+Face order follows mesh zone order, boundary order, then C order of the two
+surface cell axes, matching the per-patch `wall_forces` layout. Quad winding is
+into the fluid domain for positive-handed structured grids. Topology, boundary
+ordering, communicator size, or group membership changes require rebuilding an
+external coupling mapping. Group requests, resolved membership, and replicated
+mesh metadata must agree within the communicator.
+
+Before a successful solve, this method uses the current input mesh. Afterwards,
+it uses the last solved geometry snapshot, consistent with cached force queries;
+editing `solver.mesh` does not reinterpret an older solution. Returned arrays
+are independent copies. The method does not add periodic/nonconforming support,
+construct a zipper mesh, calculate nodal loads, update native geometry, or provide
+an MPhys Builder. Those are separate coupling-development steps.
+
+Validation covers analytical planar area/connectivity, disconnected coincident
+patches, shared corners, signed/permuted mappings, reversed endpoint declarations,
+CGNS/ADF input, and independent saved geometry. Real MPI checks use unequal zones,
+native ownership changes, repeated resident solves, disjoint communicators, and
+a communicator excluding world rank 0:
+
+```bash
+PYTHONPATH=tests/python python -m unittest test_surface_mesh -v
+PYTHONPATH=tests/python mpirun -np 3 python tests/python/validate_surface_mesh_mpi.py --directory build/native-output-surface-mesh-mpi3
+PYTHONPATH=tests/python mpirun -np 4 python tests/python/validate_surface_mesh_mpi.py --split --directory build/native-output-surface-mesh-split
+PYTHONPATH=tests/python mpirun -np 4 python tests/python/validate_surface_mesh_mpi.py --exclude --directory build/native-output-surface-mesh-exclude
+```
+
+## Nodal surface forces (after 0.2.0)
+
+```python
+result = solver.solve()
+surface = solver.getSurfaceMesh("Wing")
+forces = solver.getSurfaceForces("Wing")  # (N,3), N; same node_ids/order as surface
+pressure = solver.getSurfaceForces("Wing", component="pressure")
+viscous = solver.getSurfaceForces("Wing", component="viscous")
+# forces = pressure + viscous; the returned arrays are independent copies.
+meld_load_vector = forces.reshape(-1)    # Fx1,Fy1,Fz1,Fx2,Fy2,Fz2,...
+```
+
+`getSurfaceForces(groupName=None, *, component="total")` returns dimensional
+forces acting on the body, in input Cartesian axes. None selects all walls;
+CGNS and custom groups follow the surface-mesh contract. The component may be
+`"total"`, `"pressure"`, or `"viscous"` (case-insensitive). Each call returns only
+the calling rank's uniquely owned nodes, including an empty `(0,3)` array on the
+native host. This is the force convention corresponding to ADflow's
+`forcesAsTractions=False`, suitable for FUNtoFEM/MELD. A traction/area-normalized
+mode is not exposed by this function.
+Pressure contributions retain CFL3D's native reference-pressure convention;
+`freestream_pressure` supplies the SI dimensional scale.
+
+Every native wall-cell pressure/viscous integral is divided equally between its
+four vertices, then accumulated onto the stable node IDs. A node shared by two
+cells receives the SUM of both quarter-cell contributions. There is no division
+by adjacent-cell count or area: either would change the physical meaning of the
+returned forces. Group faces are selected before this assembly, so an edge node
+does not receive contributions from an unselected adjacent group. Overlapping
+custom groups count the union of their boundaries once.
+
+CFL3D already computes native moments using the arithmetic mean of each quad's
+four corner positions. The same quarter-cell distribution therefore preserves
+both native force and moment, including warped quads, to floating-point and
+connected-coordinate tolerances. It is also the transpose of the four-corner
+mean displacement interpolation, preserving its discrete virtual work. This
+does not substitute for the separate aero-to-structure MELD transfer.
+
+The dimensional conversion uses `q_inf * sref`, with
+`q_inf = 0.5 * gamma * freestream_pressure * mach**2`, from the last successful
+solve. Saved reference/flow settings outrank live edits. If that solve had no
+pressure, a subsequently supplied `solver.options.freestream_pressure` may provide
+the missing scale. Without a pressure, the method raises an English error instead
+of returning coefficients labelled as N. `getSolution()` retains its existing
+warning-and-coefficients behavior. A successful solve is required; forces remain
+queryable after `close()`.
+
+All ranks in `solver.comm` must call with the same group and component. The
+resolved dimensional scale must also agree. Native local wall integrals are
+distributed directly to the coupling node owners and added there; complete force
+vectors are not gathered on root or broadcast. Queries use cached data and do not
+advance the solution, initialize Fortran, or write files. Reading/editing returned
+arrays does not change native state or the cached integrals.
+
+Serial checks cover known two-cell loads, shared nodes, warped-quad force/moment
+and virtual-work conservation, all six wall directions, Euler zero-viscous loads,
+pressure/viscous separation, group isolation, saved reference values, and missing
+pressure. MPI checks compare serial node vectors and native integrated forces/
+moments after resident chunks, with native zone repartition, disjoint groups, an
+excluded world rank, and collective rejection of inconsistent query controls:
+
+```bash
+PYTHONPATH=tests/python python -m unittest test_nodal_forces -v
+PYTHONPATH=tests/python mpirun -np 3 python tests/python/validate_nodal_forces_mpi.py --directory build/native-output-nodal-forces-mpi3
+PYTHONPATH=tests/python mpirun -np 4 python tests/python/validate_nodal_forces_mpi.py --split --directory build/native-output-nodal-forces-split
+PYTHONPATH=tests/python mpirun -np 4 python tests/python/validate_nodal_forces_mpi.py --exclude --directory build/native-output-nodal-forces-exclude
+```
 
 ## Result arrays
 
