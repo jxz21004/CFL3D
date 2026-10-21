@@ -24,13 +24,16 @@ class ResidentContext:
         self.comm = None
         self.directory = None
         self.cycles = 0
+        self.startup_cycles = sum(int(n) for n in arrays["stages"][0, :-1])
         self.started = False
 
     def info(self):
         live, paused, cycles, setups, capacity, work, xyz = self.native.py_resident_info()
         return dict(active=bool(live), paused=bool(paused), cycles=cycles,
                     initializations=setups, history_capacity=capacity,
-                    work_bytes=work, input_coordinate_values=xyz)
+                    work_bytes=work, input_coordinate_values=xyz,
+                    startup_cycles=self.startup_cycles,
+                    fine_cycles=max(0, cycles-self.startup_cycles))
 
     def advance(self, directory, stem, append, offset, *, xyz=None, changed_cfl=False):
         global _active_context
@@ -39,6 +42,7 @@ class ResidentContext:
         acquired = _NATIVE_LOCK.acquire(blocking=False)
         previous = Path.cwd()
         first = not self.started
+        requested = solver.options.iterations + (self.startup_cycles if first else 0)
         try:
             def validate():
                 check_owner(solver)
@@ -63,7 +67,7 @@ class ResidentContext:
                         raise RuntimeError(f"Native resident configuration failed ({status})")
                     native.py_set_coordinates(xyz)
                     native.py_set_output_names(stem, int(append), offset)
-                    if native.py_start_resident(solver.options.iterations, 1):
+                    if native.py_start_resident(requested, 1):
                         raise RuntimeError("Native resident start rejected this configuration")
                     self.started = True
                 solver._checked(configure)
@@ -81,7 +85,7 @@ class ResidentContext:
             def check_status():
                 if status:
                     raise RuntimeError(f"CFL3D resident advance failed ({status}); inspect {directory / (stem+'.error')}")
-                if rows != self.cycles+solver.options.iterations:
+                if rows != self.cycles+requested:
                     raise RuntimeError("Resident advance stopped before the requested cycle boundary")
             solver._checked(check_status)
             previous_cycles = self.cycles

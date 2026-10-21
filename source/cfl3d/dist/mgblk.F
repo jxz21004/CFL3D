@@ -429,7 +429,7 @@ c     at this boundary; caller-owned arrays and scalar state remain resident.
 c        Open-ended sessions extend this same stage, preserving icyc/ntt,
 c        startup counters, CFL ramps and all coarse-grid work arrays.
          if (py_resident_open_ended) then
-            ncyc1(iseq)=py_stages(1,1)
+            ncyc1(iseq)=py_stages(1,iseq)
             ncyc=ncyc1(iseq)
          end if
          if (py_resident_cfl.gt.0.d0) then
@@ -2504,7 +2504,9 @@ c
 #ifdef PYTHON_API
       if (py_resident_enabled) then
          py_resident_done=ntt
-         if (ntt.ge.py_resident_stop .and.
+c        Coarse startup must finish normally, including qinter and scratch
+c        cleanup. Only the final stage owns a resumable Python boundary.
+         if (iseq.eq.mseq .and. ntt.ge.py_resident_stop .and.
      .       (py_resident_open_ended .or. icyc.lt.ncyc)) then
             py_resident_paused=.true.
             return

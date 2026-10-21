@@ -1,6 +1,6 @@
 # Known limitations and validation gaps
 
-This document describes the Python interface at native API **15**. It records
+This document describes the Python interface at native API **16**. It records
 confirmed constraints and unfinished work, rather than an exhaustive audit of the
 legacy Fortran solver. For parameter definitions and usage, see the
 [Python interface reference](python-wrapper.md). Reproducible test commands and
@@ -12,7 +12,7 @@ development evidence are recorded in [MPI_PROGRESS.md](../MPI_PROGRESS.md).
 | --- | --- |
 | Coupling surface data (development after 0.2.0) | `getSurfaceMesh()` returns uniquely owned nodes and local faces with global-ID connectivity, with stable node ownership across native zone repartition. `getSurfaceForces()` returns aligned nodal forces in N, including pressure/viscous selection. Both are collective in MPI. Nodal tractions, warm native geometry updates, and an MPhys Builder are not yet implemented. See the [mesh contract](python-wrapper.md#partitioned-surface-mesh-after-020) and [nodal force contract](python-wrapper.md#nodal-surface-forces-after-020). |
 | Python flow arrays | `SolverResult.fields` and `FlowState.fields` are readouts. Editing them does not modify the authoritative native restart payload used by the next solve. A primitive-array-to-native-state injection API is not implemented. |
-| Continuation overhead | Python retains the complete finest-grid restart state, including turbulence and ghost data. Default `resident=False` solves restore it through an internal temporary binary file and rebuild native work/coarse-grid arrays. Opt-in `resident=True` retains native workspace and a duplicated communicator between calls, avoiding repeated setup and internal checkpoint I/O. This mode currently supports cold, single-stage steady initialization and no complete FlowState/checkpoint snapshots; see [the lifecycle design](distributed-storage.md#resident-runtime-design-for-the-next-stage). |
+| Continuation overhead | Python retains the complete finest-grid restart state, including turbulence and ghost data. Default `resident=False` solves restore it through an internal temporary binary file and rebuild native work/coarse-grid arrays. Opt-in `resident=True` retains native workspace and a duplicated communicator between calls, avoiding repeated setup and internal checkpoint I/O. This mode supports cold steady initialization with automatic or explicit coarse-to-fine startup, but no complete FlowState/checkpoint snapshots; see [the lifecycle design](distributed-storage.md#resident-runtime-design-for-the-next-stage). |
 | MPI peak memory (remaining work) | Persistent coordinates, mean-flow/wall arrays, and native restart records are partitioned by zone ownership. File inputs read coordinates on initial owners; checkpoint I/O streams chunks, with compressed input spooled to disk. Volume output receives one zone at a time, and wall ASCII output streams from owners. Native grid setup, explicit `gatherFields()`, and slice/lift analysis still collect global data temporarily on the host. Host peak memory is not yet bounded by local zone size; payload counts are not RSS measurements. See [distributed-storage.md](distributed-storage.md). |
 | MPI work distribution | Rank 0 is the native host; other ranks compute whole existing zones. The interface does not split zones automatically. Worker count cannot exceed zone count. A one-rank communicator uses the serial path. |
 | Parallel cases and rank ownership | Independent cases can solve simultaneously on disjoint MPI communicators, using separate output directories and case names. Each MPI rank (Python process) can hold one active resident case. Within that same process, close the resident owner before another object solves; concurrent native calls from threads are unsupported because COMMON state and the working directory are process-global. Default nonresident objects may solve sequentially in one process. See the [split-communicator example](python-wrapper.md#independent-cases-on-disjoint-communicators). |
@@ -114,7 +114,20 @@ SST fixture with three multigrid levels, 29 continuous MPI cycles and resident
 chunks of 2+3+1+7+16 match bit for bit. Intel serial/MPI results have small numeric
 differences (maximum 2.58e-15 in flow and 1.48e-14 in history on this fixture);
 the existing regression script requiring bitwise serial/MPI equality does not
-pass on this compiler combination. It has not been weakened for this check.
+pass with this compiler combination's default `-O2` floating-point settings.
+It has not been weakened for this check.
+
+A subsequent per-cycle investigation finds the first flow difference at cycle 2:
+one velocity value differs by one ULP (1.735e-18). Residual history first differs
+at cycle 12, and CL differs by 1.471e-14 at cycle 29. A host plus one worker is
+bitwise identical to serial; a host plus two workers exposes the difference.
+Rebuilding both Intel extensions with `-fp-model precise` makes all 29 cycles'
+flow, boundary coefficients and history bitwise identical, and the original
+strict resident MPI validator passes. This attributes the observed discrepancy
+to sensitivity to floating-point optimization in the partitioned execution;
+the specific instruction/reassociation/alignment mechanism is not established.
+This fixture does not guarantee reproducibility for other meshes or rank counts.
+The normal build script's defaults have not been changed by this investigation.
 
 The gamma-Re_theta integration exposed a native RANS path that could access the
 DES-only `fdsav` array through an `.and.` expression. Fortran does not guarantee

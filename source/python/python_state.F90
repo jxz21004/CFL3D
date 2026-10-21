@@ -312,7 +312,7 @@ end module
 subroutine py_api_version(version)
   implicit none
   integer, intent(out) :: version
-  version=15
+  version=16
 end subroutine
 
 subroutine py_set_restart_controls(override_alpha)
@@ -591,17 +591,24 @@ subroutine py_start_resident(cycles,open_ended,status)
   implicit none
   integer, intent(in) :: cycles,open_ended
   integer, intent(out) :: status
+  integer :: last,startup
+  integer(kind=8) :: total
   status=1
   if (py_used /= 0 .or. py_resident_enabled .or. cycles < 1) return
   if (.not.allocated(py_xyz) .or. .not.allocated(py_stages)) return
   if (py_time(1) >= 0.d0 .or. py_time(2) /= 0.d0) return
-  ! First stage: steady cold start with one mesh-sequence stage, including
-  ! multilevel V/W cycling. Initial coarse-to-fine sequencing comes later.
-  if (size(py_stages,2) /= 1) return
+  ! Finish native coarse-to-fine startup before returning any finest-grid
+  ! readout. cycles counts all startup cycles plus the requested fine cycles.
+  last=size(py_stages,2)
+  if (last < 1 .or. last > 5) return
+  total=sum(int(py_stages(1,:),kind=8))
+  if (total > int(huge(cycles),kind=8)) return
+  startup=int(total)-py_stages(1,last)
+  if (cycles <= startup) return
   if (open_ended /= 0 .and. open_ended /= 1) return
-  if (open_ended == 0 .and. cycles > sum(py_stages(1,:))) return
+  if (open_ended == 0 .and. cycles > int(total)) return
   py_resident_open_ended=(open_ended == 1)
-  if (py_resident_open_ended) py_stages(1,1)=max(py_stages(1,1),cycles)
+  if (py_resident_open_ended) py_stages(1,last)=max(py_stages(1,last),cycles-startup)
   py_resident_enabled=.true.; py_resident_paused=.false.
   py_resident_output_changed=.false.
   py_resuming=.false.; py_resident_closing=.false.
@@ -620,13 +627,16 @@ subroutine py_advance_resident(cycles,cfl,status,nrows)
   integer, intent(in) :: cycles
   real(8), intent(in) :: cfl
   integer, intent(out) :: status,nrows
+  integer :: last,startup
   status=1; nrows=py_nhistory
   if (.not.py_resident_enabled .or. .not.py_resident_paused .or. py_used /= 0) return
   if (cycles < 1 .or. .not.ieee_is_finite(cfl) .or. .not.(cfl >= 0.d0)) return
   ! Check before adding: the original driver uses default integer counters.
   if (cycles > huge(cycles)-py_resident_done) return
   if (py_resident_open_ended) then
-    py_stages(1,1)=max(py_stages(1,1),py_resident_done+cycles)
+    last=size(py_stages,2)
+    startup=sum(py_stages(1,:last-1))
+    py_stages(1,last)=max(py_stages(1,last),py_resident_done+cycles-startup)
   else
     if (cycles > sum(py_stages(1,:))-py_resident_done) return
   end if

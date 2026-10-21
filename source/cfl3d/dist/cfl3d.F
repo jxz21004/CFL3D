@@ -405,9 +405,9 @@ c
 c        These routines have returned, so no live explicit-shape history
 c        dummy still refers to old storage. Grow histories before re-entry;
 c        the native grid/work/hierarchy allocations are never resized here.
-         if (py_stages(1,1).gt.ncycmax) then
+         if (sum(py_stages(1,:)).gt.ncycmax) then
             py_old_capacity=ncycmax
-            py_capacity=py_stages(1,1)
+            py_capacity=sum(py_stages(1,:))
             if (ncycmax.le.huge(ncycmax)/2)
      .          py_capacity=max(py_capacity,2*ncycmax)
             call py_grow_history(rms,py_capacity)

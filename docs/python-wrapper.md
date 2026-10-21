@@ -1,7 +1,7 @@
 # Python interface reference
 
 This document describes the development tree following Python package **0.2.0**,
-native interface version **15**. Sections marked "after 0.2.0" are not included
+native interface version **16**. Sections marked "after 0.2.0" are not included
 in the `v0.2.0` tag.
 For the project motivation, requirements, and build commands, see the
 [README](../README.md). Validation records are maintained in
@@ -277,7 +277,7 @@ that saved angle while retaining the flow as an initial guess.
 | Option | Default | Meaning |
 | --- | --- | --- |
 | `cfl` | `2.0` | Positive CFL; passed as native `DT=-cfl` for local time stepping |
-| `iterations` | `100` | Positive final-stage iteration count unless explicit stages are supplied |
+| `iterations` | `100` | Positive finest-grid iteration count for each solve; coarse startup is additional and runs only on a cold start |
 | `cfl_ramp_steps` | `0` | IFLAGTS; nonnegative, zero disables CFL ramping |
 | `cfl_ramp_factor` | `1.0` | FMAX, at least 1; target CFL is `cfl * cfl_ramp_factor` |
 | `first_order_iterations` | `0` | NITFO on the final/default stage |
@@ -343,7 +343,8 @@ output data sets, rather than specifying an iteration interval.
 | `coarse_iterations` | `50` | Iterations on each preliminary stage of the automatic sequence |
 | `multigrid_up_iterations` | `0` | MTT: additional updates on the upward sweep, 0..19 |
 | `multigrid_smoothing` | `None` | MIT per global level, ordered coarse to fine; defaults to one update per level |
-| `multigrid_stages` | `None` | Explicit stage sequence; overrides automatic stage construction |
+| `coarse_grid_stages` | `None` | Explicit coarse startup stages, excluding the finest stage; tuple of `MultigridStage` objects or dictionaries in options mappings |
+| `multigrid_stages` | `None` | Legacy full schedule; compatibility input with checked/synchronized fine-grid controls; prefer `coarse_grid_stages` |
 
 Each coarsened direction must have a cell count divisible by
 `2**(multigrid_levels-1)`. Boundary segment endpoints must align with every level.
@@ -357,7 +358,7 @@ Without mesh sequencing, the solve starts on the finest grid and uses the reques
 V/W cycles. Cached continuation restores the finest-grid state, rebuilds coarse
 work arrays, retains V/W cycles, and skips preliminary coarse-to-fine startup.
 
-Explicit stages provide finer control:
+Explicit coarse stages provide finer startup control (development after 0.2.0):
 
 ```python
 from cfl3d import MultigridStage
@@ -368,11 +369,13 @@ solver.setOptions({
     "inversion": (1, 0, 1),
     "kappa": (0.0, 1/3, 1/3),
     "multigrid_levels": 3,
+    "iterations": 1000,                # Finest-grid budget on every solve
+    "first_order_iterations": 20,      # Finest-grid NITFO
     "multigrid_up_iterations": 1,
-    "multigrid_stages": (
-        MultigridStage(100, levels=2, first_order_iterations=10,
-                       smoothing_steps=(1, 2)),
-        MultigridStage(1000, levels=2, first_order_iterations=20,
+    "coarse_grid_stages": (
+        MultigridStage(100, levels=1, first_order_iterations=10,
+                       smoothing_steps=(2,)),
+        MultigridStage(200, levels=2, first_order_iterations=20,
                        smoothing_steps=(2, 1)),
     ),
 })
@@ -382,17 +385,30 @@ Options dictionaries may instead supply a list of stage dictionaries. Stage keys
 are also case-insensitive. Each stage has `iterations`, `levels`, optional
 `first_order_iterations=0`, and optional `smoothing_steps=None`.
 
-There may be between one and `multigrid_levels` stages. Each stage advances one
-mesh level, ending on the finest grid. For three total levels and two stages, the
-first stage starts on the second-finest grid. A stage's `levels` selects how many
-of its available finer levels participate in cycling. Stage smoothing values are
+There may be zero to `multigrid_levels-1` coarse stages. Each stage advances one
+mesh level; the final finest-grid stage is appended automatically using
+`iterations`, `first_order_iterations`, and all `multigrid_levels`. For three total
+levels and one coarse stage, startup begins on the second-finest grid. A stage's
+`levels` selects how many of its available levels participate in cycling.
+Stage smoothing values are
 ordered coarse to fine among those active levels; absent values use the relevant
 part of `multigrid_smoothing`. MIT entries are 1..20 and each MIT+MTT must be <=20.
 
-On a cold start, explicit stage iterations determine the total work. On cached
-continuation, only the last stage runs. If explicit stages are present, changing
-`iterations` alone does not change that last stage; update `multigrid_stages`.
-`MultigridStage` is immutable; replace stages or supply a new tuple to modify them.
+The example performs 100+200+1000 cycles on its first cold solve and 1000 cycles
+on each continuation. Changing `iterations` always changes the next finest-grid
+budget. `resetFlow()` starts the coarse sequence again. Both ordinary and resident
+solves use this rule. `MultigridStage` is immutable; replace stages or supply a new
+tuple to modify them. Do not combine explicit coarse stages with `mesh_sequence=True`:
+that flag selects the automatic startup recipe using `coarse_iterations` instead.
+
+Legacy `multigrid_stages` includes the finest stage. When supplied without
+top-level fine controls, its final `iterations` and `first_order_iterations` are
+imported into those controls. Explicit conflicting values now raise `ValueError`.
+Later edits of the top-level controls synchronize the compatibility schedule;
+they are never ignored. Do not supply both legacy and new stage lists. To migrate,
+move the final stage's iteration/startup-order controls to the top level and put
+only the preceding stages in `coarse_grid_stages`. Legacy final-stage active-level
+and smoothing settings remain supported by the compatibility path.
 
 ### Reference quantities
 
@@ -523,7 +539,7 @@ wall ASCII output streams serialized patches from their owners.
 
 The default `resident=False` path re-enters native initialization on every
 `solve()`, using the cached complete `FlowState` and internal checkpoint I/O.
-For compatible short calculation chunks, API 15 provides the opt-in resident mode
+For compatible short calculation chunks, API 16 provides the opt-in resident mode
 below. Rebuild both native extensions and restart existing Python processes after
 updating from an earlier native API.
 
@@ -545,12 +561,17 @@ Set `resident=True` to retain the native workspace between calls. The default is
 False, so the full-state restart workflow above remains available.
 
 ```python
+from cfl3d import CFL3D, MultigridStage
+
 resident_options = {
     **options,
     "resident": True,
     "iterations": 50,
     "mesh_sequence": False,
     "multigrid_stages": None,
+    "multigrid_levels": 3,
+    "coarse_grid_stages": (MultigridStage(20, levels=1),
+                           MultigridStage(30, levels=2)),
     "restartFile": None,
     "writevolumesolution": False,
     "writeTecplotSurfaceSolution": False,
@@ -558,7 +579,7 @@ resident_options = {
 }
 
 with CFL3D(options=resident_options) as solver:
-    first = solver.solve()                 # Initialize once, then advance 50 cycles
+    first = solver.solve()                 # 20+30 coarse startup, then 50 fine cycles
     solver.setOptions({"cfl": 1.0, "iterations": 25})
     second = solver()                      # Advance 25 more cycles in memory
     print(solver.getRuntimeInfo())          # Local counters/capacities, not RSS
@@ -567,13 +588,18 @@ with CFL3D(options=resident_options) as solver:
 # Workspace and borrowed MPI communicator are released collectively here.
 ```
 
-The resident mode currently supports implicit steady cold initialization with
-one initial mesh-sequence stage. Multilevel V/W cycles are supported; their
-coarse-level state/work arrays remain alive. Initial coarse-to-fine sequencing,
-custom `multigrid_stages`, file restart initialization and full-state snapshot
+The resident mode supports implicit steady cold initialization, including
+automatic or explicit coarse-to-fine startup. Startup finishes before the first
+return, and subsequent calls extend only the final stage. Multilevel V/W cycles
+and their coarse-level work arrays remain alive. File restart initialization and full-state snapshot
 operations (`getFlowState`, `setFlowState`, `writeRestartFile`) are not yet
 implemented for this mode and raise explicit errors. Volume/PLOT3D visualization
 is supported, but no automatic native `_restart.bin` accompanies it.
+
+The first returned history includes coarse startup and fine cycles; later histories
+contain only the requested additional fine cycles. `getRuntimeInfo()` reports
+`startup_cycles`, `fine_cycles`, and their cumulative sum `cycles`. History capacity
+is grown against that total; only the final stage's budget is extended.
 
 Each solve returns that call's history rows and consumes the usual output index.
 `start_mode="restart"` is retained as the continuation label; a resident advance

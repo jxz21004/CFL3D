@@ -1,6 +1,6 @@
 # Distributed storage migration
 
-Native API 15 exposes opt-in resident advancement through `CFL3D.solve()`.
+Native API 16 supports coarse-to-fine startup and opt-in resident advancement through `CFL3D.solve()`.
 It builds on API 14's growable histories, API 12's persistent coordinate/wall
 distribution and API 11's mean-flow/restart migration. Default `resident=False`
 solves still use restart-based continuation. MPI
@@ -103,7 +103,8 @@ load through `options['restartFile']` or install each rank's own cached shard.
 1. Complete resident full-state snapshots and initialization modes. Opt-in public
    advancement now retains native workspace between chunks, without setup or
    internal checkpoint I/O. Default solves still follow the restart-based path.
-   File restart initialization and multi-stage initial sequencing remain pending.
+   Initial coarse-to-fine sequencing is supported in API 16. File restart
+   initialization and complete resident snapshots remain pending.
 2. Bound temporary host storage during native grid setup. Initial file loading no
    longer assembles a complete mesh, but native array preparation/validation still
    gathers whole-case geometry. Default solves retain the global native input
@@ -122,9 +123,10 @@ allocations. Global topology and small per-boundary summaries remain replicated.
 
 ## Resident runtime: design for the next stage
 
-Status: **opt-in public advancement implemented** (`resident=True`, API 15).
-Default solves still perform restart-based continuation. Full-state snapshots,
-file restart initialization and multi-stage initial sequencing are unfinished.
+Status: **coarse-to-fine startup and opt-in public advancement implemented** (`resident=True`, API 16).
+Default solves still perform restart-based continuation. Full-state snapshots
+and file restart initialization are unfinished; initial sequencing now runs once
+before fine-grid pauses.
 An uncommitted experiment that staged coordinates to a temporary file has been
 withdrawn from the active implementation. It removed the global coordinate copy
 but did not avoid setup on every call and added coordinate disk I/O. Merely moving
@@ -211,16 +213,19 @@ updated according to a documented explicit option change.
   build and its numerical results remain unchanged.
 
 Native API 13 introduced the first prototype, API 14 added extendable sessions,
-and API 15 connects it to `SolverOptions.resident`. The remaining design targets
+API 15 connects it to `SolverOptions.resident`, and API 16 adds coarse-to-fine
+startup. The remaining design targets
 above must not be interpreted as completed features. Public usage is described
 in the [interface reference](python-wrapper.md#resident-calculation-chunks).
 
-### Native resident driver (API 15)
+### Native resident driver (API 16)
 
 `py_start_resident(cycles)` opts into a bounded native session after ordinary
-configuration. The configured single-stage iteration count reserves the total
-schedule/history capacity. The first `py_solve()` returns after the requested
-number of complete V/W cycles. `py_advance_resident(cycles, cfl)` advances additional
+configuration. The configured stage counts reserve total history capacity. For
+multiple stages, the initial requested boundary must be after all coarse startup
+cycles, on the final finest-grid stage. The first `py_solve()` completes native
+startup, including interpolation between stages, before returning at that boundary.
+`py_advance_resident(cycles, cfl)` advances additional
 cycles in the same workspace; cfl=0 preserves the existing control, while a
 positive value applies a new CFL. `py_close_resident()` releases an unfinished
 context without advancing another cycle. Finishing the reserved schedule also
@@ -271,8 +276,10 @@ correction: a three-level V/W cycle still restricts fine-grid solution/residuals
 to coarse levels and prolongates their corrections. Fine-grid equations can also
 be advanced with a single-grid method, but switching to it changes the iteration
 algorithm. The resident prototype retains the configured V/W algorithm and its
-coarse-level workspace between calls. It currently supports one initial stage,
-including three-level cycles; multi-stage coarse-to-fine startup remains pending.
+coarse-level workspace between calls. API 16 completes all initial coarse-to-fine
+stages normally and pauses only in the final stage. Later advances extend that
+final stage, with history capacity based on the sum of all stage counts. Public
+`coarse_grid_stages` contains only startup stages; `iterations` owns the fine budget.
 
 `py_resident_info()` returns enabled/paused flags, completed cycles, setup-call
 count, reserved native history capacity, main real/integer workspace capacity in
@@ -282,8 +289,8 @@ available after cleanup. Readout buffers are separate rank-local copies.
 
 Current prototype boundaries:
 
-- Steady cold starts with one mesh-sequence stage only; multilevel V/W cycling is
-  supported. Coarse-to-fine initial sequencing and file-based initial restart are
+- Steady cold starts support automatic and explicit coarse-to-fine sequencing,
+  followed by retained multilevel V/W cycling. File-based initial restart is
   not yet supported by the resident start entry point.
 - Bounded mode rejects advances beyond its reserved schedule. Open-ended mode
   grows histories and requires explicit close; integer-counter and available-memory
@@ -304,7 +311,7 @@ Current prototype boundaries:
   initialize a new context. Arbitrary live updates remain future work.
 - `resident` defaults to False. Updating builds alone does not opt into this path.
 
-Both extensions must be rebuilt for API 15 and existing Python processes restarted:
+Both extensions must be rebuilt for API 16 and existing Python processes restarted:
 
 ```bash
 python tools/build_python.py --jobs 8
@@ -321,7 +328,21 @@ PYTHONPATH=tests/python mpirun -np 3 python tests/python/validate_resident_mpi.p
 PYTHONPATH=tests/python mpirun -np 4 python tests/python/validate_resident_mpi.py --open-ended --split --model gamma-theta --directory build/native-output-resident-grow-gamma-split
 PYTHONPATH=tests/python mpirun -np 3 python tests/python/validate_resident_runtime_mpi.py --model sst --directory build/native-output-resident-public-mpi3
 PYTHONPATH=tests/python mpirun -np 4 python tests/python/validate_resident_runtime_mpi.py --split --model gamma-theta --directory build/native-output-resident-public-gamma-split
+PYTHONPATH=tests/python python -m unittest test_coarse_grid_stages -v
+PYTHONPATH=tests/python mpirun -np 3 python tests/python/validate_resident_runtime_mpi.py --coarse-startup --model gamma-theta --directory build/native-output-resident-startup-mpi3
+PYTHONPATH=tests/python mpirun -np 4 python tests/python/validate_resident_runtime_mpi.py --coarse-startup --split --directory build/native-output-resident-startup-split
+PYTHONPATH=tests/python mpirun -np 4 python tests/python/validate_resident_runtime_mpi.py --coarse-startup --exclude --model sa --directory build/native-output-resident-startup-exclude
 ```
+
+API 16 checks compare explicit 3+4-cycle coarse startup followed by fine-grid
+chunks against a continuous native schedule, including history-capacity growth,
+first-order startup spanning short chunks, reset, bounded cleanup and legacy
+fine-budget edits. SA/SST/gamma-Re_theta and V/W cycles match bit for bit in serial.
+The three MPI startup commands above also pass exact history/field/wall comparisons,
+one initialization, unchanged native owners and retained communicator/output checks.
+The final unit suite reports 101 tests, with 98 passing and 3 optional HDF5 skips.
+Preprocessing the changed legacy drivers without `PYTHON_API` produces identical
+Fortran statements to the previous version, in both serial and MPI configurations.
 
 The first comparison covers continuous versus 2+3+1+3 cycles, all three tested
 models (SA/SST/gamma-Re_theta), V/W cycling, startup order and CFL ramps. A separate
@@ -443,5 +464,5 @@ PYTHONPATH=tests/python mpirun -np 3 python tests/python/validate_distributed_mp
 ```
 
 The checkpoint/output-streaming stage kept native API 12. The resident prototype
-now requires rebuilding for API 15 as described above. Result NPZ member order is
+now requires rebuilding for API 16 as described above. Result NPZ member order is
 not an interface guarantee; existing array names and values remain compatible.

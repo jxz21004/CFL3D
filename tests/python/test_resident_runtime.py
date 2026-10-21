@@ -229,8 +229,7 @@ class ResidentRuntimeTests(unittest.TestCase):
     def test_unsupported_modes_are_explicit_and_atomic(self):
         config = RuntimeOptions(options())
         original = dict(config)
-        for edits in ({'mesh_sequence':True},{'restartFile':'some.npz'},
-                      {'multigrid_stages':[{'iterations':2,'levels':1}]}):
+        for edits in ({'restartFile':'some.npz'},):
             with self.subTest(edits=edits),self.assertRaises(NotImplementedError):
                 config.update(edits)
             self.assertEqual(dict(config),original)

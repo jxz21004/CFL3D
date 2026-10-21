@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 import numpy as np
 from mpi4py import MPI
-from cfl3d import CFL3D
+from cfl3d import CFL3D, MultigridStage
 from test_surface_forces import grouped_plate
 
 
@@ -31,12 +31,15 @@ def mesh3d():
     return mesh
 
 
-def run(comm,root,model):
+def run(comm,root,model,coarse_startup=False):
     mesh = mesh3d()
     config = dict(turbulence=model,mach=.2,alpha=2.,beta=3.,y_up=True,
         freestream_pressure=101325.,cfl=1.,iterations=2,multigrid_levels=3,
         first_order_iterations=2,cfl_ramp_steps=3,cfl_ramp_factor=2.,
         writevolumesolution=False,writeTecplotSurfaceSolution=False)
+    startup = 7 if coarse_startup else 0
+    if coarse_startup:
+        config['coarse_grid_stages'] = (MultigridStage(3,1,1),MultigridStage(4,2,1))
     reference = error = None
     if comm.rank == 0:
         try:
@@ -76,12 +79,13 @@ def run(comm,root,model):
                 chunks.append(result)
                 def check():
                     info = solver.getRuntimeInfo()
-                    assert (info['cycles'],info['initializations'],info['input_coordinate_values']) == (total,1,0)
+                    assert (info['cycles'],info['initializations'],info['input_coordinate_values']) == (total+startup,1,0)
+                    assert (info['startup_cycles'],info['fine_cycles']) == (startup,total)
                     assert solver._resident_context.comm.py2f() == borrowed
                     assert prepare.call_count == 1
                     if comm.size == 3:
                         assert tuple(result.zone_owners.values()) == (2,1)
-                    np.testing.assert_array_equal(np.concatenate([c.history for c in chunks]),reference['history'][:total])
+                    np.testing.assert_array_equal(np.concatenate([c.history for c in chunks]),reference['history'][:total+startup])
                     if total == 6 and comm.rank == 0:
                         np.testing.assert_array_equal(np.loadtxt(result.output_paths['residual'])[:,0],np.arange(1,5))
                     if total < 29 and comm.rank == 0:
@@ -108,7 +112,7 @@ def run(comm,root,model):
             assert 'Another CFL3D' in str(exc)
         else:
             raise AssertionError('Expected owner guard')
-        assert solver.getRuntimeInfo()['cycles'] == 29
+        assert solver.getRuntimeInfo()['cycles'] == 29+startup
     assert not solver.getRuntimeInfo()['active']
     solver.getSolution('Wing')  # Result queries survive closing the workspace.
     other.solve(output_directory=root/'after-close')
@@ -124,6 +128,7 @@ def main():
     parser.add_argument('--model',default='sst')
     parser.add_argument('--split',action='store_true')
     parser.add_argument('--exclude',action='store_true')
+    parser.add_argument('--coarse-startup',action='store_true')
     args = parser.parse_args()
     world = MPI.COMM_WORLD
     if args.split or args.exclude:
@@ -135,7 +140,7 @@ def main():
         color,comm = 0,world
     try:
         if comm != MPI.COMM_NULL:
-            run(comm,args.directory.resolve()/f'group-{color}',args.model)
+            run(comm,args.directory.resolve()/f'group-{color}',args.model,args.coarse_startup)
             if comm != world:
                 comm.Free()
         world.Barrier()
