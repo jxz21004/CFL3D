@@ -27,7 +27,10 @@ _AMBIENT_MODELS = frozenset(name for name, code in _MODELS.items() if code in (6
 _SURFACE_COEFFICIENTS = ("CL", "CD", "CX", "CY", "CZ", "Cmx", "Cmy", "Cmz", "CDp", "CDv")
 _BC_TYPES = {"BCFarfield": (1003, ()), "BCSymmetryPlane": (1001, ()),
              "BCWallInviscid": (1005, ()), "BCOutflowSupersonic": (1002, ()),
-             "BCWallViscous": (2004, (0., 0.)), "BCWallViscousHeatFlux": (2004, (0., 0.))}
+             # The native CGNS input converter treats generic BCWall as an
+             # adiabatic viscous wall when no thermal dataset is supplied.
+             "BCWall": (2004, (0., 0.)), "BCWallViscous": (2004, (0., 0.)),
+             "BCWallViscousHeatFlux": (2004, (0., 0.))}
 
 
 def _integer(value, name, minimum=0, maximum=None):

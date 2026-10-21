@@ -101,6 +101,16 @@ class NativeCGNSTests(unittest.TestCase):
             with self.assertRaises(NotImplementedError):
                 CFL3D(restored)._arrays()
 
+    def test_generic_bcwall_from_adf(self):
+        mesh = flatplate_mesh()
+        wall = next(b for b in mesh.zones[0].boundaries if b.name == "plate")
+        wall.bc_type = "BCWall"
+        with tempfile.TemporaryDirectory() as directory:
+            restored = CGNSMesh.from_file(write_adf(mesh, Path(directory) / "wall.cgns"))
+            self.assert_mesh_equal(mesh, restored)
+            arrays, _ = CFL3D(restored)._arrays()
+            self.assertIn(2004, arrays["bcs"][2])
+
     def test_base_selection(self):
         api = writer()
         with tempfile.TemporaryDirectory() as directory:

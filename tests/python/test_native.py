@@ -40,6 +40,20 @@ class MeshTests(unittest.TestCase):
         mesh = box_mesh(True); mesh.zones[1].coordinates += .01
         with self.assertRaises(ValueError): CFL3D(mesh)._arrays()
 
+    def test_generic_bcwall_matches_native_converter_and_respects_dataset(self):
+        mesh = flatplate_mesh()
+        wall = next(b for b in mesh.zones[0].boundaries if b.name == "plate")
+        wall.bc_type = "BCWall"
+        automatic, _ = CFL3D(mesh)._arrays()
+        explicit, _ = CFL3D(mesh, boundary_overrides={
+            ("flatplate", "plate"): (2004, (0., 0.))})._arrays()
+        np.testing.assert_array_equal(automatic["bcs"], explicit["bcs"])
+        np.testing.assert_array_equal(automatic["bcdata"], explicit["bcdata"])
+        self.assertIn(2004, automatic["bcs"][2])
+        wall.data = {"HeatFlux": np.array([1.])}
+        with self.assertRaisesRegex(NotImplementedError, "BCDataSet needs an explicit override"):
+            CFL3D(mesh)._arrays()
+
     def test_reciprocal_interface_with_reversed_endpoints(self):
         mesh = box_mesh(True)
         expected, _ = CFL3D(mesh, comm=None)._arrays()

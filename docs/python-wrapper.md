@@ -781,6 +781,7 @@ connections with reversed endpoints are deduplicated.
 | `BCSymmetryPlane` | 1001 |
 | `BCWallInviscid` | 1005 |
 | `BCOutflowSupersonic` | 1002 |
+| `BCWall` | 2004 / `(0,0)`: native CGNS converter's default adiabatic viscous wall |
 | `BCWallViscous` | 2004 / `(0,0)`: adiabatic, no blowing |
 | `BCWallViscousHeatFlux` | 2004 / `(0,0)` for absent data or explicitly zero HeatFlux |
 
