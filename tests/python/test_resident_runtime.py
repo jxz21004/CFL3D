@@ -1,12 +1,14 @@
 """Public resident lifetime, control updates, readouts and numbered output."""
 from pathlib import Path
 from copy import deepcopy
+from contextlib import redirect_stdout
+import io
 import tempfile
 import unittest
 from unittest.mock import patch
 
 import numpy as np
-from cfl3d import CFL3D, RuntimeOptions
+from cfl3d import CFL3D, MultigridStage, RuntimeOptions
 from test_surface_forces import grouped_plate
 
 
@@ -17,6 +19,27 @@ def options(**updates):
 
 
 class ResidentRuntimeTests(unittest.TestCase):
+    def test_progress_checkpoints_show_startup_and_continuation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = io.StringIO()
+            config = options(iterations=1, coarse_grid_stages=(
+                MultigridStage(1, 1), MultigridStage(1, 2)))
+            with redirect_stdout(output):
+                with CFL3D(grouped_plate(), config, comm=None) as solver:
+                    solver.solve(output_directory=Path(directory) / 'run')
+                    solver.solve(output_directory=Path(directory) / 'run')
+            log = output.getvalue()
+            self.assertIn('Mesh ready:', log)
+            self.assertIn('Native input ready', log)
+            self.assertIn('1 level(s) x 1 cycles, 2 level(s) x 1 cycles, 3 level(s) x 1 cycles', log)
+            self.assertIn('Native solve running: 3 level(s) x 1 cycles', log)
+            self.assertIn('Solve 000 complete', log)
+            self.assertIn('Solve 001 complete', log)
+            with redirect_stdout(output := io.StringIO()):
+                with CFL3D(grouped_plate(), {**config, 'progress': False}, comm=None) as quiet:
+                    quiet.solve(output_directory=Path(directory) / 'quiet')
+            self.assertNotIn('CFL3D[', output.getvalue())
+
     def test_startup_spans_short_public_chunks(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

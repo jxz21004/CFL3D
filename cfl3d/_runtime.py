@@ -23,6 +23,8 @@ class ResidentContext:
         self.arrays = arrays  # Small configuration/BC metadata, never global coordinates.
         self.comm = None
         self.directory = None
+        self._worker_artifacts = set()
+        self._root_artifacts = set()
         self.cycles = 0
         self.startup_cycles = sum(int(n) for n in arrays["stages"][0, :-1])
         self.started = False
@@ -77,6 +79,9 @@ class ResidentContext:
                 native.py_set_output_names(stem, int(append), offset-self.cycles)
             solver._checked(lambda: os.chdir(directory))
             self.directory = directory
+            stages = (self.arrays if first else {"stages": self.arrays["stages"][:, -1:]})
+            solver._progress(f"Native solve running: {solver._stage_summary(stages, solver.options.iterations)}; "
+                             f"log: {directory / (stem+'.out')}")
             if first:
                 status, rows = native.py_solve()
             else:
@@ -93,6 +98,10 @@ class ResidentContext:
             values = solver._checked(lambda: solver._read_native_result(native, self.arrays, rows))
             values = list(values)
             values[1] = values[1][previous_cycles:].copy()
+            if solver.comm is not None and solver.comm.rank != 0:
+                self._worker_artifacts.add((directory, stem))
+            else:
+                self._root_artifacts.add((directory, stem))
             return tuple(values)
         except BaseException:
             # Before native startup there is no resident workspace to preserve.
@@ -139,3 +148,10 @@ class ResidentContext:
             os.chdir(previous)
             if acquired:
                 _NATIVE_LOCK.release()
+        if solver.comm is not None and solver.comm.rank != 0:
+            for directory, stem in self._worker_artifacts:
+                solver._cleanup_worker_directory(directory, stem)
+            self._worker_artifacts.clear()
+        for directory, stem in self._root_artifacts:
+            solver._cleanup_empty_native_files(directory, stem)
+        self._root_artifacts.clear()

@@ -57,6 +57,8 @@ def run(comm,root,model,coarse_startup=False):
         with patch.object(solver,'_native_arrays',wraps=solver._native_arrays) as prepare, \
              patch.object(solver,'_stage_flow_state',side_effect=AssertionError('restart staging')):
             chunks = [solver.solve(output_directory=output)]
+            if comm.rank != 0:
+                assert (output/f'rank-{comm.rank:04d}').is_dir()
             borrowed = solver._resident_context.comm.py2f()
             # Rank-local inconsistent edits must fail collectively before advancing.
             if comm.rank == comm.size-1:
@@ -114,8 +116,15 @@ def run(comm,root,model,coarse_startup=False):
             raise AssertionError('Expected owner guard')
         assert solver.getRuntimeInfo()['cycles'] == 29+startup
     assert not solver.getRuntimeInfo()['active']
+    comm.Barrier()
+    if comm.rank == 0:
+        assert not list(output.glob('rank-*')), 'closed resident workers left temporary directories'
+        for index in range(4):
+            for suffix in ('.out15', '.out20', '.blomax', '.prout', '.alpha'):
+                assert not (output/f'out_{index:03d}{suffix}').exists(), (index, suffix)
     solver.getSolution('Wing')  # Result queries survive closing the workspace.
     other.solve(output_directory=root/'after-close')
+    other.close()
     assert not MPI.Is_finalized()
     comm.Barrier()
     if comm.rank == 0:

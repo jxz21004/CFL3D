@@ -78,6 +78,10 @@ def main():
                 np.testing.assert_allclose(actual_lift['bin_'+name].sum(),total['Wing_'+name],
                                            rtol=2e-13,atol=2e-14)
             output = result.output_directory
+            assert not list(output.glob('rank-*')), 'successful workers left temporary directories'
+            for suffix in ('.out15', '.out20', '.blomax', '.prout'):
+                assert not (output/f'out_000{suffix}').exists(), suffix
+            assert (output/'out_000.alpha').stat().st_size > 0  # This case uses target_cl.
             for name in ('out_000_volume.cgns','out_000_surf.plt','out_000_flow.x','out_000_flow.q','out_000_restart.bin'):
                 assert not (output/name).exists(),name
     solver._checked(check)

@@ -66,7 +66,7 @@ class NativeControlTests(unittest.TestCase):
             fixed = CFL3D(box_mesh(), replace(options, target_cl=None, alpha=2.)).solve(
                 output_directory=root / "lift")
             self.assertAlmostEqual(fixed.final_alpha, 2., places=12)
-            self.assertEqual(fixed.output_paths["alpha_history"].read_text(), "")
+            self.assertFalse(fixed.output_paths["alpha_history"].exists())
             self.assertEqual(fixed.solve_index, 1)  # Existing 000 is retained by the new object.
             np.testing.assert_array_equal(np.loadtxt(result.output_paths["alpha_history"], skiprows=1)[:, 0], [2, 4, 6])
 

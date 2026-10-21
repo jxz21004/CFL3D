@@ -433,6 +433,7 @@ the new reference is applied by the next solve.
 | `resident` | `False` | Retain native workspace between chunks; restricted cold-start mode described below |
 | `output_directory` | `"cfl3d-output"` | Automatic output directory |
 | `name` | `"out"` | Case name used in automatic filenames |
+| `progress` | `True` | Print flushed mesh, native solve, and output phase checkpoints on communicator rank 0; set False to disable these checkpoints |
 | `numberSolutions` | `True` | Allocate a new output number; False can append a continued calculation |
 | `writevolumesolution` | `True` | Write CGNS/ADF volume output and include volume arrays in automatic NPZ |
 | `writeTecplotSurfaceSolution` | `True` | Write the main Tecplot ASCII wall file |
@@ -440,6 +441,14 @@ the new reference is applied by the next solve.
 | `volume_filename` | `None` | Custom label/path for automatic volume output |
 | `surface_filename` | `None` | Custom label/path for automatic wall output |
 | `flow_prefix` | `None` | Custom label/path for automatic PLOT3D output |
+
+Progress checkpoints show elapsed wall time and the planned native grid-stage
+cycles. The native solver writes its detailed iteration log to the numbered
+`.out` file named in the checkpoint; the Python phase line is printed before
+entering the blocking native call. For MPI jobs, stdout from communicator rank 0
+must be captured by the launcher to see these lines. A completed checkpoint
+identifies the preceding phase as finished, while the current line identifies
+work still in progress.
 
 ## Dynamic updates and continuation
 
@@ -627,13 +636,29 @@ shorter than the configured first-order startup period without restarting it.
 a snapshot. Last result readouts remain available for queries/deferred output;
 another solve after close starts cold. `resetFlow()` also closes the context and
 clears restart inputs, preserving output numbering. An active resident owner must
-close before another object solves in that Python process. The owner is retained
-until explicit close; use a `with` block for a defined lifetime. Independent cases
-on disjoint communicators can remain resident and solve simultaneously. In MPI, calls,
-updates and cleanup involve every member of `solver.comm`. One duplicated native
-communicator lives across the chunks; closing does not finalize MPI or free the
-user's communicator. See [distributed-storage.md](distributed-storage.md) for the
-native boundaries and regression evidence.
+close before another object solves in that Python process. Keep the resident
+object alive for as many `solve()` calls as the workflow needs; there is no need
+to decide the number of calls in advance. Once the case is finished, **every rank
+in `solver.comm` must call `solver.close()`**, or leave the same `with` block.
+Rank 0 cannot release another rank's native workspace. `del solver`, garbage
+collection and interpreter shutdown are not substitutes for collective close:
+the active native context retains the solver, and Python destruction is not
+synchronized across MPI ranks. For example:
+
+```python
+with CFL3D(options={**case_options, "resident": True}, comm=case_comm) as solver:
+    solver.solve()
+    # Later, all ranks in case_comm may call solver.solve() again as needed.
+# All case_comm ranks close the resident workspace here.
+```
+
+`close()` also removes successful worker directories and empty native auxiliary
+files; users do not need to delete them manually. Failed-run diagnostics remain.
+Independent cases on disjoint communicators can remain resident and solve
+simultaneously. One duplicated native communicator lives across the chunks;
+closing does not finalize MPI or free the user's communicator. See
+[distributed-storage.md](distributed-storage.md) for the native boundaries and
+regression evidence.
 
 ## MPI
 
@@ -753,7 +778,15 @@ not the entire world. It duplicates that communicator for native messages. With
 the default nonresident path frees it after each solve. Neither path finalizes MPI.
 
 Ranks retain their owned coordinate/flow/wall/restart arrays. Automatic files are
-written by comm root; workers have separate `rank-0001/` work directories.
+written by comm root. Workers use separate `rank-0001/` work directories while
+native code is active; successful nonresident solves remove them on return, and
+resident solves remove them at `close()`. Failed runs retain worker directories
+for diagnosis. Directories with unexpected files are left untouched.
+Successful solves also remove empty legacy auxiliary files (such as `.out15`
+and `.out20`) from the main output directory. Resident solves do this at
+`close()`, after native files are closed. Empty optional logs such as `.alpha`
+are removed too; their `output_paths` entries still name the expected location.
+Nonempty files remain.
 Loads and group-name queries remain local. Detailed surface queries and all
 writers are collective. Native MPI errors abort the job to avoid leaving peers
 inside blocking native calls.

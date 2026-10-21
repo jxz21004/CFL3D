@@ -11,6 +11,7 @@ import threading
 import sys
 import json
 import hashlib
+from time import perf_counter
 import warnings
 from numbers import Real
 import numpy as np
@@ -144,6 +145,7 @@ class SolverOptions:
     keep_ambient_turbulence: bool = False
     resident: bool = False  # Opt-in native workspace lifetime; see docs/distributed-storage.md.
     coarse_grid_stages: tuple[MultigridStage, ...] | None = None
+    progress: bool = True  # Rank-0 phase checkpoints for long first calls.
 
     def __setattr__(self, key, value):
         name = _OPTION_NAMES.get(key.casefold()) if isinstance(key, str) else None
@@ -279,7 +281,7 @@ _OPTION_CATEGORIES = {
     "runtime": frozenset(("resident",)),
     "io": frozenset(("name", "output_directory", "numberSolutions", "writevolumesolution",
                      "writeTecplotSurfaceSolution", "writeflowsolution", "volume_filename",
-                     "surface_filename", "flow_prefix")),
+                     "surface_filename", "flow_prefix", "progress")),
 }
 _OPTION_CATEGORIES["numerical"] = frozenset(_OPTION_DEFAULTS) - frozenset().union(*_OPTION_CATEGORIES.values())
 
@@ -303,7 +305,7 @@ def _validate_options(values):
             continue
         if not isinstance(value, (str, Path)) or not str(value).strip():
             raise ValueError(f"{name} must be a nonempty path")
-    for name in ("writevolumesolution", "writeTecplotSurfaceSolution", "writeflowsolution", "numberSolutions", "resident"):
+    for name in ("writevolumesolution", "writeTecplotSurfaceSolution", "writeflowsolution", "numberSolutions", "resident", "progress"):
         if not isinstance(values[name], bool):
             raise ValueError(f"{name} must be a boolean")
     if values["coarse_grid_stages"] is not None and values["multigrid_stages"] is not None:
@@ -650,6 +652,8 @@ class CFL3D:
         self._options = local_options
         object.__setattr__(self._options, "_check_callback", self.checkOptions)
         self.checkOptions()
+        self._progress_origin = self._progress_last = perf_counter()
+        self._progress("Loading mesh and assigning coordinates")
 
         def load():
             if mesh is not None and self.options.input_grid is not None:
@@ -673,6 +677,59 @@ class CFL3D:
         stamp = self._checked(lambda: self._grid_stamp(self.options.input_grid)
                               if self.comm is None or self.comm.rank == 0 else None)
         self._loaded_grid_stamp = self.comm.bcast(stamp, root=0) if self.comm is not None else stamp
+        self._progress(f"Mesh ready: {len(self.mesh.zones)} zones")
+
+    def _progress(self, message):
+        """Report a phase transition from the solver communicator's root only."""
+        now = perf_counter()
+        previous = self._progress_last
+        self._progress_last = now
+        if self.options.progress and (self.comm is None or self.comm.rank == 0):
+            print(f"CFL3D[{self.name}] {message} "
+                  f"(+{now-previous:.1f}s; total {now-self._progress_origin:.1f}s)", flush=True)
+
+    @staticmethod
+    def _stage_summary(arrays, fine_cycles=None):
+        """Show the actual native stage schedule, including coarse startup."""
+        stages = arrays["stages"]
+        parts = []
+        for index in range(stages.shape[1]):
+            cycles = fine_cycles if fine_cycles is not None and index == stages.shape[1]-1 else stages[0,index]
+            parts.append(f"{int(stages[1,index])} level(s) x {int(cycles)} cycles")
+        return ", ".join(parts)
+
+    @staticmethod
+    def _cleanup_worker_directory(directory, stem):
+        """Remove only a successful worker's native error file and empty directory.
+
+        Native ranks need separate working directories while running. Leave all
+        other files alone so diagnostics from failures and caller files survive.
+        """
+        try:
+            (directory / (stem + ".error")).unlink(missing_ok=True)
+            directory.rmdir()
+        except OSError:
+            pass  # Unexpected files or permissions leave the directory intact.
+
+    @staticmethod
+    def _cleanup_empty_native_files(directory, stem):
+        """Discard empty native outputs after their Fortran units have closed.
+
+        Result.output_paths describes file locations, not a promise that an
+        optional log has data. Never glob a stem: it could match caller files.
+        """
+        suffixes = (".alpha", ".blomax", ".dynamic_patch", ".error",
+                    ".out", ".out15", ".out20", ".prout", ".res",
+                    ".subit_res", ".subit_turres", ".turres",
+                    "_aesurf.dat", "_genforce.dat", "_ovrlp.bin", "_patch.bin",
+                    "_precfl3d.error", "_precfl3d.out")
+        for suffix in suffixes:
+            path = directory / (stem + suffix)
+            try:
+                if path.is_file() and not path.is_symlink() and path.stat().st_size == 0:
+                    path.unlink()
+            except OSError:
+                pass  # Cleanup must not turn a completed calculation into a failure.
 
     @staticmethod
     def _mesh_metadata(mesh):
@@ -742,8 +799,11 @@ class CFL3D:
         return self._checked(assemble)
 
     def _native_arrays(self):
+        self._progress("Preparing native mesh, interfaces, and boundary conditions")
         if self.comm is None:
-            return self._checked(self._arrays)
+            prepared = self._checked(self._arrays)
+            self._progress("Native input ready")
+            return prepared
         complete = self._gather_mesh(self.mesh)
         def prepare():
             if self.comm.rank != 0:
@@ -757,6 +817,7 @@ class CFL3D:
         prepared = self._checked(prepare)
         arrays, keys = self.comm.bcast((prepared[0], self._surface_keys) if self.comm.rank == 0 else None, root=0)
         self._surface_keys = keys
+        self._progress("Native input ready")
         return arrays, prepared[1] if self.comm.rank == 0 else np.empty((0,3), order="F")
 
     def __call__(self, *, output_directory=None):
@@ -1950,7 +2011,9 @@ class CFL3D:
         acquired = _NATIVE_LOCK.acquire(blocking=False)
         old_directory = Path.cwd()
         native_comm = None
+        completed = False
         try:
+            self._progress("Installing native configuration")
             def check_lock():
                 from ._runtime import check_owner
                 check_owner(self)
@@ -1978,11 +2041,15 @@ class CFL3D:
                 os.chdir(local_directory)
             self._checked(configure)
             del xyz  # The native host now owns its temporary coordinate input.
+            self._progress(f"Native solve running: {self._stage_summary(arrays)}; "
+                           f"log: {local_directory / output_names['log']}")
             status, nrows = _native.py_solve()
             if status:
                 error_file = output_names["preprocess_error" if status == -99 else "error"]
                 raise RuntimeError(f"CFL3D failed with status {status}; inspect {local_directory / error_file}")
+            self._progress(f"Native solve finished: {nrows} cycles; extracting results")
             q, history, final_alpha, surface_values, wall_counts, wall_values, wall_force_values, force_angles = self._read_native_result(_native, arrays, nrows)
+            self._progress("Native results extracted; caching restart state")
             from .restart import FlowState, metadata, read_restart_partitioned
             if self.comm is None:
                 checkpoint = FlowState(checkpoint_path.read_bytes(), metadata(self.mesh,self.options), {})
@@ -1992,12 +2059,16 @@ class CFL3D:
                                                        self._zone_owners, self.comm, self._checked)
             self._checked(lambda: checkpoint_path.unlink(missing_ok=True) if rank == 0 else None)
             _native.py_release_buffers()
+            self._progress("Restart state cached")
+            completed = True
         finally:
             os.chdir(old_directory)
             if native_comm is not None:
                 native_comm.Free()
             if acquired:
                 _NATIVE_LOCK.release()
+            if completed and rank != 0:
+                self._cleanup_worker_directory(local_directory, stem)
         return arrays, q, history, final_alpha, surface_values, wall_counts, wall_values, wall_force_values, force_angles, checkpoint
 
     def _solve_resident_native(self, output_directory, stem,
@@ -2022,6 +2093,7 @@ class CFL3D:
                 self._resident_context = None
             raise
         self._last_runtime_info = context.info()
+        self._progress(f"Native solve finished: {len(values[1])} new cycles; results extracted")
         return context.arrays, values
 
     def getRuntimeInfo(self):
@@ -2060,6 +2132,8 @@ class CFL3D:
 
     def solve(self, *, output_directory=None):
         from ._runtime import check_owner
+        self._progress_origin = self._progress_last = perf_counter()
+        self._progress("Checking options and mesh before solve")
         self._checked(lambda: check_owner(self))
         self._check_resident_members()
         self._last_result = None  # Failed solves must not expose an older run's loads.
@@ -2118,6 +2192,7 @@ class CFL3D:
         stem = f"{self.name}_{solve_index:03d}"
         # Legacy filename fields are 80 bytes; reserve room for auxiliary suffixes.
         self._checked(lambda: self._validate_native_stem(stem))
+        self._progress(f"Validation complete; output index {solve_index:03d}")
         if self.options.resident:
             arrays, values = self._solve_resident_native(output_directory, stem,
                                                         changed_options, append_output, iteration_offset)
@@ -2190,22 +2265,34 @@ class CFL3D:
         if checkpoint is not None:
             checkpoint.fields = self._last_fields
         self._flow_state = checkpoint
+        self._progress("Flow and boundary results cached; writing requested outputs")
         from .solution_io import result_output
         path = self._checked(lambda: self._output_path(None, output_names["solution"]) if rank == 0 else None)
         if self.options.writevolumesolution:
+            self._progress("Writing automatic solution arrays")
             self._write_zones(lambda: result_output(path, result._saved_values()), coordinates=False)
         elif not self.options.resident:
+            self._progress("Writing restart metadata")
             self._checked(lambda: result.save(path, include_volume=False) if rank == 0 else None)
         if self.options.writeTecplotSurfaceSolution:
+            self._progress("Writing Tecplot surface and registered analyses")
             self.writeTecplotSurfaceSolution()
         elif self.nLiftDist or self.nSlice:
+            self._progress("Writing registered surface analyses")
             self.writeSurfaceAnalysis()
         if checkpoint is not None and (self.options.writevolumesolution or self.options.writeflowsolution):
+            self._progress("Writing native restart output")
             self._stage_flow_state(checkpoint, output_directory / output_names["restart"])
         if self.options.writevolumesolution:
+            self._progress("Writing CGNS volume solution")
             self.writeVolumeSolution()
         if self.options.writeflowsolution:
+            self._progress("Writing PLOT3D flow solution")
             self.writeFlowSolution()
+        if not self.options.resident:
+            self._checked(lambda: self._cleanup_empty_native_files(output_directory, stem)
+                          if rank == 0 else None)
+        self._progress(f"Solve {solve_index:03d} complete")
         return result
 
     @staticmethod
