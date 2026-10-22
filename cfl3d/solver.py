@@ -18,6 +18,7 @@ from .cgns import CGNSMesh
 
 _NATIVE_LOCK = threading.Lock()
 _AUTO_COMM = object()
+_DEFAULT_RESTART_INTERVAL = 99999
 _MODELS = {"euler": 0, "laminar": 1, "sa": 5, "sst": 7, "komega": 6, "gamma-theta": 40,
            "bsl": 7, "sst2003": 7, "wilcox2006": 6}
 # Distinct model names keep restart metadata and cold-start decisions unambiguous,
@@ -100,7 +101,7 @@ class SolverOptions:
     iterations: int = 100
     first_order_iterations: int = 0
     coarse_grid_first_order_iterations: int = 0
-    restart_interval: int | None = None
+    restart_interval: int = _DEFAULT_RESTART_INTERVAL
     multigrid_levels: int = 1
     mesh_sequence: bool = False
     coarse_grid_iterations: int = 50
@@ -277,9 +278,7 @@ def _validate_options(values):
         raise ValueError("Require nonnegative CFL ramp steps and first_order_iterations <= iterations unless resident=True")
     if not 0 <= values["coarse_grid_first_order_iterations"] <= values["coarse_grid_iterations"]:
         raise ValueError("coarse_grid_first_order_iterations must be within coarse_grid_iterations")
-    if values["restart_interval"] is not None and (isinstance(values["restart_interval"], bool)
-            or not isinstance(values["restart_interval"], int) or values["restart_interval"] < 1):
-        raise ValueError("restart_interval must be a positive integer or None")
+    _integer(values["restart_interval"], "restart_interval", 1, np.iinfo(np.int32).max)
     if not 1 <= values["multigrid_levels"] <= 5 or values["multigrid_cycle"] not in (1, 2):
         raise ValueError("multigrid_levels must be 1..5; cycle must be 1 (V) or 2 (W)")
     if values["turbulence"].lower() not in _MODELS:
@@ -1871,7 +1870,7 @@ class CFL3D:
                     connections=conn, flow=np.array([o.mach, o.alpha, o.beta, o.reynolds/1e6, o.temperature*1.8, int(o.y_up), 0.]),
                     reference=np.array([o.sref, o.cref, o.bref, *o.moment_center]),
                     time_control=np.array([-o.cfl, 0., o.cfl_ramp_steps, o.cfl_ramp_factor, 0., 10.]),
-                    run_control=np.array([-len(zones), 0, 0, o.restart_interval or max(1, int(stages[0].sum())), 0, i2d, 1, 1], dtype=np.int32),
+                    run_control=np.array([-len(zones), 0, 0, o.restart_interval, 0, i2d, 1, 1], dtype=np.int32),
                     mg=np.array([mseq, int(o.multigrid_levels > 1), 0, o.multigrid_up_iterations, o.multigrid_cycle], dtype=np.int32),
                     smoothing=smoothing,
                     stages=stages, keywords=np.array([int(o.full_navier_stokes and model != 0), o.turbulence_subiterations,

@@ -10,6 +10,21 @@ from test_surface_forces import grouped_plate
 
 
 class StageOptionsTests(unittest.TestCase):
+    def test_restart_interval_default_and_overrides(self):
+        mesh = grouped_plate()
+        config = dict(multigrid_levels=3, iterations=12, mesh_sequence=True,
+                      coarse_grid_iterations=2)
+        solver = CFL3D(mesh, config, comm=None)
+        arrays, _ = solver._arrays()
+        self.assertEqual(arrays["run_control"][3], 99999)
+        solver.options.restart_interval = 3
+        arrays, _ = solver._arrays()
+        self.assertEqual(arrays["run_control"][3], 3)
+        for invalid in (None, 0, True, 2**31):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                solver.options.restart_interval = invalid
+            self.assertEqual(solver.options.restart_interval, 3)
+
     def test_automatic_coarse_grid_budgets(self):
         options = RuntimeOptions({"MULTIGRID_LEVELS": 3, "MESH_SEQUENCE": True,
             "COARSE_GRID_ITERATIONS": 4,

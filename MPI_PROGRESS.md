@@ -1,6 +1,38 @@
-# CFL3D Python/MPI 第十一轮检查点（动态参数与分类初始化策略）— 2026-10-16
+# CFL3D Python/MPI 开发进度
 
-最新状态见文末“阶段五第三步：公开驻留对象生命周期（Native API 15）”；前面保留各阶段历史记录。
+当前开发状态见下节（2026-10-22，Native API 16）。下面的各轮检查点按当时的状态保留；
+其中“尚未支持”和测试数量不一定代表当前版本。已发布的 v0.2.0 是 API 15，
+后续开发功能不属于该发行版。接口用法与现存限制分别见
+[`docs/python-wrapper.md`](docs/python-wrapper.md) 和
+[`docs/limitations.md`](docs/limitations.md)。
+
+## 当前检查点：API 16 与迭代开销整理（2026-10-22）
+
+- MPI 仍沿用原生 host/worker、按完整 zone 分配的计算方式。不同算例可在互不重叠的
+  communicator 和工作目录同时运行；同一进程只能有一个活动的 resident 算例。
+  `close()` 是 communicator 内的集体操作。
+- Python 的持久坐标、平均流场、详细壁面数据和完整原生 restart 记录按 zone 所有权分布。
+  MPI 文件网格在初始 owner 读取坐标，checkpoint 读写按块传输，体场逐 zone 输出，
+  壁面 ASCII 从 owner 流式输出。原生初始化、显式 `gatherFields()`、截面与升力分布分析
+  仍可能在 host 临时汇总全局数据；尚无生产网格 RSS/峰值内存测量。
+- `resident=True` 已支持自动或显式粗到细初始网格序列，后续 `solve()` 在保留的原生工作区
+  接着计算，不重复 setup 或依赖内部 restart 文件。默认 `resident=False` 仍通过完整原生
+  restart 状态继续计算；驻留模式尚不支持完整 FlowState 快照或从文件初始化。
+- 细网格每次调用的步数由 `iterations` 控制；粗网格可用 `mesh_sequence` 与
+  `coarse_grid_iterations`，或显式 `coarse_grid_stages` 配置。原先含细网格重复定义的
+  `multigrid_stages` 已移除。`restart_interval` 直接传给原生 NWREST，默认 99999，
+  必须是正的 32 位整数，`None` 无效；每个网格阶段结束仍会写出原生 restart。
+- 迭代期间的详细壁面/y+ 数据仅在需要发布最终结果时捕获；本次又跳过其余迭代中的
+  Python zone 查找，保留原生 force 积分。`solve()` 的阶段进度提示与空的原生临时输出
+  清理已经加入。0.2.0 之后还加入了分区表面节点/面片与节点力查询；温启动网格变形和
+  MPhys Builder 仍未实现。
+- 当前改动在本地 Intel ifort 2021.13.2/Intel MPI 下重建串行及 MPI 扩展，
+  Python 回归共运行 106 项，其中 103 项通过、3 项可选 HDF5 测试跳过；
+  三进程 SST 短算例相对串行的
+  流场、history 和表面结果最大差值均为 0。该验证只覆盖小算例；生产环境的
+  ifort 18.0.5 构建、48 进程大算例耗时差异与本次优化幅度仍需实测。
+
+以下为历史检查点。
 
 本轮在 `CFL3D/` 修改；旧的 `CFL3D-f2py-CGNS-source/` 保留作为参考。
 MPI 已通过下述内存网格验收；本轮又补齐 CGNS/ADF 文件入口的串行和 MPI 验收。

@@ -286,7 +286,7 @@ that saved angle while retaining the flow as an initial guess.
 | `cfl_ramp_factor` | `1.0` | FMAX, at least 1; target CFL is `cfl * cfl_ramp_factor` |
 | `first_order_iterations` | `0` | NITFO on the final/default stage |
 | `coarse_grid_first_order_iterations` | `0` | NITFO on each preliminary automatic mesh-sequence stage; included in its `coarse_grid_iterations` budget |
-| `restart_interval` | `None` | NWREST checkpoint frequency; None uses the configured stage-iteration total |
+| `restart_interval` | `99999` | Positive NWREST checkpoint interval, passed directly to Fortran; `None` is invalid |
 | `limiter` | `4` | IFLIM: smooth limiter tuned to kappa=1/3 and invariant under block splitting; 0..4, scalar or `(i,j,k)` |
 | `flux` | `1` | IFDS: 0 van Leer flux-vector splitting, 1 Roe flux-difference splitting; scalar or `(i,j,k)` |
 | `inversion` | `1` | IDIAG: 0 block-tridiagonal, 1 scalar-tridiagonal; scalar or `(i,j,k)` |
@@ -297,8 +297,8 @@ that saved angle while retaining the flow as an initial guess.
 
 Direction tuples refer to grid indices, not Cartesian axes, and apply to every
 zone. Options dictionaries also accept three-element lists. First-order counts
-must not exceed their corresponding stage counts. `restart_interval` must be
-positive when specified; complete state is cached at the end of every solve even
+must not exceed their corresponding stage counts. `restart_interval` must be a
+positive 32-bit integer; complete state is cached at the end of every solve even
 when visualization outputs are disabled.
 
 `limiter=4` is the default for newly constructed solvers. It is the corrected
@@ -322,7 +322,8 @@ the frequency of Python CGNS, Tecplot, or PLOT3D snapshots. Those exports are
 written after each completed `solve()`, according to their output flags. The
 native checkpoint uses the internal temporary `.cfl3d-state.bin`; a completed
 solve caches its bytes and removes that temporary file. Numbered restart exports
-are separate final snapshots. For
+are separate final snapshots. The native solver also writes a restart at the end
+of each stage even when its length is shorter than `restart_interval`. For
 example, to write every 100 fine-grid iterations across ten continued calls:
 
 ```python

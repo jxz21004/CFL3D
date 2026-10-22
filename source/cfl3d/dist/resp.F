@@ -47,7 +47,8 @@ c
       use cfl3d_python_state, only: py_iteration_offset
 #endif
 #ifdef PYTHON_API
-      use cfl3d_python_state, only: py_select_force_zone
+      use cfl3d_python_state, only: py_select_force_zone,
+     .     py_capture_surface
 #endif
 c
 c     $Id$
@@ -319,7 +320,9 @@ c
 c
             if (myid.eq.mblk2nd(nbl)) then
 #ifdef PYTHON_API
-               call py_select_force_zone(nbl,nblg)
+c              Zone lookup is only needed when publishing the final wall data.
+               if (py_capture_surface)
+     .            call py_select_force_zone(nbl,nblg)
 #endif
                call force(jdim,kdim,idim,x,y,z,sk,sj,si,cl,cd,
      .                    czz,cyy,cxx,cmy,cmx,cmz,chd,swet,icall,
@@ -1013,7 +1016,8 @@ c
                iuns = max(itrans(nbl),irotat(nbl),idefrm(nbl))
                if (myid.eq.mblk2nd(nbl)) then
 #ifdef PYTHON_API
-                  call py_select_force_zone(nbl,nblg)
+                  if (py_capture_surface)
+     .               call py_select_force_zone(nbl,nblg)
 #endif
                   call force(jdim,kdim,idim,x,y,z,sk,sj,si,cl,cd,czz,
      .                       cyy,cxx,cmy,cmx,cmz,chd,swet,icall,q(1,2),
