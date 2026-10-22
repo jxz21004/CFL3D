@@ -1264,7 +1264,7 @@ class CFL3D:
         return (Path(str(target)+".x"), Path(str(target)+".q")) if target is not None else None
 
     def _cgns_surface_groups(self):
-        families, zones, boundaries, qualified = {}, {}, {}, {}
+        families, zones, boundaries, qualified, numbered = {}, {}, {}, {}, {}
         for zone in self.mesh.zones:
             for boundary in zone.boundaries:
                 key = (zone.name, boundary.name)
@@ -1274,10 +1274,17 @@ class CFL3D:
                 qualified[path] = {key}
                 zones.setdefault(zone.name, set()).add(key)
                 boundaries.setdefault(boundary.name, set()).add(key)
+                stem, separator, suffix = boundary.name.rpartition("_")
+                if stem and separator and suffix.isdigit():
+                    numbered.setdefault(stem, set()).add(key)
                 for family in (zone.family, *zone.additional_families,
                                boundary.family, *boundary.additional_families):
                     if family:
                         families.setdefault(family, set()).add(key)
+        # Numbered BC patches are commonly one physical part. Keep every exact
+        # name/path available while making the unsuffixed stem an aggregate.
+        for stem, members in numbered.items():
+            boundaries.setdefault(stem, set()).update(members)
         # 同名时以 Family 为准，其次 zone、BC；完整 zone/BC 路径始终可用。
         return {**boundaries, **zones, **families, **qualified}
 
@@ -1300,9 +1307,26 @@ class CFL3D:
         self._group_definitions.update(additions)
         return self
 
-    def getGroupNames(self):
+    def getGroupNames(self, detailed=False):
+        """List component groups; detailed=True also lists zone and patch selectors."""
+        if not isinstance(detailed, bool):
+            raise ValueError("detailed must be a boolean")
         base = self._last_base_groups if self._last_result is not None else self._cgns_surface_groups()
-        return sorted(set(base) | self._group_definitions.keys())
+        if detailed:
+            return sorted(set(base) | self._group_definitions.keys())
+        mesh = self._last_mesh if self._last_result is not None else self.mesh
+        names = set(self._group_definitions)
+        for zone in mesh.zones:
+            names.update(name for name in (zone.family, *zone.additional_families) if name)
+            for boundary in zone.boundaries:
+                families = (boundary.family, *boundary.additional_families)
+                names.update(name for name in families if name)
+                stem, separator, suffix = boundary.name.rpartition("_")
+                if stem and separator and suffix.isdigit():
+                    names.add(stem)
+                elif not any(families) and not zone.family and not zone.additional_families:
+                    names.add(boundary.name)
+        return sorted(names & (set(base) | self._group_definitions.keys()))
 
     def getSurfaceMesh(self, groupName=None):
         """Return partitioned wall geometry before or after solve(), without I/O.

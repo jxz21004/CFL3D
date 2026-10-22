@@ -31,15 +31,58 @@ class GroupValidationTests(unittest.TestCase):
                 CFL3D(mesh, groups=groups)
         solver = CFL3D(mesh, groups={"Combined": ["Forward", "Aft"]})
         self.assertIn("Wing", solver.getGroupNames())
-        self.assertIn("plate0/plate", solver.getGroupNames())
+        self.assertIn("Combined", solver.getGroupNames())
+        self.assertNotIn("plate0/plate", solver.getGroupNames())
+        self.assertIn("plate0/plate", solver.getGroupNames(detailed=True))
         with self.assertRaisesRegex(RuntimeError, "solve"):
             solver.getSolution()
         with self.assertRaises(ValueError):
             SolverOptions(freestream_pressure=-1.).validate()
 
+    def test_numbered_boundary_patches_have_one_component_name(self):
+        mesh = grouped_plate()
+        for zone, number in zip(mesh.zones, (2854, 2855)):
+            wall = next(bc for bc in zone.boundaries if bc.name == "plate")
+            wall.name = f"FAR_{number}"
+            wall.family = None
+            wall.additional_families = ()
+        solver = CFL3D(mesh)
+        self.assertIn("FAR", solver.getGroupNames())
+        self.assertNotIn("FAR_2854", solver.getGroupNames())
+        self.assertIn("FAR_2854", solver.getGroupNames(detailed=True))
+        self.assertEqual(solver._cgns_surface_groups()["FAR"],
+                         {("plate0", "FAR_2854"), ("plate1", "FAR_2855")})
+        with self.assertRaises(ValueError):
+            solver.addGroups({"FAR": ["FAR_2854"]})
+        with self.assertRaises(ValueError):
+            solver.getGroupNames(detailed="yes")
+
 
 @unittest.skipUnless(importlib.util.find_spec("cfl3d._native"), "Build the native extension first")
 class SurfaceForceTests(unittest.TestCase):
+    def test_numbered_patch_load_is_sum_of_exact_patches(self):
+        mesh = grouped_plate()
+        for zone, number in zip(mesh.zones, (2854, 2855)):
+            wall = next(bc for bc in zone.boundaries if bc.name == "plate")
+            wall.name = f"FAR_{number}"
+            wall.family = None
+            wall.additional_families = ()
+        options = SolverOptions(turbulence="sst", mach=.2, alpha=2., iterations=3,
+                                freestream_pressure=101325.)
+        with tempfile.TemporaryDirectory() as directory:
+            solver = CFL3D(mesh, options, comm=None)
+            solver.solve(output_directory=directory)
+            total = solver.getSolution("FAR")
+            patches = (solver.getSolution("FAR_2854"), solver.getSolution("FAR_2855"))
+            for key, value in total.items():
+                if key == "units":
+                    continue
+                suffix = key.removeprefix("FAR_")
+                self.assertAlmostEqual(value, sum(part[f"FAR_{number}_{suffix}"]
+                                                  for number, part in zip((2854, 2855), patches)),
+                                       places=11)
+            self.assertGreater(total["FAR_wettedArea"], 0.)
+
     def test_native_group_sums_drag_split_scaling_and_cache(self):
         options = SolverOptions(turbulence="sst", mach=.2, alpha=2., iterations=8,
             cfl=1., multigrid_levels=2, sref=2., cref=.7, bref=1.3,

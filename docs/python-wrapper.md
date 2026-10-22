@@ -864,6 +864,7 @@ override, cause an error.
 solver = CFL3D(options=options, groups={"Aircraft": ["Wing", "Tail"]})
 result = solver()
 print(solver.getGroupNames())
+print(solver.getGroupNames(detailed=True))  # Include individual BCs and zone/BC paths.
 loads = solver.getSolution("Aircraft")
 print(loads["Aircraft_CL"], loads["Aircraft_CD"], loads["Aircraft_CDp"], loads["Aircraft_CDv"])
 print(loads["Aircraft_CX"], loads["Aircraft_CY"], loads["Aircraft_CZ"])
@@ -872,17 +873,25 @@ print(loads["Aircraft_Cmy"], loads["Aircraft_My"], loads["Aircraft_wettedArea"])
 solver.addGroups({"WingOnly": ["Wing"]})
 ```
 
-Replace Wing/Tail with names actually present in the mesh. Default groups include
-CGNS families, zone names, BC names, and explicit `zone/BC` paths. Zone families
-include all that zone's boundaries; BC families include that BC. Repeated BC names
-are merged across zones. Name precedence is Family, then zone, then BC; explicit
-`zone/BC` paths are always available. Group names are case-sensitive.
+Replace Wing/Tail with names actually present in the mesh. `getGroupNames()` lists
+CGNS families, custom groups, and useful BC component names. For numbered BC names
+such as `FAR_2854` and `FAR_2855`, it lists the aggregate `FAR`; then
+`getSolution("FAR")` sums those patches. An existing unsuffixed BC named `FAR` is
+included in that aggregate. `getGroupNames(detailed=True)` additionally lists
+individual BC names, zone names, and exact `zone/BC` paths. These selectors remain
+valid even when hidden from the default list. Zone families include all that
+zone's boundaries; BC families include that BC. Repeated BC names are merged
+across zones. Name precedence is Family, then zone, then BC; explicit `zone/BC`
+paths are always available. Group names are case-sensitive. Automatic suffix
+grouping recognizes only an underscore followed by digits; give other patch
+naming schemes explicit CGNS families or custom groups.
 
 Custom groups use `{new_name: [existing_CGNS_name, ...]}`. New names must not collide
 with CGNS or previously added group names. Recursive custom-group membership is
-not supported. Overlapping members are integrated once. `groupName=None` sums all
-native integrated surfaces; surfaces outside the native force-integration scope
-contribute zero.
+not supported. Overlapping members are integrated once. `getSolution()` without a
+group name already returns the total integral; callers need not enumerate groups.
+Surfaces outside the native force-integration scope, such as a farfield boundary,
+contribute zero even if their name is `FAR`.
 
 The cached loads come from pressure and viscous integration in native `force.F`
 on the finest grid, before its arrays are released.
