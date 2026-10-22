@@ -15,6 +15,9 @@ module cfl3d_python_state
   integer :: py_ngrid=0, py_nbc=0, py_nconn=0, py_nhistory=0
   integer :: py_status=0, py_used=0
   integer :: py_comm=-1, py_force_zone=0
+  ! Native force integration runs every cycle; detailed output is captured only
+  ! at a Python solve boundary while the finest-grid wall state is still live.
+  logical :: py_capture_surface=.false.
   logical :: py_write_restart=.true.
   character(len=60) :: py_output_stem=''
   logical :: py_append_output=.false.
@@ -176,7 +179,7 @@ contains
     real(8), intent(in) :: alpha,beta
     real(8) :: values(10),temp,yref,zref
     integer :: idx
-    if (py_force_zone == 0) return  ! Coarse-grid forces are not output surfaces.
+    if (.not.py_capture_surface .or. py_force_zone == 0) return
     ! CL control updates alpha after force evaluation; retain the actual force axes.
     py_force_angles=(/alpha,beta/); py_force_angle_valid=1
     idx=py_bcindex(py_force_zone,face,segment)
@@ -207,7 +210,7 @@ contains
     real(8) :: values(6),tratio,mu,temp,distance
     real(8) :: loads(6)
     integer :: idx,p,code
-    if (py_force_zone == 0) return
+    if (.not.py_capture_surface .or. py_force_zone == 0) return
     idx=py_bcindex(py_force_zone,face,segment)
     code=abs(py_bc(3,idx))
     if (.not.(code==1005.or.code==1006.or.code==2004.or.code==2014.or.&

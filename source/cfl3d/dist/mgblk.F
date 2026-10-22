@@ -1696,6 +1696,19 @@ c              but not for the host
                end if
              end if
 #endif
+#ifdef PYTHON_API
+c            Preserve native per-cycle force/history evaluation, but only
+c            capture detailed wall fields at the last fine-grid cycle of
+c            this solve. Resident calls may stop before native ncyc.
+             py_capture_surface = .false.
+             if (iseq.eq.mseq) then
+                if (py_resident_enabled) then
+                   py_capture_surface = ntt.ge.py_resident_stop
+                else
+                   py_capture_surface = icyc.eq.ncyc
+                end if
+             end if
+#endif
              call resp(nbl,ntime,ntt0,jdim,kdim,idim,w(lq),w(lsj),
      .                 w(lsk),w(lsi),w(lvol),w(lx),w(ly),w(lz),
      .                 wk(lres),wk(lwk0),wk(lvmuk),wk(lvmuj),

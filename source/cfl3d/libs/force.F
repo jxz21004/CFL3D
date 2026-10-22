@@ -27,7 +27,8 @@ c
      .                 nbck0,nbcidim,nbcjdim,nbckdim,ibcinfo,jbcinfo,
      .                 kbcinfo,nn,maxseg)
 #ifdef PYTHON_API
-      use cfl3d_python_state, only: py_record_surface,py_record_wall
+      use cfl3d_python_state, only: py_record_surface,py_record_wall,
+     .     py_capture_surface
 #endif
 c
 c     $Id$
@@ -155,7 +156,8 @@ c
       if (kbcinfo(nbl,ns,6,kk) .gt. 0 ) then
 #ifdef PYTHON_API
 c     Snapshot this segment's native pressure AND viscous contributions.
-      py_before = (/cl,cd,cx,cy,cz,cmx,cmy,cmz,cdp,cdv/)
+      if (py_capture_surface)
+     .   py_before = (/cl,cd,cx,cy,cz,cmx,cmy,cmz,cdp,cdv/)
 #endif
 c
       ist = kbcinfo(nbl,ns,2,kk)
@@ -196,7 +198,9 @@ c     pressure drag
 c
       dcdvl = 0.
 #ifdef PYTHON_API
-      py_cf=0.; py_viscous=0.
+      if (py_capture_surface) then
+         py_cf=0.; py_viscous=0.
+      end if
 #endif
       if (ivisc(3).gt.0 .and. (abs(kbcinfo(nbl,ns,1,kk)).eq.2004 .or.
      .    abs(kbcinfo(nbl,ns,1,kk)).eq.2014 .or.
@@ -223,8 +227,10 @@ c
 c        viscous drag
          dcdvl  = dcx*cosa*cosb-dcy*sinb+dcz*sina*cosb
 #ifdef PYTHON_API
-         py_viscous=(/dcx,dcy,dcz/)
+         if (py_capture_surface) then
+            py_viscous=(/dcx,dcy,dcz/)
          if (sk(j,k,i,4).gt.0.) py_cf=(/dcx,dcy,dcz/)/sk(j,k,i,4)
+         end if
 #endif
          dcx = dcxp + dcx
          dcy = dcyp + dcy
@@ -242,11 +248,13 @@ c
       dcdvl = dcdvl*fact
       dsw  = sk(j,k,i,4)*fact
 #ifdef PYTHON_API
+      if (py_capture_surface) then
       call py_record_wall(4+kk,ns,i,j,
      .     qk0(j,i,5,kk+kk-1),
      .     qk0(j,i,1,kk+kk-1),py_cf*fact,
      .     sk(j,k,i,4),vol(j,kc,i),cbar,ialph,
      .     (/dcx,dcy,dcz/),py_viscous*fact)
+      end if
 #endif
 c
       swetl = swetl+dsw
@@ -282,9 +290,11 @@ c     integrated values
 c
    10 continue
 #ifdef PYTHON_API
+      if (py_capture_surface) then
       py_after = (/cl,cd,cx,cy,cz,cmx,cmy,cmz,cdp,cdv/)
       call py_record_surface(4+kk,ns,py_after-py_before,
      .                       i2d,ialph,alpha,beta)
+      end if
 #endif
       end if
     5 continue
@@ -312,7 +322,8 @@ c
       if (jbcinfo(nbl,ns,6,jj) .gt. 0 ) then
 #ifdef PYTHON_API
 c     Snapshot this segment's native pressure AND viscous contributions.
-      py_before = (/cl,cd,cx,cy,cz,cmx,cmy,cmz,cdp,cdv/)
+      if (py_capture_surface)
+     .   py_before = (/cl,cd,cx,cy,cz,cmx,cmy,cmz,cdp,cdv/)
 #endif
 c
       ist = jbcinfo(nbl,ns,2,jj)
@@ -350,7 +361,9 @@ c     pressure drag
 c
       dcdvl = 0.
 #ifdef PYTHON_API
-      py_cf=0.; py_viscous=0.
+      if (py_capture_surface) then
+         py_cf=0.; py_viscous=0.
+      end if
 #endif
       if (ivisc(2).gt.0 .and. (abs(jbcinfo(nbl,ns,1,jj)).eq.2004 .or.
      .    abs(jbcinfo(nbl,ns,1,jj)).eq.2014 .or.
@@ -377,8 +390,10 @@ c
 c        viscous drag
          dcdvl  = dcx*cosa*cosb-dcy*sinb+dcz*sina*cosb
 #ifdef PYTHON_API
-         py_viscous=(/dcx,dcy,dcz/)
+         if (py_capture_surface) then
+            py_viscous=(/dcx,dcy,dcz/)
          if (sj(j,k,i,4).gt.0.) py_cf=(/dcx,dcy,dcz/)/sj(j,k,i,4)
+         end if
 #endif
          dcx = dcxp + dcx
          dcy = dcyp + dcy
@@ -396,11 +411,13 @@ c
       dcdvl = dcdvl*fact
       dsw  = sj(j,k,i,4)*fact
 #ifdef PYTHON_API
+      if (py_capture_surface) then
       call py_record_wall(2+jj,ns,i,k,
      .     qj0(k,i,5,jj+jj-1),
      .     qj0(k,i,1,jj+jj-1),py_cf*fact,
      .     sj(j,k,i,4),vol(jc,k,i),cbar,ialph,
      .     (/dcx,dcy,dcz/),py_viscous*fact)
+      end if
 #endif
 c
       swetl = swetl+dsw
@@ -437,9 +454,11 @@ c     integrated values
 c
    40 continue
 #ifdef PYTHON_API
+      if (py_capture_surface) then
       py_after = (/cl,cd,cx,cy,cz,cmx,cmy,cmz,cdp,cdv/)
       call py_record_surface(2+jj,ns,py_after-py_before,
      .                       i2d,ialph,alpha,beta)
+      end if
 #endif
       end if
    35 continue
@@ -466,7 +485,8 @@ c
       if (ibcinfo(nbl,ns,6,ii) .gt. 0 ) then
 #ifdef PYTHON_API
 c     Snapshot this segment's native pressure AND viscous contributions.
-      py_before = (/cl,cd,cx,cy,cz,cmx,cmy,cmz,cdp,cdv/)
+      if (py_capture_surface)
+     .   py_before = (/cl,cd,cx,cy,cz,cmx,cmy,cmz,cdp,cdv/)
 #endif
 c
       jst = ibcinfo(nbl,ns,2,ii)
@@ -504,7 +524,9 @@ c     pressure drag
 c
       dcdvl = 0.
 #ifdef PYTHON_API
-      py_cf=0.; py_viscous=0.
+      if (py_capture_surface) then
+         py_cf=0.; py_viscous=0.
+      end if
 #endif
       if (ivisc(1).gt.0 .and. (abs(ibcinfo(nbl,ns,1,ii)).eq.2004 .or.
      .    abs(ibcinfo(nbl,ns,1,ii)).eq.2014 .or.
@@ -531,8 +553,10 @@ c
 c        viscous drag
          dcdvl  = dcx*cosa*cosb-dcy*sinb+dcz*sina*cosb
 #ifdef PYTHON_API
-         py_viscous=(/dcx,dcy,dcz/)
+         if (py_capture_surface) then
+            py_viscous=(/dcx,dcy,dcz/)
          if (si(j,k,i,4).gt.0.) py_cf=(/dcx,dcy,dcz/)/si(j,k,i,4)
+         end if
 #endif
          dcx = dcxp + dcx
          dcy = dcyp + dcy
@@ -550,11 +574,13 @@ c
       dcdvl = dcdvl*fact
       dsw  = si(j,k,i,4)*fact
 #ifdef PYTHON_API
+      if (py_capture_surface) then
       call py_record_wall(ii,ns,j,k,
      .     qi0(j,k,5,ii+ii-1),
      .     qi0(j,k,1,ii+ii-1),py_cf*fact,
      .     si(j,k,i,4),vol(j,k,ic),cbar,ialph,
      .     (/dcx,dcy,dcz/),py_viscous*fact)
+      end if
 #endif
 c
       swetl = swetl+dsw
@@ -590,9 +616,11 @@ c     integrated values
 c
    70 continue
 #ifdef PYTHON_API
+      if (py_capture_surface) then
       py_after = (/cl,cd,cx,cy,cz,cmx,cmy,cmz,cdp,cdv/)
       call py_record_surface(0+ii,ns,py_after-py_before,
      .                       i2d,ialph,alpha,beta)
+      end if
 #endif
       end if
    65 continue

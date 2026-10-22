@@ -1012,6 +1012,10 @@ VARLOCATION. T comes from the native wall boundary state; Cf uses native tractio
 and input Cartesian axes. The face-cell y+ uses `rho_w*u_tau*d/mu_w`,
 `d=V/(2*A)`, and the core's Sutherland molecular viscosity. Inviscid-wall Cf and y+
 are zero. Empty wall selections produce a header without wall zones.
+Native integrated loads and convergence histories are evaluated every cycle.
+Detailed wall fields, including y+, are captured only on the final fine-grid
+cycle of each `solve()` call; resident continuation refreshes them at every
+Python solve boundary.
 
 ## Lift distributions and Cp sections
 
