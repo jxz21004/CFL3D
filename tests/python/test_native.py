@@ -99,7 +99,7 @@ class NativeTests(unittest.TestCase):
             for model in ("sa", "sst", "laminar", "komega"):
                 options = SolverOptions(mach=.2, reynolds=6e6, temperature=460/1.8, turbulence=model,
                                         iterations=5, cfl=5, multigrid_levels=3,
-                                        mesh_sequence=True, coarse_iterations=2)
+                                        mesh_sequence=True, coarse_grid_iterations=2)
                 result = CFL3D(path, options).solve(output_directory=root / model)
                 self.assertEqual(result.history.shape, (9, 8))
                 self.assertTrue(np.isfinite(result.fields["flatplate"]).all())

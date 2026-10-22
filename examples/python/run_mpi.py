@@ -25,13 +25,16 @@ def main():
                             mach=args.mach, alpha=args.alpha, turbulence=args.model,
                             iterations=args.iterations, cfl=args.cfl, **numerical_options(parser, args))
     solver = CFL3D(options=options, comm=comm)
-    result = solver.solve()
-    if comm.rank == 0:
-        print(result.coefficients)
-        print(f"Final alpha: {result.final_alpha:.10g} degrees")
-        if args.freestream_pressure is not None:
-            # Cached loads are local: querying only rank 0 cannot strand workers.
-            print(solver.getSolution(args.group))
+    try:
+        result = solver.solve()
+        if comm.rank == 0:
+            print(result.coefficients)
+            print(f"Final alpha: {result.final_alpha:.10g} degrees")
+            if args.freestream_pressure is not None:
+                # Cached loads are local: querying only rank 0 cannot strand workers.
+                print(solver.getSolution(args.group))
+    finally:
+        solver.close()  # Collective within comm, including the native host.
 
 
 if __name__ == "__main__":

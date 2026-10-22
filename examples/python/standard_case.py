@@ -17,6 +17,12 @@ def main():
     parser.add_argument("--name", default="out", help="Case name for numbered result files")
     parser.add_argument("--iterations", type=int, default=1000)
     parser.add_argument("--multigrid-levels", type=int, default=1)
+    parser.add_argument("--mesh-sequence", action="store_true",
+                        help="Cold start on coarse grids; requires a compatible multigrid mesh")
+    parser.add_argument("--coarse-grid-iterations", type=int, default=50,
+                        help="Cycles on each preliminary coarse grid")
+    parser.add_argument("--coarse-grid-first-order-iterations", type=int, default=0,
+                        help="First-order cycles included in each coarse-grid budget")
     parser.add_argument("--target-cl", type=float, help="Enable native lift matching")
     parser.add_argument("--group", help="CGNS/custom group; omitted means all integrated surfaces")
     parser.add_argument("--write-volume", action=argparse.BooleanOptionalAction, default=True)
@@ -57,6 +63,9 @@ def main():
         "kappa": 1.0 / 3.0,
         "eddy_viscosity_limit": 1e5,
         "multigrid_levels": args.multigrid_levels,
+        "mesh_sequence": args.mesh_sequence,
+        "coarse_grid_iterations": args.coarse_grid_iterations,
+        "coarse_grid_first_order_iterations": args.coarse_grid_first_order_iterations,
         "multigrid_cycle": 2,               # 1: V cycle；2: W cycle
         "multigrid_smoothing": (1,) * args.multigrid_levels,
         "target_cl": args.target_cl,        # None: 固定攻角；数值: 定升反馈
@@ -79,20 +88,23 @@ def main():
         **({"comm": comm} if args.mpi else {}),
     )
     rank = 0 if solver.comm is None else solver.comm.Get_rank()
-    result = solver.solve()
-    if rank == 0:
-        print("Available groups:", solver.getGroupNames())
-        print("Final alpha (degrees):", result.final_alpha)
-        # 结果已缓存在各 rank；仅 root 查询无需其他 rank 配合。
-        loads = solver.getSolution(args.group)
-        print(json.dumps(loads, indent=2, ensure_ascii=False))
-        print("Output directory:", result.output_directory)
-    # Deferred volume/restart writes must be called by every solver rank.
-    # solver.writeVolumeSolution()
-    # solver.writeFlowSolution()
-    # solver.writeRestartFile()
-    # Surface registration, queries and output also require every MPI rank.
-    # solver.writeTecplotSurfaceSolution(groupName=args.group)
+    try:
+        result = solver.solve()
+        if rank == 0:
+            print("Available groups:", solver.getGroupNames())
+            print("Final alpha (degrees):", result.final_alpha)
+            # 结果已缓存在各 rank；仅 root 查询无需其他 rank 配合。
+            loads = solver.getSolution(args.group)
+            print(json.dumps(loads, indent=2, ensure_ascii=False))
+            print("Output directory:", result.output_directory)
+        # Deferred volume/restart writes must be called by every solver rank.
+        # solver.writeVolumeSolution()
+        # solver.writeFlowSolution()
+        # solver.writeRestartFile()
+        # Surface registration, queries and output also require every MPI rank.
+        # solver.writeTecplotSurfaceSolution(groupName=args.group)
+    finally:
+        solver.close()  # Every rank in solver.comm releases its native workspace.
 
 
 if __name__ == "__main__":

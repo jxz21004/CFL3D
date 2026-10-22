@@ -24,12 +24,12 @@ def record(stream, dtype):
 class OptionsDictionaryTests(unittest.TestCase):
     def test_normalization_validation_and_copy(self):
         values = {'multigrid_levels': 2, 'limiter': [0,2,4],
-                  'multigrid_stages': [{'iterations': 4, 'levels': 2, 'smoothing_steps': [1,2]}]}
+                  'coarse_grid_stages': [{'iterations': 4, 'levels': 1, 'smoothing_steps': [1]}]}
         options = SolverOptions.from_dict(values)
         options.validate()
         self.assertEqual(options.limiter, (0,2,4))
         self.assertEqual(values['limiter'], [0,2,4])
-        self.assertEqual(options.multigrid_stages[0].smoothing_steps, (1,2))
+        self.assertEqual(options.coarse_grid_stages[0].smoothing_steps, (1,))
         for opts in ({'unknownOption': False}, {'writevolumesolution': 'false'},
                      {'writeTecplotSurfaceSolution': 0}, {'writeflowsolution': None}):
             with self.subTest(options=opts), self.assertRaises(ValueError):

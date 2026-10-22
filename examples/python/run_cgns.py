@@ -22,12 +22,15 @@ def main():
                    reynolds=a.reynolds, temperature=a.temperature, turbulence=a.model,
                    cfl=a.cfl, iterations=a.iterations, **numerical_options(p, a))
     solver = CFL3D(options=options)
-    result = solver.solve()
-    print(result.coefficients)
-    print(f"Final alpha: {result.final_alpha:.10g} degrees")
-    if a.freestream_pressure is not None:
-        print(solver.getSolution(a.group))
-    print(f"Saved fields and convergence history to {result.output_paths['solution']}")
+    try:
+        result = solver.solve()
+        print(result.coefficients)
+        print(f"Final alpha: {result.final_alpha:.10g} degrees")
+        if a.freestream_pressure is not None:
+            print(solver.getSolution(a.group))
+        print(f"Saved fields and convergence history to {result.output_paths['solution']}")
+    finally:
+        solver.close()
 
 
 if __name__ == "__main__":

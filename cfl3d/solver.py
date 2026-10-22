@@ -1,7 +1,6 @@
 """Python-owned configuration and arrays passed directly to the native solver."""
 from __future__ import annotations
 from dataclasses import dataclass, field, asdict, replace
-from functools import wraps
 from collections.abc import Mapping, MutableMapping
 from contextlib import ExitStack
 from copy import deepcopy
@@ -100,11 +99,11 @@ class SolverOptions:
     cfl_ramp_factor: float = 1.0
     iterations: int = 100
     first_order_iterations: int = 0
-    coarse_first_order_iterations: int = 0
+    coarse_grid_first_order_iterations: int = 0
     restart_interval: int | None = None
     multigrid_levels: int = 1
     mesh_sequence: bool = False
-    coarse_iterations: int = 50
+    coarse_grid_iterations: int = 50
     multigrid_cycle: int = 2  # NGAM: 1 V, 2 W
     full_navier_stokes: bool = True
     turbulence_subiterations: int = 1
@@ -125,7 +124,6 @@ class SolverOptions:
     alpha_update_interval: int = 1
     multigrid_up_iterations: int = 0  # MTT
     multigrid_smoothing: tuple[int, ...] | None = None  # MIT, coarsest to finest
-    multigrid_stages: tuple[MultigridStage, ...] | None = None  # Legacy full-schedule input; see migration notes.
     inversion: int | tuple[int, int, int] = 1  # IDIAG, scalar or (i,j,k)
     freestream_pressure: float | None = None  # Pa; coordinates/reference lengths are metres
     input_grid: str | Path | None = None
@@ -158,13 +156,13 @@ class SolverOptions:
 
     def update(self, options=None, **kwargs):
         """Validate related changes together, then update this configuration in place."""
-        changes = self._normalize_values({**({} if options is None else dict(options)), **kwargs}, vars(self))
+        changes = self._normalize_values({**({} if options is None else dict(options)), **kwargs})
         _validate_options({**vars(self), **changes})
         vars(self).update(changes)
         return self
 
     @classmethod
-    def _normalize_values(cls, options, current=None):
+    def _normalize_values(cls, options):
         """Normalize only supplied values, without constructing a configuration."""
         names = _OPTION_NAMES
         values = {}
@@ -178,7 +176,7 @@ class SolverOptions:
         for name in ("limiter", "flux", "inversion", "kappa", "moment_center", "multigrid_smoothing"):
             if isinstance(values.get(name), list):
                 values[name] = tuple(values[name])
-        for option_name in ("coarse_grid_stages", "multigrid_stages"):
+        for option_name in ("coarse_grid_stages",):
             if values.get(option_name) is None:
                 continue
             stages = []
@@ -197,7 +195,6 @@ class SolverOptions:
                     stage = MultigridStage(**stage)
                 stages.append(stage)
             values[option_name] = tuple(stages)
-        _legacy_stage_counts(values, current)
         return values
 
     @classmethod
@@ -220,52 +217,6 @@ class SolverOptions:
 _OPTION_NAMES = {name.casefold(): name for name in SolverOptions.__dataclass_fields__}
 _OPTION_DEFAULTS = {name: definition.default for name, definition in SolverOptions.__dataclass_fields__.items()}
 
-
-def _legacy_stage_counts(changes, current=None):
-    """Adapt old full schedules without silently discarding a fine-grid budget.
-
-    New configurations only put coarse stages in coarse_grid_stages. For old
-    scripts, infer missing fine controls on initial full-schedule input; reject
-    conflicting explicit controls. Later edits to iterations remain authoritative
-    and keep the compatibility representation synchronized.
-    """
-    current = {} if current is None else current
-    stages = changes.get("multigrid_stages")
-    if stages and isinstance(stages[-1], MultigridStage):
-        final = stages[-1]
-        for name, value in (("iterations", final.iterations),
-                            ("first_order_iterations", final.first_order_iterations)):
-            if name in changes and changes[name] != value:
-                raise ValueError(f"{name} conflicts with the final legacy multigrid_stages entry; "
-                                 "use coarse_grid_stages and top-level fine-grid controls")
-            changes[name] = value
-    elif "multigrid_stages" not in changes and current.get("multigrid_stages"):
-        if "iterations" in changes or "first_order_iterations" in changes:
-            old = current["multigrid_stages"]
-            changes["multigrid_stages"] = (*old[:-1], replace(old[-1],
-                iterations=changes.get("iterations", current["iterations"]),
-                first_order_iterations=changes.get("first_order_iterations", current["first_order_iterations"])))
-
-
-# Capture explicitly supplied typed controls before dataclass defaults are filled,
-# so legacy callers get the same conflict checks as options dictionaries.
-_solver_options_init = SolverOptions.__init__
-
-
-@wraps(_solver_options_init)
-def _init_solver_options(self, *args, **kwargs):
-    names = tuple(_OPTION_DEFAULTS)
-    if len(args) > len(names):
-        raise TypeError("Too many positional SolverOptions arguments")
-    supplied = dict(zip(names, args))
-    if supplied.keys() & kwargs.keys():
-        raise TypeError("Repeated SolverOptions argument")
-    supplied.update(kwargs)
-    _legacy_stage_counts(supplied)
-    _solver_options_init(self, **supplied)
-
-
-SolverOptions.__init__ = _init_solver_options
 
 # 这里只规定默认接续策略，并不禁止修改。物理/网格变化在 solve 前重新初始化；
 # 数值控制、积分参考量和输出设置不丢弃流场。比较基准是上次成功计算的独立副本。
@@ -308,27 +259,24 @@ def _validate_options(values):
     for name in ("writevolumesolution", "writeTecplotSurfaceSolution", "writeflowsolution", "numberSolutions", "resident", "progress"):
         if not isinstance(values[name], bool):
             raise ValueError(f"{name} must be a boolean")
-    if values["coarse_grid_stages"] is not None and values["multigrid_stages"] is not None:
-        raise ValueError("Use coarse_grid_stages or legacy multigrid_stages, not both")
-    if values["mesh_sequence"] and (values["coarse_grid_stages"] is not None
-                                    or values["multigrid_stages"] is not None):
+    if values["mesh_sequence"] and values["coarse_grid_stages"] is not None:
         raise ValueError("mesh_sequence is automatic startup; do not combine it with explicit grid stages")
     if values["resident"] and values["restartFile"] is not None:
         raise NotImplementedError("File restart initialization is not yet implemented for resident=True")
-    ints = ("iterations", "multigrid_levels", "coarse_iterations", "multigrid_cycle",
+    ints = ("iterations", "multigrid_levels", "coarse_grid_iterations", "multigrid_cycle",
             "turbulence_subiterations", "cfl_ramp_steps",
-            "first_order_iterations", "coarse_first_order_iterations")
+            "first_order_iterations", "coarse_grid_first_order_iterations")
     for name in ints:
         value = values[name]
         if isinstance(value, bool) or not isinstance(value, int):
             raise ValueError(f"{name} must be an integer")
-    if values["iterations"] < 1 or values["coarse_iterations"] < 0 or values["turbulence_subiterations"] < 1:
+    if values["iterations"] < 1 or values["coarse_grid_iterations"] < 0 or values["turbulence_subiterations"] < 1:
         raise ValueError("Invalid iteration count")
     if (values["cfl_ramp_steps"] < 0 or values["first_order_iterations"] < 0
             or (not values["resident"] and values["first_order_iterations"] > values["iterations"])):
         raise ValueError("Require nonnegative CFL ramp steps and first_order_iterations <= iterations unless resident=True")
-    if not 0 <= values["coarse_first_order_iterations"] <= values["coarse_iterations"]:
-        raise ValueError("coarse_first_order_iterations must be within coarse_iterations")
+    if not 0 <= values["coarse_grid_first_order_iterations"] <= values["coarse_grid_iterations"]:
+        raise ValueError("coarse_grid_first_order_iterations must be within coarse_grid_iterations")
     if values["restart_interval"] is not None and (isinstance(values["restart_interval"], bool)
             or not isinstance(values["restart_interval"], int) or values["restart_interval"] < 1):
         raise ValueError("restart_interval must be a positive integer or None")
@@ -401,22 +349,14 @@ def _stage_schedule(values):
     # Resident startup may span chunks: reserve capacity without extending the
     # public solve's requested fine-grid work or resetting first-order counters.
     budget = max(values["iterations"], values["first_order_iterations"]) if values["resident"] else values["iterations"]
-    if values["multigrid_stages"] is not None:
-        if not isinstance(values["multigrid_stages"], tuple):
-            raise ValueError("multigrid_stages must be an immutable tuple")
-        stages = values["multigrid_stages"]
-        if not stages or not isinstance(stages[-1], MultigridStage):
-            return stages  # The common schedule validator provides the error.
-        return (*stages[:-1], replace(stages[-1], iterations=budget,
-                                     first_order_iterations=values["first_order_iterations"]))
     final = MultigridStage(budget, values["multigrid_levels"], values["first_order_iterations"])
     if values["coarse_grid_stages"] is not None:
         if not isinstance(values["coarse_grid_stages"], tuple):
             raise ValueError("coarse_grid_stages must be a tuple of MultigridStage objects")
         return (*values["coarse_grid_stages"], final)
     if values["mesh_sequence"]:
-        return tuple(MultigridStage(values["coarse_iterations"], level,
-                                   values["coarse_first_order_iterations"])
+        return tuple(MultigridStage(values["coarse_grid_iterations"], level,
+                                   values["coarse_grid_first_order_iterations"])
                      for level in range(1, values["multigrid_levels"])) + (
             final,)
     return (final,)
@@ -483,7 +423,7 @@ class RuntimeOptions(MutableMapping):
 
     def update(self, *args, **kwargs):
         provided = dict(*args, **kwargs)
-        changes = SolverOptions._normalize_values(provided, self._values)
+        changes = SolverOptions._normalize_values(provided)
         # 校验候选字典后一次替换；不改动现值，也不反复创建 SolverOptions。
         # 只规范化传入项，未修改参数和已保存的历史快照保持原值。
         candidate = {**self._values, **changes}
@@ -2150,13 +2090,6 @@ class CFL3D:
         # This is distinct from legacy restart-based numerical continuation.
         if self._resident_context is not None:
             warm = _OPTION_CATEGORIES["io"] | {"iterations", "cfl", "freestream_pressure"}
-            # The legacy full-schedule view mirrors iterations. Updating that
-            # mirrored count must not restart an otherwise unchanged hierarchy.
-            previous = (self._successful_options or {}).get("multigrid_stages")
-            current = self.options.multigrid_stages
-            if previous and current and previous[:-1] == current[:-1]:
-                if replace(previous[-1], iterations=current[-1].iterations) == current[-1]:
-                    warm = warm | {"multigrid_stages"}
             reset_reasons = tuple(sorted(set(reset_reasons) | (set(changed_options)-warm)))
         if self.comm is not None:
             decisions = self.comm.allgather((changed_options, reset_reasons, mesh_signature))

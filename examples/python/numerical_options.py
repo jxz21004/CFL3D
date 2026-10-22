@@ -26,9 +26,9 @@ def add_numerical_options(parser):
     parser.add_argument("--multigrid-levels", type=int, default=1, choices=range(1, 6))
     parser.add_argument("--multigrid-cycle", type=int, default=2, choices=(1, 2))
     parser.add_argument("--mesh-sequence", action="store_true")
-    parser.add_argument("--coarse-iterations", type=int, default=50)
+    parser.add_argument("--coarse-grid-iterations", type=int, default=50)
     parser.add_argument("--first-order-iterations", type=int, default=0)
-    parser.add_argument("--coarse-first-order-iterations", type=int, default=0)
+    parser.add_argument("--coarse-grid-first-order-iterations", type=int, default=0)
     parser.add_argument("--multigrid-up-iterations", type=int, default=0)
     parser.add_argument("--multigrid-smoothing", type=int, nargs="+")
     parser.add_argument("--eddy-viscosity-limit", type=float, default=1e5)
@@ -41,8 +41,8 @@ def numerical_options(parser, args):
         "freestream_pressure", "sref", "cref", "bref", "freestream_turbulence_intensity",
         "freestream_eddy_viscosity", "keep_ambient_turbulence",
         "target_cl", "alpha_relaxation", "alpha_step_limit", "alpha_update_interval",
-        "multigrid_levels", "multigrid_cycle", "mesh_sequence", "coarse_iterations",
-        "first_order_iterations", "coarse_first_order_iterations", "multigrid_up_iterations",
+        "multigrid_levels", "multigrid_cycle", "mesh_sequence", "coarse_grid_iterations",
+        "first_order_iterations", "coarse_grid_first_order_iterations", "multigrid_up_iterations",
         "eddy_viscosity_limit")}
     result.update(writevolumesolution=args.write_volume,
                   writeTecplotSurfaceSolution=args.write_surface,

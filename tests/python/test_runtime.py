@@ -63,10 +63,10 @@ class RuntimeOptionsTests(unittest.TestCase):
         self.assertTrue(solver.checkOptions())
         self.assertTrue(solver.options.check())
         stages = SolverOptions.from_dict(
-            {"MULTIGRID_LEVELS": 2, "MULTIGRID_STAGES": [{"ITERATIONS": 2, "LEVELS": 2, "SMOOTHING_STEPS": [1, 2]}]}
+            {"MULTIGRID_LEVELS": 2, "COARSE_GRID_STAGES": [{"ITERATIONS": 2, "LEVELS": 1, "SMOOTHING_STEPS": [1]}]}
         )
         stages.validate()
-        self.assertEqual(stages.multigrid_stages[0].iterations, 2)
+        self.assertEqual(stages.coarse_grid_stages[0].iterations, 2)
 
 
 class ContinuationTests(unittest.TestCase):
@@ -178,7 +178,7 @@ class ContinuationTests(unittest.TestCase):
                     cfl=1.0,
                     multigrid_levels=3,
                     mesh_sequence=True,
-                    coarse_iterations=2,
+                    coarse_grid_iterations=2,
                     writevolumesolution=False,
                     writeTecplotSurfaceSolution=False,
                 ),

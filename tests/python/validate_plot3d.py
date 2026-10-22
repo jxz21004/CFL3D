@@ -37,7 +37,7 @@ def main():
     assert 'execution terminated normally' in (root/'cfl3d.error').read_text()
     solver=CFL3D(mesh,SolverOptions(mach=.2,reynolds=6e6,temperature=460/1.8,
         turbulence='sst',iterations=2,cfl=5,multigrid_levels=3,mesh_sequence=True,
-        coarse_iterations=2,kappa=.33333,writevolumesolution=False,
+        coarse_grid_iterations=2,kappa=.33333,writevolumesolution=False,
         writeTecplotSurfaceSolution=False,writeflowsolution=False),
         boundary_overrides={('flatplate','plate'):(2004,(-1.,0.))})
     result=solver.solve(output_directory=root/'python')

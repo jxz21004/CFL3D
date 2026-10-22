@@ -45,7 +45,7 @@ def run_case(root, executable, model='gamma-theta'):
     assert 'execution terminated normally' in (baseline/'cfl3d.error').read_text()
     path = write_adf(mesh, root/'mesh.cgns')
     options = SolverOptions(turbulence=model, mach=.2, reynolds=6e6, temperature=460/1.8,
-        iterations=3, cfl=5, multigrid_levels=3, mesh_sequence=True, coarse_iterations=3,
+        iterations=3, cfl=5, multigrid_levels=3, mesh_sequence=True, coarse_grid_iterations=3,
         kappa=.33333, limiter=4, freestream_turbulence_intensity=.2,
         freestream_eddy_viscosity=1., keep_ambient_turbulence=True,
         writevolumesolution=False, writeTecplotSurfaceSolution=False)

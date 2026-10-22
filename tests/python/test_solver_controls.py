@@ -19,11 +19,11 @@ class ControlValidationTests(unittest.TestCase):
             dict(multigrid_levels=2, multigrid_smoothing=(1,)),
             dict(multigrid_levels=2, multigrid_smoothing=(0, 1)),
             dict(multigrid_smoothing=(20,), multigrid_up_iterations=1),
-            dict(multigrid_stages=()), dict(multigrid_stages=[MultigridStage(3, 1)]),
-            dict(multigrid_stages=("bad",)),
-            dict(multigrid_levels=2, multigrid_stages=(MultigridStage(2, 2), MultigridStage(3, 2))),
-            dict(multigrid_stages=(MultigridStage(2, 1, first_order_iterations=3),)),
-            dict(multigrid_stages=(MultigridStage(2, 1, smoothing_steps=(1, 2)),)),
+            dict(coarse_grid_stages=[MultigridStage(3, 1)]),
+            dict(coarse_grid_stages=("bad",)),
+            dict(multigrid_levels=2, coarse_grid_stages=(MultigridStage(2, 2), MultigridStage(3, 2))),
+            dict(coarse_grid_stages=(MultigridStage(2, 1, first_order_iterations=3),)),
+            dict(coarse_grid_stages=(MultigridStage(2, 1, smoothing_steps=(1, 2)),)),
         )
         for kwargs in invalid:
             with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
@@ -86,9 +86,8 @@ class NativeControlTests(unittest.TestCase):
             root = Path(directory)
             options = SolverOptions(turbulence="sst", cfl=.5, multigrid_levels=3, multigrid_cycle=1,
                 limiter=(0, 2, 4), flux=(1, 0, 1), inversion=(1, 0, 1), kappa=(0., 1/3, 1/3),
-                multigrid_up_iterations=1,
-                multigrid_stages=(MultigridStage(3, 2, 1, (1, 2)),
-                                  MultigridStage(5, 2, 2, (2, 1))))
+                multigrid_up_iterations=1, iterations=5, first_order_iterations=2,
+                coarse_grid_stages=(MultigridStage(3, 2, 1, (1, 2)),))
             result = CFL3D(flatplate_mesh(), options).solve(output_directory=root / "custom")
             self.assertEqual(result.history.shape, (8, 8))
             self.assertTrue(np.isfinite(result.fields["flatplate"]).all())
@@ -107,13 +106,12 @@ class NativeControlTests(unittest.TestCase):
     def test_global_smoothing_matches_explicit_active_layers(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            options = SolverOptions(turbulence="sst", cfl=.5, multigrid_levels=3,
+            options = SolverOptions(turbulence="sst", cfl=.5, multigrid_levels=3, iterations=4,
                 multigrid_smoothing=(1, 2, 3),
-                multigrid_stages=(MultigridStage(3, 1), MultigridStage(4, 2)))
+                coarse_grid_stages=(MultigridStage(3, 2),))
             a = CFL3D(flatplate_mesh(), options).solve(output_directory=root / "global")
-            explicit = replace(options, multigrid_smoothing=None,
-                multigrid_stages=(MultigridStage(3, 1, smoothing_steps=(2,)),
-                                  MultigridStage(4, 2, smoothing_steps=(2, 3))))
+            explicit = replace(options,
+                coarse_grid_stages=(MultigridStage(3, 2, smoothing_steps=(1, 2)),))
             b = CFL3D(flatplate_mesh(), explicit).solve(output_directory=root / "explicit")
             np.testing.assert_array_equal(a.history, b.history)
             np.testing.assert_array_equal(a.fields["flatplate"], b.fields["flatplate"])

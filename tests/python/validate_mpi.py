@@ -44,8 +44,8 @@ def _cases(controls=False):
                                                multigrid_levels=2)
     options = SolverOptions(mach=.2, reynolds=6e6, temperature=460/1.8, cfl=3,
                             iterations=5, multigrid_levels=3, mesh_sequence=True,
-                            coarse_iterations=3, first_order_iterations=2,
-                            coarse_first_order_iterations=1, cfl_ramp_steps=3,
+                            coarse_grid_iterations=3, first_order_iterations=2,
+                            coarse_grid_first_order_iterations=1, cfl_ramp_steps=3,
                             cfl_ramp_factor=2, restart_interval=2)
     for model in ("sa", "sst"):
         yield model, split_plate(), replace(options, turbulence=model)
@@ -55,8 +55,8 @@ def _cases(controls=False):
         yield "controls", split_plate(), SolverOptions(turbulence="sst", cfl=.5,
             mach=.2, reynolds=6e6, temperature=460/1.8, multigrid_levels=3,
             limiter=(0, 2, 4), flux=(1, 0, 1), inversion=(1, 0, 1), kappa=(0., 1/3, 1/3),
-            multigrid_up_iterations=1,
-            multigrid_stages=(MultigridStage(3, 2, 1, (1, 2)), MultigridStage(5, 2, 2, (2, 1))))
+            multigrid_up_iterations=1, iterations=5, first_order_iterations=2,
+            coarse_grid_stages=(MultigridStage(3, 2, 1, (1, 2)),))
         yield "lift_plate", split_plate(), SolverOptions(turbulence="sst", cfl=3.,
             mach=.2, reynolds=6e6, temperature=460/1.8, multigrid_levels=2,
             iterations=200, limiter=2, target_cl=.01, alpha_relaxation=.5,

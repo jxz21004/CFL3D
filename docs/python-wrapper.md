@@ -45,9 +45,12 @@ options = {
     "moment_center": (0.0, 0.0, 0.0),
     "y_up": False,
     "cfl": 2.0,                         # Native DT=-2: local time stepping
-    "iterations": 1000,
+    "iterations": 1000,                  # Finest-grid cycles per solve()
+    "mesh_sequence": True,               # Cold start: coarse to fine
+    "coarse_grid_iterations": 100,       # Cycles on each preliminary grid
+    "coarse_grid_first_order_iterations": 10,  # Included in those 100 cycles
     "limiter": 4,
-    "multigrid_levels": 1,
+    "multigrid_levels": 3,               # Requires a mesh valid on all 3 levels
     "numberSolutions": True,
     "writevolumesolution": True,
     "writeTecplotSurfaceSolution": True,
@@ -62,6 +65,7 @@ if rank == 0:
     print(solver.getGroupNames())
     print(solver.getSolution())
     print(result.output_paths)
+solver.close()  # Collective within solver.comm; release resident state/work files.
 ```
 
 The same script can run under `mpirun -np 3 python case.py` if the grid contains at
@@ -281,7 +285,7 @@ that saved angle while retaining the flow as an initial guess.
 | `cfl_ramp_steps` | `0` | IFLAGTS; nonnegative, zero disables CFL ramping |
 | `cfl_ramp_factor` | `1.0` | FMAX, at least 1; target CFL is `cfl * cfl_ramp_factor` |
 | `first_order_iterations` | `0` | NITFO on the final/default stage |
-| `coarse_first_order_iterations` | `0` | NITFO on each preliminary mesh-sequence stage |
+| `coarse_grid_first_order_iterations` | `0` | NITFO on each preliminary automatic mesh-sequence stage; included in its `coarse_grid_iterations` budget |
 | `restart_interval` | `None` | NWREST checkpoint frequency; None uses the configured stage-iteration total |
 | `limiter` | `4` | IFLIM: smooth limiter tuned to kappa=1/3 and invariant under block splitting; 0..4, scalar or `(i,j,k)` |
 | `flux` | `1` | IFDS: 0 van Leer flux-vector splitting, 1 Roe flux-difference splitting; scalar or `(i,j,k)` |
@@ -328,8 +332,8 @@ for _ in range(10):
 ```
 
 Each call uses the cached flow after the first and allocates another output
-index. Explicit multigrid stages override `iterations`; an initial mesh sequence
-can also add preliminary coarse-grid work. The interface currently has no
+index. Explicit coarse-grid stages add startup work before the `iterations`
+fine-grid cycles. The interface currently has no
 within-call visualization output interval. Native NPLOT3D/NPRINT count requested
 output data sets, rather than specifying an iteration interval.
 
@@ -340,11 +344,10 @@ output data sets, rather than specifying an iteration interval.
 | `multigrid_levels` | `1` | Total levels including the finest grid, 1..5 |
 | `multigrid_cycle` | `2` | NGAM: 1 for V cycles, 2 for W cycles |
 | `mesh_sequence` | `False` | Start on coarse grids before the final fine-grid stage |
-| `coarse_iterations` | `50` | Iterations on each preliminary stage of the automatic sequence |
+| `coarse_grid_iterations` | `50` | Iterations on each preliminary stage of the automatic sequence |
 | `multigrid_up_iterations` | `0` | MTT: additional updates on the upward sweep, 0..19 |
 | `multigrid_smoothing` | `None` | MIT per global level, ordered coarse to fine; defaults to one update per level |
 | `coarse_grid_stages` | `None` | Explicit coarse startup stages, excluding the finest stage; tuple of `MultigridStage` objects or dictionaries in options mappings |
-| `multigrid_stages` | `None` | Legacy full schedule; compatibility input with checked/synchronized fine-grid controls; prefer `coarse_grid_stages` |
 
 Each coarsened direction must have a cell count divisible by
 `2**(multigrid_levels-1)`. Boundary segment endpoints must align with every level.
@@ -352,8 +355,11 @@ The two-plane i direction of an extruded 2D grid is not coarsened. Native
 preprocessing also enforces minimum dimensions: JDIM and KDIM cannot be 2 on the
 fine or coarse levels. Divisibility alone does not guarantee a valid multigrid mesh.
 
-With `mesh_sequence=True`, every preliminary stage uses `coarse_iterations` and the
-final stage uses `iterations`. Counts of stages actually used must be positive.
+With `mesh_sequence=True`, every preliminary stage uses `coarse_grid_iterations`
+and its first `coarse_grid_first_order_iterations` cycles use first-order spatial
+discretization. These first-order cycles are part of the stage total, not extra.
+The final stage uses `iterations` and `first_order_iterations`. Counts of stages
+actually used must be positive.
 Without mesh sequencing, the solve starts on the finest grid and uses the requested
 V/W cycles. Cached continuation restores the finest-grid state, rebuilds coarse
 work arrays, retains V/W cycles, and skips preliminary coarse-to-fine startup.
@@ -390,6 +396,11 @@ mesh level; the final finest-grid stage is appended automatically using
 `iterations`, `first_order_iterations`, and all `multigrid_levels`. For three total
 levels and one coarse stage, startup begins on the second-finest grid. A stage's
 `levels` selects how many of its available levels participate in cycling.
+Native `MSEQ` is the number of stages, not the number of available grid levels:
+it equals `len(coarse_grid_stages) + 1` here. Two coarse stages with
+`multigrid_levels=3` produce three `NCYC` rows and MIT rows with 1, 2, and 3
+active values. Native input templates may show eight MIT columns, but CFL3D
+reads only the active values for each stage.
 Stage smoothing values are
 ordered coarse to fine among those active levels; absent values use the relevant
 part of `multigrid_smoothing`. MIT entries are 1..20 and each MIT+MTT must be <=20.
@@ -399,16 +410,16 @@ on each continuation. Changing `iterations` always changes the next finest-grid
 budget. `resetFlow()` starts the coarse sequence again. Both ordinary and resident
 solves use this rule. `MultigridStage` is immutable; replace stages or supply a new
 tuple to modify them. Do not combine explicit coarse stages with `mesh_sequence=True`:
-that flag selects the automatic startup recipe using `coarse_iterations` instead.
+that flag selects the automatic startup recipe using `coarse_grid_iterations` instead.
 
-Legacy `multigrid_stages` includes the finest stage. When supplied without
-top-level fine controls, its final `iterations` and `first_order_iterations` are
-imported into those controls. Explicit conflicting values now raise `ValueError`.
-Later edits of the top-level controls synchronize the compatibility schedule;
-they are never ignored. Do not supply both legacy and new stage lists. To migrate,
-move the final stage's iteration/startup-order controls to the top level and put
-only the preceding stages in `coarse_grid_stages`. Legacy final-stage active-level
-and smoothing settings remain supported by the compatibility path.
+The former `multigrid_stages` option was removed because it represented a complete
+schedule and could silently omit the finest startup stage. Scripts using it must
+move all preceding stages to `coarse_grid_stages` and put the final stage's
+`iterations` and `first_order_iterations` at the top level.
+The former automatic-startup names `coarse_iterations` and
+`coarse_first_order_iterations` were renamed to `coarse_grid_iterations` and
+`coarse_grid_first_order_iterations`; update existing option dictionaries and
+command-line flags accordingly.
 
 ### Reference quantities
 
@@ -577,7 +588,6 @@ resident_options = {
     "resident": True,
     "iterations": 50,
     "mesh_sequence": False,
-    "multigrid_stages": None,
     "multigrid_levels": 3,
     "coarse_grid_stages": (MultigridStage(20, levels=1),
                            MultigridStage(30, levels=2)),

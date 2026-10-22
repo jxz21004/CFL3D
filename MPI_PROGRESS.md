@@ -17,7 +17,7 @@ MPI 已通过下述内存网格验收；本轮又补齐 CGNS/ADF 文件入口的
 - rank 0 写 `solution.npz`；计算进程的原生输出使用独立子目录。
 - Python 配置错误集体传播；原生 MPI 错误使用 MPI_Abort，暂不支持恢复。
 - Python 新增 `cfl_ramp_steps`、`cfl_ramp_factor`、`first_order_iterations`、
-  `coarse_first_order_iterations`、`restart_interval`，并检查取值。
+  `coarse_grid_first_order_iterations`（原名 `coarse_first_order_iterations`）、`restart_interval`，并检查取值。
   SA/SST 验证日志确认 IFLAGTS=3、FMAX=2、NITFO=1/1/2、NWREST=2。
   restart_interval 当前只控制写出，不支持读入接续。
 

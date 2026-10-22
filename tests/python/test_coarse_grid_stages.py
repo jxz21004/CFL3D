@@ -10,6 +10,15 @@ from test_surface_forces import grouped_plate
 
 
 class StageOptionsTests(unittest.TestCase):
+    def test_automatic_coarse_grid_budgets(self):
+        options = RuntimeOptions({"MULTIGRID_LEVELS": 3, "MESH_SEQUENCE": True,
+            "COARSE_GRID_ITERATIONS": 4,
+            "COARSE_GRID_FIRST_ORDER_ITERATIONS": 2, "ITERATIONS": 7})
+        self.assertEqual([(stage.iterations, stage.first_order_iterations)
+                          for stage in options.stage_schedule()], [(4, 2), (4, 2), (7, 0)])
+        with self.assertRaisesRegex(ValueError, "coarse_grid_first_order_iterations"):
+            options.update({"coarse_grid_first_order_iterations": 5})
+
     def test_objects_and_case_insensitive_dictionaries_agree(self):
         typed = SolverOptions(iterations=5, multigrid_levels=3, resident=True,
             coarse_grid_stages=(MultigridStage(3, 1, 1), MultigridStage(4, 2, 2)))
@@ -23,19 +32,12 @@ class StageOptionsTests(unittest.TestCase):
         self.assertEqual([s.iterations for s in saved.stage_schedule()],[3,4,5])
         self.assertEqual(replace(saved,iterations=7).stage_schedule()[-1].iterations,7)
 
-    def test_legacy_full_schedule_has_no_silent_budget_override(self):
+    def test_removed_full_schedule_is_rejected(self):
         stages=(MultigridStage(3,1),MultigridStage(7,2,2))
-        for source in (SolverOptions(multigrid_levels=2,multigrid_stages=stages),
-                       {"multigrid_levels":2,"multigrid_stages":stages}):
-            live=RuntimeOptions(source)
-            self.assertEqual((live.iterations,live.first_order_iterations),(7,2))
-            live.update({"iterations":4,"first_order_iterations":1})
-            self.assertEqual(live.stage_schedule()[-1],MultigridStage(4,2,1))
-            self.assertEqual(live.multigrid_stages[-1].iterations,4)
-        with self.assertRaisesRegex(ValueError,"conflicts"):
-            SolverOptions(iterations=8,multigrid_levels=2,multigrid_stages=stages)
-        with self.assertRaisesRegex(ValueError,"conflicts"):
-            RuntimeOptions({"iterations":8,"multigrid_levels":2,"multigrid_stages":stages})
+        with self.assertRaises(TypeError):
+            SolverOptions(multigrid_levels=2,multigrid_stages=stages)
+        with self.assertRaisesRegex(ValueError,"Unknown CFL3D option"):
+            RuntimeOptions({"multigrid_levels":2,"multigrid_stages":stages})
 
     def test_invalid_stage_combinations_are_atomic(self):
         live=RuntimeOptions({"multigrid_levels":3,"iterations":5,
@@ -52,7 +54,7 @@ class StageOptionsTests(unittest.TestCase):
 
 
 class ResidentCoarseStartupTests(unittest.TestCase):
-    def test_legacy_fine_budget_edit_does_not_restart_resident_startup(self):
+    def test_fine_budget_edit_does_not_restart_resident_startup(self):
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory)
             mesh=grouped_plate()
@@ -61,8 +63,8 @@ class ResidentCoarseStartupTests(unittest.TestCase):
             coarse=(MultigridStage(3,1),MultigridStage(4,2))
             reference=CFL3D(mesh,{**config,"iterations":5,"coarse_grid_stages":coarse},comm=None).solve(
                 output_directory=root/"reference")
-            with CFL3D(mesh,{**config,"resident":True,
-                            "multigrid_stages":(*coarse,MultigridStage(2,3))},comm=None) as solver:
+            with CFL3D(mesh,{**config,"resident":True,"iterations":2,
+                            "coarse_grid_stages":coarse},comm=None) as solver:
                 first=solver.solve(output_directory=root/"resident")
                 solver.options.iterations=3
                 final=solver.solve(output_directory=root/"resident")
@@ -82,6 +84,15 @@ class ResidentCoarseStartupTests(unittest.TestCase):
                 coarse_grid_stages=(MultigridStage(3,1),MultigridStage(4,2)),
                 writevolumesolution=False,writeTecplotSurfaceSolution=False)
             reference=CFL3D(mesh,config,comm=None).solve(output_directory=root/"reference")
+            lines=reference.output_paths["log"].read_text().splitlines()
+            mseq=next(i for i,line in enumerate(lines) if "mseq    mgflag" in line)
+            ncyc=next(i for i,line in enumerate(lines) if "ncyc    mglevg" in line)
+            mit=next(i for i,line in enumerate(lines) if "mit1" in line and "mit2" in line)
+            self.assertEqual(lines[mseq+1].split()[0],"3")
+            self.assertEqual([line.split()[:2] for line in lines[ncyc+1:ncyc+4]],
+                             [["3","1"],["4","2"],["5","3"]])
+            self.assertEqual([line.split() for line in lines[mit+1:mit+4]],
+                             [["1"],["1","1"],["1","1","1"]])
             with native_session(mesh,config,root/"bounded",9):
                 self.assertEqual(_native.py_solve(),(0,9))
                 before=_native.py_resident_info()
@@ -141,7 +152,7 @@ class ResidentCoarseStartupTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory)
             config=dict(turbulence="sst",mach=.2,cfl=1.,multigrid_levels=3,
-                mesh_sequence=True,coarse_iterations=3,
+                mesh_sequence=True,coarse_grid_iterations=3,
                 writevolumesolution=False,writeTecplotSurfaceSolution=False)
             mesh=grouped_plate()
             reference=CFL3D(mesh,{**config,"iterations":5},comm=None).solve(output_directory=root/"full")

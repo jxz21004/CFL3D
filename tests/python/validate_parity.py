@@ -71,7 +71,7 @@ def main():
         if 'execution terminated normally' not in errors: raise RuntimeError(errors)
         result=CFL3D(path,SolverOptions(mach=.2,reynolds=6e6,temperature=460/1.8,turbulence=model,
                                       iterations=5,cfl=5,multigrid_levels=3,mesh_sequence=True,
-                                      coarse_iterations=5,kappa=.33333,limiter=0),  # Match the original unlimited NASA deck.
+                                      coarse_grid_iterations=5,kappa=.33333,limiter=0),  # Match the original unlimited NASA deck.
                        boundary_overrides={("flatplate","plate"):(2004,(-1.,0.))}).solve(output_directory=root/f'{model}-native')
         with (baseline/'restart.bin').open('rb') as f:
             record(f)  # title and run metadata
