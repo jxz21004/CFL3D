@@ -1,86 +1,16 @@
 # CFL3D Python/MPI 开发进度
 
-当前开发状态见下节（Native API 16）及 2026-10-23 的定升吞吐检查。
-下面的各轮检查点按当时的状态保留；
-其中“尚未支持”和测试数量不一定代表当前版本。已发布的 v0.2.0 是 API 15，
-后续开发功能不属于该发行版。接口用法与现存限制分别见
-[`docs/python-wrapper.md`](docs/python-wrapper.md) 和
-[`docs/limitations.md`](docs/limitations.md)。
+记录按开发时间从早到晚排列，最新进展和测试在文末；未注明日期的早期记录保留原有轮次顺序。
+历史条目的实现状态、测试数量及“未提交”等说明均保留当时语境。当前接口和限制见
+[`docs/python-wrapper.md`](docs/python-wrapper.md) 与 [`docs/limitations.md`](docs/limitations.md)。
 
-## 当前检查点：API 16 与迭代开销整理（2026-10-22）
-
-- MPI 仍沿用原生 host/worker、按完整 zone 分配的计算方式。不同算例可在互不重叠的
-  communicator 和工作目录同时运行；同一进程只能有一个活动的 resident 算例。
-  `close()` 是 communicator 内的集体操作。
-- Python 的持久坐标、平均流场、详细壁面数据和完整原生 restart 记录按 zone 所有权分布。
-  MPI 文件网格在初始 owner 读取坐标，checkpoint 读写按块传输，体场逐 zone 输出，
-  壁面 ASCII 从 owner 流式输出。原生初始化、显式 `gatherFields()`、截面与升力分布分析
-  仍可能在 host 临时汇总全局数据；尚无生产网格 RSS/峰值内存测量。
-- `resident=True` 已支持自动或显式粗到细初始网格序列，后续 `solve()` 在保留的原生工作区
-  接着计算，不重复 setup 或依赖内部 restart 文件。默认 `resident=False` 仍通过完整原生
-  restart 状态继续计算；驻留模式尚不支持完整 FlowState 快照或从文件初始化。
-- 细网格每次调用的步数由 `iterations` 控制；粗网格可用 `mesh_sequence` 与
-  `coarse_grid_iterations`，或显式 `coarse_grid_stages` 配置。原先含细网格重复定义的
-  `multigrid_stages` 已移除。`restart_interval` 直接传给原生 NWREST，默认 99999，
-  必须是正的 32 位整数，`None` 无效；每个网格阶段结束仍会写出原生 restart。
-- 迭代期间的详细壁面/y+ 数据仅在需要发布最终结果时捕获；本次又跳过其余迭代中的
-  Python zone 查找，保留原生 force 积分。`solve()` 的阶段进度提示与空的原生临时输出
-  清理已经加入。0.2.0 之后还加入了分区表面节点/面片与节点力查询；温启动网格变形和
-  MPhys Builder 仍未实现。
-- 当前改动在本地 Intel ifort 2021.13.2/Intel MPI 下重建串行及 MPI 扩展，
-  Python 回归共运行 106 项，其中 103 项通过、3 项可选 HDF5 测试跳过；
-  三进程 SST 短算例相对串行的
-  流场、history 和表面结果最大差值均为 0。该验证只覆盖小算例；生产环境的
-  ifort 18.0.5 构建、48 进程大算例耗时差异与本次优化幅度仍需实测。
-
-## 定升迭代吞吐检查（2026-10-23）
-
-- 定升更新仍由原生 `newalpha`、`rotateq` 和 MPI 广播完成；f2py 在一次原生求解的
-  迭代循环中没有回调 Python。详细壁面数据仅在最终迭代捕获，循环内其余 Python API
-  分支主要读取 Fortran 模块标量。
-- 发现包装器此前把每个 block 的 `IFORCE` 固定为 333，原生 `force` 因而每轮检查
-  所有六个边界面。现按边界类型启用需要积分的面；已知远场、对称及块接口面跳过，
-  未知 override 保持启用。此处沿用原生每个方向以 1/2/3 选择下/上/双面的编码。
-- 本机 ifort 2021.13.2 / Intel MPI、SST 平板、三级网格序列各 500 步：串行
-  独立程序定升 4.19 s，Python 入口修改前 4.24 s。两进程交替运行旧/新
-  `IFORCE` 各两次，`solve()` 耗时中位数约 4.55/4.38 s；1500 步 history、
-  最终攻角和壁面积分逐项一致。109 项 Python 回归中 106 项通过、3 项跳过；
-  三进程定升算例与串行参考最大流场差 0、history 差约 1.3e-23。
-- 这些小算例没有复现生产环境约三分之一的迭代耗时差距。当前 Python 构建脚本
-  对 Intel 只指定 `-O2`；原版 Intel 构建示例还含 `-ip -fno-alias -xHost`。
-  生产环境需在相同编译参数、网格序列、边界 `IFORCE`、MPI 分区及核绑定下对照
-  原生日志的每阶段计算速率，才能归因剩余差距。
-
-### Intel 编译选项 A/B（本机 AMD，2026-10-23）
-
-`tools/build_python.py --extra-fflags` 允许在完整重编时附加 Fortran 编译选项，
-默认仍是 `-O2`。本机 ifort 2021.13.2 / Intel MPI、AMD Ryzen 7 6800H，
-对同一 SST 平板定升算例使用两个 MPI rank、三级网格序列各 500 步，
-关闭可视化输出，比较 `solve()` 耗时：
-
-| Fortran 选项 | 重复运行耗时 (s) | 细网格原生速率 (µs/cell/iteration，代表运行) |
-| --- | --- | ---: |
-| `-O2` | 4.37, 4.71, 5.08 | 1.63 |
-| `-O2 -ip -fno-alias` | 4.54, 4.49 | 1.63 |
-| `-O2 -xHost` | 9.83, 9.88 | 3.26 |
-| `-O2 -ip -fno-alias -xHost` | 9.97, 11.14 | 3.59 |
-
-切回基线后的交错运行仍为 5.08 s；`-xHost` 单项已足以复现本机变慢。
-比较历史、最终攻角和壁面积分，绝对差约为 `1e-14`。原生 `.out` 的各阶段
-计算速率均受影响，因此差异发生在原生迭代，不是 Python 结果缓存或写出。
-本机是 AMD，生产环境为旧 Intel CPU/ifort 18.0.5，这个方向和幅度不可外推；
-生产环境应做同样的 A/B 测试。测试后已恢复仓库的 `-O2` MPI 扩展。
-附加选项的构建命令为
-`python tools/build_python.py --mpi --compiler-family intel --fc mpiifort --jobs 8 --extra-fflags="-ip -fno-alias -xHost"`；
-每个配置均需完整重编，并在新的 Python/MPI 进程中计时。
-
-以下为历史检查点。
+## 第一至二轮：基础 MPI 与内存网格验收
 
 本轮在 `CFL3D/` 修改；旧的 `CFL3D-f2py-CGNS-source/` 保留作为参考。
 MPI 已通过下述内存网格验收；本轮又补齐 CGNS/ADF 文件入口的串行和 MPI 验收。
 较大生产算例和更多边界类型仍需单独验收。
 
-## 已实现的接口
+### 已实现的接口
 
 - 串行 `_native` 与并行 `_native_mpi` 独立构建；支持 GNU Fortran、Intel Fortran Classic 和 Intel MPI。
   默认直接编译 f2py 生成的 C 接口，不需要 Meson/Ninja。
@@ -95,7 +25,7 @@ MPI 已通过下述内存网格验收；本轮又补齐 CGNS/ADF 文件入口的
   SA/SST 验证日志确认 IFLAGTS=3、FMAX=2、NITFO=1/1/2、NWREST=2。
   restart_interval 当前只控制写出，不支持读入接续。
 
-## 修复的两个原生 MPI 问题
+### 修复的两个原生 MPI 问题
 
 1. `mit` 应为五个多重网格层 × 五个网格序列阶段，旧声明却为 `mit(5,maxbl)`。
    MPI 固定打包/解包 25 个整数，总块数小于五时越界读写。
@@ -108,7 +38,7 @@ Valgrind 先后定位到上述越界和未初始化值。修复后的双块、�
 三个 MPI 进程均报告 `ERROR SUMMARY: 0 errors from 0 contexts`。
 本项检查使用 `--leak-check=no`，覆盖非法访问和未初始化值，不构成泄漏验收。
 
-## 验收范围与结果
+### 验收范围与结果
 
 环境由 `/home/mdolabuser/.bashrc_mdolab` 加载：Python 3.12.12、NumPy 2.3.5、
 已有 mpi4py、GNU Fortran 13、Intel Fortran Classic、Intel MPI 2021.13。
@@ -137,7 +67,7 @@ Intel MPI 扩展与 GNU 串行的 SA 流场最大绝对差异为 `2.031e-15`，
 历史最大绝对差异为 `2.809e-15`；Euler/SST 比较项差异为 0。
 这些是短程回归结果，不代表已完成长时间收敛或大规模并行验证。
 
-## 可复现命令
+### 可复现命令
 
 ```bash
 cd /CFL3d_temp/CFL3D
@@ -163,7 +93,7 @@ CFL3D_VALIDATION_DIRECTORY=build/mpi-validation-intel bash tools/validate_mpi.sh
 - Intel：`build/mpi-validation-intel/`；结构相同，`logs/` 保存内存检查与错误退出日志。
 - 测试实现：`tests/python/validate_mpi.py`、`tools/validate_mpi.sh`。
 
-## 环境问题与剩余边界
+### 环境问题与剩余边界
 
 新容器的实际 `/dev/shm` 已扩大到 1 GiB，普通 MPI 测试正常运行。
 先前 Valgrind 默认退出泄漏扫描扫描大型 MPI 共享映射，超时后有测试进程遗留并占满共享内存。
@@ -681,7 +611,7 @@ worker 坐标分别 190896、116400 bytes，壁面场+面载荷分别 3840、768
 日志前缀 build/native-output-streaming-*；复现见 docs/distributed-storage.md。
 
 
-阶段四：文件坐标选择性读入、逐区体输出与壁面流式输出（Native API 12 不变）
+## 阶段四：文件坐标选择性读入、逐区体输出与壁面流式输出（Native API 12 不变）
 
 - MPI 文件网格在 host 上只读拓扑，各 worker 只读取初始所属 zone 的坐标；网格重新加载
   也走同一路径。显式传入完整 CGNSMesh 时仍保留原有兼容 scatter。
@@ -704,7 +634,7 @@ NPZ/PLOT3D/壁面字节与串行一致，CGNS 数组一致；注入 CGNS、壁�
 日志 build/native-output-output-streaming-*；复现及边界见 docs/distributed-storage.md。
 
 
-阶段五第一步：原生驻留驱动原型（Native API 13，尚未接入公开 solve）
+## 阶段五第一步：原生驻留驱动原型（Native API 13，尚未接入公开 solve）
 
 - 撤回额外临时坐标文件方案；不把坐标文件桥作为后续续算的基础。
 - 在 PYTHON_API 分支保留 main/cfl3d/mgbl/mgblk 的数组与驱动状态，完整 MG cycle
@@ -735,7 +665,7 @@ payload 与连续计算逐字节比较，通过；其中包含四个模型输运
 记录。此前各分段边界均无内部 restart 文件。该测试不等于公开 FlowState 内存快照已实现。
 
 
-阶段五第二步：驻留上下文可延长推进（Native API 14）
+## 阶段五第二步：驻留上下文可延长推进（Native API 14）
 
 - 上一步原生驻留基础已提交 dd47b69；本节是该提交之后的新进展。
 - py_start_resident 新增可选 open_ended=1。每个请求结束后保持暂停，后续可超过初始
@@ -759,7 +689,7 @@ mesh sequencing 仍是后续工作。此第二步与下一节公开驻留接口�
 日志 build/native-output-resident-grow-*；使用边界见 docs/distributed-storage.md。
 
 
-阶段五第三步：公开驻留对象生命周期（Native API 15）
+## 阶段五第三步：公开驻留对象生命周期（Native API 15）
 
 - 增加 options["resident"]=True，默认 False。公开 solve()/__call__ 共用驻留推进路径：
   首次准备网格/初始化，后续只推进目标步数；原生分区、粗层和工作区、累计计数保留。
@@ -793,3 +723,72 @@ staging、编号和追加历史、deferred 输出、输出故障重试、参数/
 需重启。本次提交包含本轮及上一节 API 14 的扩容改动；原生驻留基础提交为 dd47b69。
 日志 build/native-output-resident-public-*；接口示例见 docs/python-wrapper.md 的 Resident
 calculation chunks，原生设计及边界见 docs/distributed-storage.md。
+
+## API 16 与迭代开销整理（2026-10-22）
+
+本检查点为 Native API 16；已发布的 v0.2.0 是 API 15，后续开发功能不属于该发行版。
+
+- MPI 仍沿用原生 host/worker、按完整 zone 分配的计算方式。不同算例可在互不重叠的
+  communicator 和工作目录同时运行；同一进程只能有一个活动的 resident 算例。
+  `close()` 是 communicator 内的集体操作。
+- Python 的持久坐标、平均流场、详细壁面数据和完整原生 restart 记录按 zone 所有权分布。
+  MPI 文件网格在初始 owner 读取坐标，checkpoint 读写按块传输，体场逐 zone 输出，
+  壁面 ASCII 从 owner 流式输出。原生初始化、显式 `gatherFields()`、截面与升力分布分析
+  仍可能在 host 临时汇总全局数据；尚无生产网格 RSS/峰值内存测量。
+- `resident=True` 已支持自动或显式粗到细初始网格序列，后续 `solve()` 在保留的原生工作区
+  接着计算，不重复 setup 或依赖内部 restart 文件。默认 `resident=False` 仍通过完整原生
+  restart 状态继续计算；驻留模式尚不支持完整 FlowState 快照或从文件初始化。
+- 细网格每次调用的步数由 `iterations` 控制；粗网格可用 `mesh_sequence` 与
+  `coarse_grid_iterations`，或显式 `coarse_grid_stages` 配置。原先含细网格重复定义的
+  `multigrid_stages` 已移除。`restart_interval` 直接传给原生 NWREST，默认 99999，
+  必须是正的 32 位整数，`None` 无效；每个网格阶段结束仍会写出原生 restart。
+- 迭代期间的详细壁面/y+ 数据仅在需要发布最终结果时捕获；本次又跳过其余迭代中的
+  Python zone 查找，保留原生 force 积分。`solve()` 的阶段进度提示与空的原生临时输出
+  清理已经加入。0.2.0 之后还加入了分区表面节点/面片与节点力查询；温启动网格变形和
+  MPhys Builder 仍未实现。
+- 当前改动在本地 Intel ifort 2021.13.2/Intel MPI 下重建串行及 MPI 扩展，
+  Python 回归共运行 106 项，其中 103 项通过、3 项可选 HDF5 测试跳过；
+  三进程 SST 短算例相对串行的
+  流场、history 和表面结果最大差值均为 0。该验证只覆盖小算例；生产环境的
+  ifort 18.0.5 构建、48 进程大算例耗时差异与本次优化幅度仍需实测。
+
+## 定升迭代吞吐检查（2026-10-23）
+
+- 定升更新仍由原生 `newalpha`、`rotateq` 和 MPI 广播完成；f2py 在一次原生求解的
+  迭代循环中没有回调 Python。详细壁面数据仅在最终迭代捕获，循环内其余 Python API
+  分支主要读取 Fortran 模块标量。
+- 发现包装器此前把每个 block 的 `IFORCE` 固定为 333，原生 `force` 因而每轮检查
+  所有六个边界面。现按边界类型启用需要积分的面；已知远场、对称及块接口面跳过，
+  未知 override 保持启用。此处沿用原生每个方向以 1/2/3 选择下/上/双面的编码。
+- 本机 ifort 2021.13.2 / Intel MPI、SST 平板、三级网格序列各 500 步：串行
+  独立程序定升 4.19 s，Python 入口修改前 4.24 s。两进程交替运行旧/新
+  `IFORCE` 各两次，`solve()` 耗时中位数约 4.55/4.38 s；1500 步 history、
+  最终攻角和壁面积分逐项一致。109 项 Python 回归中 106 项通过、3 项跳过；
+  三进程定升算例与串行参考最大流场差 0、history 差约 1.3e-23。
+- 这些小算例没有复现生产环境约三分之一的迭代耗时差距。当前 Python 构建脚本
+  对 Intel 只指定 `-O2`；原版 Intel 构建示例还含 `-ip -fno-alias -xHost`。
+  生产环境需在相同编译参数、网格序列、边界 `IFORCE`、MPI 分区及核绑定下对照
+  原生日志的每阶段计算速率，才能归因剩余差距。
+
+### Intel 编译选项 A/B（本机 AMD，2026-10-23）
+
+`tools/build_python.py --extra-fflags` 允许在完整重编时附加 Fortran 编译选项，
+默认仍是 `-O2`。本机 ifort 2021.13.2 / Intel MPI、AMD Ryzen 7 6800H，
+对同一 SST 平板定升算例使用两个 MPI rank、三级网格序列各 500 步，
+关闭可视化输出，比较 `solve()` 耗时：
+
+| Fortran 选项 | 重复运行耗时 (s) | 细网格原生速率 (µs/cell/iteration，代表运行) |
+| --- | --- | ---: |
+| `-O2` | 4.37, 4.71, 5.08 | 1.63 |
+| `-O2 -ip -fno-alias` | 4.54, 4.49 | 1.63 |
+| `-O2 -xHost` | 9.83, 9.88 | 3.26 |
+| `-O2 -ip -fno-alias -xHost` | 9.97, 11.14 | 3.59 |
+
+切回基线后的交错运行仍为 5.08 s；`-xHost` 单项已足以复现本机变慢。
+比较历史、最终攻角和壁面积分，绝对差约为 `1e-14`。原生 `.out` 的各阶段
+计算速率均受影响，因此差异发生在原生迭代，不是 Python 结果缓存或写出。
+本机是 AMD，生产环境为旧 Intel CPU/ifort 18.0.5，这个方向和幅度不可外推；
+生产环境应做同样的 A/B 测试。测试后已恢复仓库的 `-O2` MPI 扩展。
+附加选项的构建命令为
+`python tools/build_python.py --mpi --compiler-family intel --fc mpiifort --jobs 8 --extra-fflags="-ip -fno-alias -xHost"`；
+每个配置均需完整重编，并在新的 Python/MPI 进程中计时。
