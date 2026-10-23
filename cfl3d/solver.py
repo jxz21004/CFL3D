@@ -1869,7 +1869,17 @@ class CFL3D:
         self._surface_keys = tuple(surface_keys)
         blocks = np.zeros((7, len(zones)), dtype=np.int32, order="F")
         blocks[0] = o.multigrid_levels - 1
-        blocks[3] = 333
+        # Native IFORCE has one digit per grid direction: 1/2 selects its lower/
+        # upper face, 3 both. Avoid integrating farfield, symmetry, and interface
+        # faces every cycle; keep unfamiliar override codes enabled so their
+        # previous force behavior is preserved.
+        for g in range(len(zones)):
+            blocks[3, g] = sum(
+                (1 if f % 2 == 0 else 2) * (100, 10, 1)[f // 2]
+                for f in range(6)
+                if any(abs(code) not in (0, 1001, 1002, 1003)
+                       for code, _, _, _ in segments[g, f])
+            )
         blocks[4:] = model
         if i2d:
             blocks[4] = 0

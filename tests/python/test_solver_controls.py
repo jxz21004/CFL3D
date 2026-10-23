@@ -10,6 +10,22 @@ from fixtures import box_mesh, flatplate_mesh
 
 
 class ControlValidationTests(unittest.TestCase):
+    def test_force_faces_follow_solid_boundaries(self):
+        plate = CFL3D(flatplate_mesh(), SolverOptions(turbulence="sst"), comm=None)
+        arrays, _ = plate._arrays()
+        self.assertEqual(arrays["blocks"][3, 0], 1)  # Only the lower k face is a wall.
+
+        empty = CFL3D(box_mesh(), comm=None)
+        arrays, _ = empty._arrays()
+        self.assertEqual(arrays["blocks"][3, 0], 0)
+
+        walls = CFL3D(box_mesh(), comm=None, boundary_overrides={
+            ("zone0", "face10"): (1005, ()),
+            ("zone0", "face21"): (1005, ()),
+        })
+        arrays, _ = walls._arrays()
+        self.assertEqual(arrays["blocks"][3, 0], 12)
+
     def test_invalid_controls_rejected_before_native(self):
         invalid = (
             dict(target_cl=float("nan")), dict(target_cl=True), dict(target_cl=99999.),

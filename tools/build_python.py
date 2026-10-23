@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -32,6 +33,7 @@ def main():
     parser.add_argument("--jobs", type=int, default=min(os.cpu_count() or 1, 8))
     parser.add_argument("--debug", action="store_true")
     parser.add_argument("--standalone", action="store_true", help="Build a serial executable for parity testing")
+    parser.add_argument("--extra-fflags", default="", help="Additional Fortran compile flags, for controlled compiler comparisons")
     args = parser.parse_args()
     args.fc = args.fc or (("mpiifort" if args.mpi else "ifort") if args.compiler_family == "intel"
                           else ("mpif90" if args.mpi else "gfortran"))
@@ -53,6 +55,7 @@ def main():
         flags.append("-DDIST_MPI")
     if args.standalone:
         flags.remove("-DPYTHON_API")
+    flags.extend(shlex.split(args.extra_fflags))
 
     def compile_file(path):
         output = build / (path.stem + ".o")
