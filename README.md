@@ -118,6 +118,31 @@ python -c "from cfl3d._cgns_native import library; print('CGNS has HDF5:', libra
 The development native API should be `16` (the `v0.2.0` release uses `15`). A `False` HDF5 result still permits CGNS/ADF input;
 CGNS/HDF5 input requires a capable libcgns or h5py.
 
+### Additional Fortran compiler flags
+
+Use `--extra-fflags="..."` to append compiler options after the default flags
+(`-O2` for a normal build). For example, to test the legacy Intel optimization
+options with the MPI extension:
+
+```bash
+python tools/build_python.py \
+    --mpi --compiler-family intel --fc mpiifort --jobs 8 \
+    --extra-fflags="-ip -fno-alias -xHost"
+```
+
+Use `=` between the argument and its value, and quote multiple flags. A single
+option can be passed as `--extra-fflags="-xHost"`. The same argument is available
+for serial builds; choose flags supported by the selected compiler.
+
+Each invocation fully recompiles and replaces the selected extension. Finish
+active calculations before rebuilding, then start fresh Python/MPI processes.
+To restore the default flags, rerun the build command without `--extra-fflags`.
+
+`-xHost` targets the compilation machine's instruction set, which must also be
+supported by the compute nodes. These options are an experiment, not a universal
+speedup: benchmark them on the intended machine and case. Local comparisons are
+recorded in [MPI_PROGRESS.md](MPI_PROGRESS.md).
+
 ## Documentation
 
 - [Release notes](docs/release-notes.md): the 0.2.0 computation baseline.
