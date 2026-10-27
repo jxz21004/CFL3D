@@ -483,6 +483,15 @@ def _face(point_range, dims):
     return face, tangents, tuple(map(int, bounds.flat))
 
 
+@dataclass(frozen=True)
+class SolveFailure:
+    """No valid result: close/reset the context before attempting another solve."""
+    reason: str
+    native_status: int
+    fail: bool = True
+    reset_required: bool = True
+
+
 @dataclass
 class SolverResult:
     fields: dict[str, np.ndarray]  # MPI: owned zones only; zone -> (ni-1,nj-1,nk-1,5): rho,u,v,w,p
@@ -506,6 +515,10 @@ class SolverResult:
     chunk_index: int = 0
     finalized: bool = False
     chunk_output_paths: dict[str, Path] = field(default_factory=dict)
+
+    @property
+    def fail(self):
+        return False
 
     @property
     def coefficients(self):
@@ -1950,7 +1963,7 @@ class CFL3D:
                                + (" --mpi" if self.comm is not None else "")) from exc
         if bool(module.py_build_info()) != (self.comm is not None):
             raise RuntimeError("Native extension MPI mode does not match the solver")
-        if getattr(module, "py_api_version", lambda: 0)() != 17:
+        if getattr(module, "py_api_version", lambda: 0)() != 18:
             raise RuntimeError("Native interface changed; rebuild with python tools/build_python.py"
                                + (" --mpi" if self.comm is not None else "") + " and restart Python")
         return module
@@ -2116,6 +2129,8 @@ class CFL3D:
         def prepare():
             if self._resident_context is None or not self._resident_context.info()['paused']:
                 raise RuntimeError("Coordinate updates require a paused resident solver")
+            if self._resident_context.failure is not None:
+                raise RuntimeError("Geometry update failed; call resetFlow() before reuse")
             layout = VolumeLayout(self.mesh)
             pending = layout.unpack(coordinates)
             changed = any(not np.array_equal(pending[z.name], z.coordinates)
@@ -2171,12 +2186,17 @@ class CFL3D:
 
         All communicator members must supply the same final flag. Finalization
         retains the flow and resident workspace for subsequent calculations.
+        Expected resident geometry failures return SolveFailure (fail=True),
+        without a flow result; close/reset is required before further advancement.
         """
-        from ._runtime import check_owner
+        from ._runtime import check_owner, GeometryUpdateFailure
         self._progress_origin = self._progress_last = perf_counter()
         self._progress("Checking options and mesh before solve")
         self._checked(lambda: check_owner(self))
         self._check_resident_members()
+        if self._resident_context is not None and self._resident_context.failure is not None:
+            failure = self._resident_context.failure
+            return SolveFailure(str(failure), failure.status)
         self._check_finalization_state(final)
         self._surface_analysis_mesh = None
         self.checkOptions()
@@ -2237,8 +2257,14 @@ class CFL3D:
         geometry_changed = self._pending_geometry is not None
         self._last_result = None  # Native failures must not expose stale loads.
         if self.options.resident:
-            arrays, values = self._solve_resident_native(output_directory, stem,
-                                                        changed_options, append_output, iteration_offset)
+            try:
+                arrays, values = self._solve_resident_native(output_directory, stem,
+                                                            changed_options, append_output, iteration_offset)
+            except GeometryUpdateFailure as failure:
+                self._pending_geometry = None
+                self._solution_pending = False
+                self._progress(f"Geometry update failed: {failure}; resetFlow() required")
+                return SolveFailure(str(failure), failure.status)
             q, history, final_alpha, surface_values, wall_counts, wall_values, wall_force_values, force_angles = values
             checkpoint = None
         else:

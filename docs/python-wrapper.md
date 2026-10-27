@@ -1,8 +1,8 @@
 # Python interface reference
 
-This document describes the development tree following Python package **0.2.0**,
-native interface version **17**. Sections marked "after 0.2.0" are not included
-in the `v0.2.0` tag.
+This document describes Python package **0.3.0**, native interface version **18**.
+Sections marked "after 0.2.0" are included in 0.3.0 but absent from the `v0.2.0`
+tag. Experimental features retain their documented limitations.
 For the project motivation, requirements, and build commands, see the
 [README](../README.md). Validation records are maintained in
 [MPI_PROGRESS.md](../MPI_PROGRESS.md).
@@ -1431,7 +1431,7 @@ PYTHONPATH=tests/python mpirun -np 3 python tests/python/validate_idwarp_exchang
 ```
 
 
-### Resident coordinate updates (experimental, native API 17)
+### Resident coordinate updates (experimental, native API 18)
 
 ```python
 # All solver.comm ranks execute these calls. resident=True is required.
@@ -1463,8 +1463,29 @@ pending update before changing options that require a cold initialization.
 Current scope is steady, fixed-topology, point-matched grids with an already
 paused resident context. The adapter must be rebuilt after any ownership change.
 This is not an ALE/unsteady moving-grid interface. Native metric/volume checks
-still apply; this version does not provide transactional rollback after a native
-geometry failure. A native failure can require a fresh Python/MPI process. Do not
-interpret finite coordinates and matching interfaces as a mesh-quality guarantee.
+still apply. API 18 converts expected failures in the resident geometry-update
+path to a collective return, without rolling back native geometry:
+
+```python
+result = solver.solve()
+if result.fail:
+    print(result.reason, result.native_status)
+    solver.resetFlow()  # close the invalid native context collectively
+    # Python still holds the last accepted grid. It can be used for a cold solve.
+```
+
+Successful `SolverResult` objects have `fail=False`. A `SolveFailure` instead has
+`fail=True`, `reason`, `native_status` (41: metrics, 42: volumes), and
+`reset_required=True`; it has no flow results. Failed updates do not advance
+iterations, increment the solution count, or export a new solution. Repeated
+`solve()` calls return failure until `close()`/`resetFlow()` releases the context.
+Old result extraction is disabled. Python coordinates stay at the last accepted
+grid, but Fortran is invalid until closed: this is not a rollback.
+
+Only expected errors encountered during the resident metric/volume update are
+handled this way. Shape/nonfinite/interface input errors still raise before
+native mutation. Startup failures, MPI faults, allocation errors and segmentation
+faults are not converted to `SolveFailure`. Finite coordinates and matching
+interfaces do not constitute a mesh-quality guarantee.
 The first validation covers small SA/SST and MPI gamma-theta fixtures; production-scale deformation
 and all model/override combinations are not yet established.

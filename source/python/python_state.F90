@@ -31,7 +31,7 @@ module cfl3d_python_state
   logical :: py_resident_output_changed=.false.
   ! Staged owned coordinates exist only between an explicit update and resume.
   logical :: py_geometry_pending=.false.
-  integer :: py_geometry_updates=0
+  integer :: py_geometry_updates=0,py_geometry_failed=0
   integer, allocatable :: py_geometry_offsets(:)
   real(8), allocatable :: py_geometry_xyz(:,:)
   integer :: py_resident_stop=0,py_resident_done=0
@@ -339,7 +339,7 @@ end module
 subroutine py_api_version(version)
   implicit none
   integer, intent(out) :: version
-  version=17
+  version=18
 end subroutine
 
 subroutine py_set_restart_controls(override_alpha)
@@ -578,6 +578,7 @@ subroutine py_configure(dims,counts,bcs,bcdata,blocks,connections,flow,reference
   end do
   if (p-1 /= npoints .or. c-1 /= ncells) status=2
   py_status=0; py_nhistory=0
+  py_geometry_failed=0; py_geometry_failed=0
 end subroutine
 
 subroutine py_set_coordinates(xyz,npoints)
@@ -641,7 +642,7 @@ subroutine py_start_resident(cycles,open_ended,status)
   py_resuming=.false.; py_resident_closing=.false.
   py_resident_stop=cycles; py_resident_done=0
   py_resident_written=0
-  py_geometry_pending=.false.; py_geometry_updates=0
+  py_geometry_pending=.false.; py_geometry_updates=0; py_geometry_failed=0
   if (allocated(py_geometry_xyz)) deallocate(py_geometry_xyz,py_geometry_offsets)
   py_resident_initializations=0; py_resident_capacity=0
   py_resident_work_bytes=0; py_resident_cfl=0.d0
@@ -659,6 +660,10 @@ subroutine py_advance_resident(cycles,cfl,status,nrows)
   integer :: last,startup
   status=1; nrows=py_nhistory
   if (.not.py_resident_enabled .or. .not.py_resident_paused .or. py_used /= 0) return
+  if (py_geometry_failed /= 0) then
+    status=40+py_geometry_failed
+    return
+  end if
   if (cycles < 1 .or. .not.ieee_is_finite(cfl) .or. .not.(cfl >= 0.d0)) return
   ! Check before adding: the original driver uses default integer counters.
   if (cycles > huge(cycles)-py_resident_done) return
@@ -699,6 +704,7 @@ subroutine py_close_resident(status)
   py_resident_paused=.false.
   call py_solve(status,nrows)
   py_resident_closing=.false.
+  if (status == 0) py_geometry_failed=0
   py_geometry_pending=.false.
   if (allocated(py_geometry_xyz)) deallocate(py_geometry_xyz,py_geometry_offsets)
 end subroutine
@@ -748,6 +754,13 @@ subroutine py_solve(status,nrows)
   py_used=1
   call py_guarded_solve(status)
   nrows=py_nhistory
+  ! Recoverable geometry failures return normally through every native frame.
+  ! Keep the context closable, but reject advancement until reinitialized.
+  if (status == 0 .and. py_geometry_failed /= 0 .and. .not.py_resident_closing) then
+    py_used=0
+    status=40+py_geometry_failed
+    return
+  end if
   ! An error may leave legacy allocations alive; only a successful run is reusable.
   if (status == 0) py_used=0
 end subroutine

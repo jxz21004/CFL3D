@@ -80,6 +80,32 @@ class GeometryNativeTests(unittest.TestCase):
                 solver.solve(output_directory=directory)
                 self.assertEqual(solver.getRuntimeInfo()['geometry_updates'], 1)
 
+    def test_negative_volume_returns_failure_and_can_reset(self):
+        from cfl3d import CFL3D, SolveFailure
+        with tempfile.TemporaryDirectory() as directory:
+            with CFL3D(grouped_plate(), dict(resident=True, iterations=2,
+                       multigrid_levels=3, turbulence='sst', cfl=1.,
+                       writevolumesolution=False, writeTecplotSurfaceSolution=False,
+                       progress=False), comm=None) as solver:
+                solver.solve(output_directory=directory)
+                xyz = solver.getVolumeCoordinates()
+                bad = xyz.copy()
+                bad[:, 2] *= -1
+                solver.setVolumeCoordinates(bad)
+                before = solver.getRuntimeInfo()['cycles']
+                result = solver.solve(output_directory=directory)
+                self.assertIsInstance(result, SolveFailure)
+                self.assertTrue(result.fail)
+                self.assertEqual(solver.getRuntimeInfo()['cycles'], before)
+                self.assertTrue(solver.solve(output_directory=directory).fail)
+                np.testing.assert_array_equal(solver.getVolumeCoordinates(), xyz)
+                with self.assertRaises(RuntimeError):
+                    solver.getSolution()
+                solver.resetFlow()
+                # A rejected resident grid must not poison a later legacy solve.
+                solver.options.resident = False
+                self.assertFalse(solver.solve(output_directory=directory).fail)
+
 
 if __name__ == '__main__':
     unittest.main()

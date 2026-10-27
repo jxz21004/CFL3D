@@ -888,8 +888,14 @@ c        update, on the existing distributed workspace, before mgblk resumes.
      .           zorgae0,icouple,lfgm,nblk,limblk,isva,nblelst,iskmax,
      .           jskmax,kskmax,ue,irdrea,nbli,nummem)
             py_geometry_pending=.false.
-            py_geometry_updates=py_geometry_updates+1
             deallocate(py_geometry_xyz,py_geometry_offsets)
+            if (py_geometry_failed.ne.0) then
+c              All ranks leave at the same boundary, with no iteration run.
+c              Leave allocations alive for the normal collective close path.
+               py_resident_paused=.true.
+               return
+            end if
+            py_geometry_updates=py_geometry_updates+1
          end if
 #endif
          call mgblk(iseq,lw,lw2,work,nstart,work(nstart+1),

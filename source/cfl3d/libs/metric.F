@@ -24,6 +24,10 @@ c
      .                  icnt,nbci0,nbcj0,nbck0,nbcidim,nbcjdim,
      .                  nbckdim,ibcinfo,jbcinfo,kbcinfo,maxbl,maxseg,
      .                  nou,bou,nbuf,ibufdim,myid,mblk2nd)
+#ifdef PYTHON_API
+      use cfl3d_python_state, only: py_geometry_pending,
+     .                             py_geometry_failed
+#endif
 c
 c     $Id$
 c
@@ -308,7 +312,15 @@ c   Check for non-planar i-planes when 2-D:
           nou(1) = min(nou(1)+1,ibufdim)
           write(bou(nou(1),1),'(''   ... or else the problem may'',
      .     '' be crossing lines (negative volumes) in the grid'')')
-          call termn8(myid,-1,ibufdim,nbuf,bou,nou)
+
+#ifdef PYTHON_API
+            if (py_geometry_pending) then
+              py_geometry_failed=1
+              iflag=1
+              return
+            end if
+#endif
+            call termn8(myid,-1,ibufdim,nbuf,bou,nou)
         end if
  1234 continue
  1235 continue
@@ -324,6 +336,14 @@ c   Check for non-planar i-planes when 2-D:
             nou(1) = min(nou(1)+1,ibufdim)
             write(bou(nou(1),1),'(''   ... or else the problem may'',
      .       '' be that IALPH is set incorrectly for your grid'')')
+
+#ifdef PYTHON_API
+            if (py_geometry_pending) then
+              py_geometry_failed=1
+              iflag=1
+              return
+            end if
+#endif
             call termn8(myid,-1,ibufdim,nbuf,bou,nou)
         end if
       enddo

@@ -1,5 +1,62 @@
 # Release notes
 
+## 0.3.0 — coupling interfaces and resident geometry updates
+
+Release date: 2026-10-27. Native interface version: **18**.
+Git tag: `v0.3.0`.
+
+This source release adds the mesh and force exchange foundations for steady
+static aeroelastic workflows. It does not yet provide a complete MPhys or
+GEMSEO integration, adjoint coupling derivatives, or unsteady ALE calculations.
+
+### Changes since 0.2.0
+
+- Distributed surface coordinates/connectivity and conservative nodal forces,
+  including pressure and viscous contributions, for external load transfer.
+- Optional IDWarp adapter and a solver-independent owned-volume coordinate
+  layout. Reference coordinates (`x0`) are saved explicitly by the caller.
+- Experimental fixed-topology resident coordinate updates. Native multigrid
+  coordinates, metrics, volumes and wall distances refresh only after an explicit
+  change, retaining flow as an initial guess without repeating full setup.
+- Expected native geometry-update errors return `SolveFailure` collectively.
+  No extra iteration or result export follows failure. Close/reset releases the
+  invalid context; Python keeps the last accepted grid. There is no native rollback.
+- Resident coarse-to-fine startup, followed by continued V/W cycling. Calculation
+  chunks can use `solve(final=False)` and finish with `solve()` or
+  `finalizeSolution()`, with independently numbered optional intermediate output.
+- Additional input, output, documentation and build refinements, including
+  `--extra-fflags` for controlled compiler comparisons.
+
+### Upgrade
+
+Reinstall the package as needed, rebuild both native extensions for API 18 using
+the [installation guide](../README.md), and restart Python/MPI processes. An old
+extension is rejected by the Python interface. IDWarp remains optional; importing
+CFL3D alone does not require it. `resident` remains opt-in.
+
+### Validation and limits
+
+- The 119-test suite completed with 116 passing and 3 optional HDF5 skips before
+  the final MPI tag/flag-reset fixes. The final focused geometry/output suite
+  passed all 8 tests after those fixes.
+- Actual IDWarp serial and three-rank tests verified zero-motion mapping and
+  nonzero deformation staging. Native zero-motion geometry refresh matched
+  ordinary continuation within 1e-13 on the tested fixture.
+- Three-rank geometry-failure tests and four ranks split into two communicators
+  verified consistent failure returns, unchanged cycle counts, cleanup and
+  recovery. Normal gamma-theta/y-up/W-cycle geometry continuation also passed.
+- Fixed-topology geometry updates remain experimental: production-scale mesh
+  deformation and every model/boundary combination have not been validated.
+  Expected metric/volume errors are handled only in the resident update path;
+  startup failures, MPI faults and arbitrary native crashes may still abort.
+- Resident full-state snapshots and file restart initialization remain unfinished.
+  Nodal tractions and complete coupling-framework adapters are not implemented.
+  No production speedup or peak-RSS scalability claim is made.
+
+Detailed contracts and test records are in [the interface reference](python-wrapper.md),
+[known limitations](limitations.md), and [MPI_PROGRESS.md](../MPI_PROGRESS.md).
+The 0.2.0 notes below remain a historical description of that release.
+
 ## 0.2.0 — steady-flow computation baseline
 
 Release date: 2026-10-20. Native interface version: **15**.

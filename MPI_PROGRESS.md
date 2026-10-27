@@ -868,3 +868,48 @@ PYTHONPATH=tests/python mpirun -np 4 python tests/python/validate_finalization_m
   native geometry failures. Invalid cells may trigger native termination. Complete
   production-scale deformation and every boundary-override/model combination still
   require validation. Rebuild both extensions and restart Python for API 17.
+
+## 2026-10-27: Collective geometry failure return (API 18)
+
+- Following ADflow's collective failure-state pattern, expected resident metric
+  and volume update errors now return normally through the native call stack.
+  All solver ranks agree on status before proceeding. These paths no longer
+  call the legacy termination routine or continue iterating on invalid geometry.
+- `solve()` returns `SolveFailure(fail=True, reason=..., native_status=41/42,
+  reset_required=True)`. Successful results expose `fail=False`. Failed updates
+  do not advance cycles or publish new results. Repeated solves remain failed
+  until collective close/reset. Python retains its last accepted coordinates;
+  Fortran geometry is not rolled back. Cleanup/reinitialization works in the
+  same process, including switching back to nonresident mode.
+- Fixed a refresh-path MPI tag initialization omitted when bypassing grid input.
+  Earlier small success tests did not expose this undefined local value; the
+  negative-grid test hung. Also replaced MPI_IN_PLACE with explicit send/receive
+  storage: the in-place reduction failed to propagate worker error flags in this
+  loaded-extension configuration. The final explicit-buffer tests pass.
+- Tests: 119-test suite passed with 3 optional HDF5 skips before the final tag and
+  flag-reset refinements; final focused geometry/output suite passed 8 tests.
+  Three-rank tests cover negative volumes and a metric error confined to one zone
+  owner, agreeing failure codes, no extra cycles, blocked readouts, collective
+  cleanup and cold recovery. Four ranks split into two independent communicators
+  pass the same failure/recovery tests. Normal three-rank gamma-theta/y-up/W-cycle
+  geometry continuation with coarse startup also passes after the fixes.
+- Both extensions were fully rebuilt. The last configure-time failure-flag reset
+  changed no signatures/layout; its state object was recompiled and both libraries
+  relinked with the same Intel O2 flags before final tests.
+- No new checks or reductions were placed in the normal iteration loop. There is
+  no production performance benchmark claim. Startup failures, resource/MPI
+  failures and arbitrary native crashes still follow their existing error paths.
+
+```bash
+PYTHONPATH=tests/python python -m unittest test_geometry_native test_finalization -v
+PYTHONPATH=tests/python mpirun -np 3 python tests/python/validate_geometry_failure.py
+PYTHONPATH=tests/python mpirun -np 4 python tests/python/validate_geometry_failure.py --split
+PYTHONPATH=tests/python mpirun -np 3 python tests/python/validate_geometry_mpi.py --model gamma-theta --y-up
+```
+
+## 2026-10-27: Version 0.3.0
+
+Package metadata and `cfl3d.__version__` are now 0.3.0; native API remains 18.
+Updated README, interface status and release notes distinguish the released
+coupling foundations from experimental geometry updates and pending framework
+integration. Package/native version checks pass for both local extensions.

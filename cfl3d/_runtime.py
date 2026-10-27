@@ -8,6 +8,13 @@ disjoint communicators can run independent cases simultaneously.
 from pathlib import Path
 import os
 
+class GeometryUpdateFailure(RuntimeError):
+    """Internal signal: native frames unwound normally on every rank."""
+    def __init__(self, status):
+        self.status = status
+        super().__init__("Invalid updated grid metrics" if status == 41 else "Invalid updated cell volumes")
+
+
 _active_context = None
 
 
@@ -28,6 +35,7 @@ class ResidentContext:
         self.cycles = 0
         self.startup_cycles = sum(int(n) for n in arrays["stages"][0, :-1])
         self.started = False
+        self.failure = None
 
     def info(self):
         live, paused, cycles, setups, capacity, work, xyz = self.native.py_resident_info()
@@ -100,6 +108,9 @@ class ResidentContext:
                     del updated
                 status, rows = native.py_advance_resident(
                     solver.options.iterations, solver.options.cfl if changed_cfl else 0.)
+            if status in (41, 42):
+                self.failure = GeometryUpdateFailure(status)
+                raise self.failure
             def check_status():
                 if status:
                     raise RuntimeError(f"CFL3D resident advance failed ({status}); inspect {directory / (stem+'.error')}")

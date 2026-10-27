@@ -23,6 +23,10 @@ c
       subroutine cellvol(jdim,kdim,idim,x,y,z,sj,sk,si,vol,t,nou,bou,
      .                   nbuf,ibufdim,myid,mblk2nd,maxbl,nbl,iflagv1,
      .                   iflagv,imin,imax,jmin,jmax,kmin,kmax)
+#ifdef PYTHON_API
+      use cfl3d_python_state, only: py_geometry_pending,
+     .                             py_geometry_failed
+#endif
 c
 c     $Id$
 c
@@ -191,7 +195,14 @@ c
          if (real(vol(j,k,i)).gt.0.0) go to 64
          nou(1) = min(nou(1)+1,ibufdim)
          write(bou(nou(1),1),82) i,j,k,nbl
-         call termn8(myid,-1,ibufdim,nbuf,bou,nou)
+
+#ifdef PYTHON_API
+            if (py_geometry_pending) then
+              py_geometry_failed=2
+              return
+            end if
+#endif
+            call termn8(myid,-1,ibufdim,nbuf,bou,nou)
    64    continue
    82    format(39h stopping ... negative volume at i,j,k=,3i5,
      .           6h block,i5)

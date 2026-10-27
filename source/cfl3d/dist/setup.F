@@ -218,6 +218,9 @@ c
 c     Geometry-only resident update: never touch q, turbulence initial values,
 c     histories, restart files or the original setup counters.
       if (py_geometry_pending) then
+c        The normal grid-read path initializes this message tag. Geometry-only
+c        entry skips that path; never rely on an earlier call's local storage.
+         itag_flag=1+3*maxbl
          ipysmin=isminc
          isminc=2
          do igrid=1,ngrid
@@ -881,6 +884,20 @@ c
 #endif
  1200 continue
 c
+#ifdef PYTHON_API
+      if (py_geometry_pending) then
+         if (iflag.gt.0) py_geometry_failed=1
+#if defined DIST_MPI
+         ipyfailure=py_geometry_failed
+         call MPI_Allreduce(ipyfailure,py_geometry_failed,1,
+     .        MPI_INTEGER,MPI_MAX,mycomm,ierr)
+#endif
+         if (py_geometry_failed.ne.0) then
+            isminc=ipysmin
+            return
+         end if
+      end if
+#endif
       if (iflag .gt. 0 .and. myid.eq.myhost) then
         write(11,'('' Fatal error(s) uncovered in grid metrics'')')
         if (negvol .eq. 0) then
@@ -947,7 +964,18 @@ c
 c
  1300 continue
 #ifdef PYTHON_API
-      if (py_geometry_pending) go to 9202
+      if (py_geometry_pending) then
+#if defined DIST_MPI
+         ipyfailure=py_geometry_failed
+         call MPI_Allreduce(ipyfailure,py_geometry_failed,1,
+     .        MPI_INTEGER,MPI_MAX,mycomm,ierr)
+#endif
+         if (py_geometry_failed.ne.0) then
+            isminc=ipysmin
+            return
+         end if
+         go to 9202
+      end if
 #endif
 c
 c*******************************************************

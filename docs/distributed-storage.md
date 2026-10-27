@@ -1,6 +1,6 @@
 # Distributed storage migration
 
-Native API 17 retains coarse-to-fine startup and resident advancement, and adds experimental owned-coordinate updates with native geometry refresh. See [resident coordinate updates](python-wrapper.md#resident-coordinate-updates-experimental-native-api-17).
+Native API 18 retains coarse-to-fine startup and resident advancement, supports experimental owned-coordinate updates with native geometry refresh, and returns expected update failures collectively. See [resident coordinate updates](python-wrapper.md#resident-coordinate-updates-experimental-native-api-18).
 It builds on API 14's growable histories, API 12's persistent coordinate/wall
 distribution and API 11's mean-flow/restart migration. Default `resident=False`
 solves still use restart-based continuation. MPI
@@ -295,7 +295,8 @@ Current prototype boundaries:
 - Bounded mode rejects advances beyond its reserved schedule. Open-ended mode
   grows histories and requires explicit close; integer-counter and available-memory
   limits still apply. History pruning/ring buffers are not implemented.
-- Only CFL/chunk-length changes are exposed. Fixed-control tests retain startup
+- API 16 exposed only CFL/chunk-length changes. API 18 additionally supports
+  explicit fixed-topology coordinate updates and collective geometry failure returns. Fixed-control tests retain startup
   order and CFL-ramp state. Changed-CFL tests currently use disabled ramps; this
   does not establish arbitrary runtime option-update semantics.
 - One active native context per process. It borrows a communicator that must stay
@@ -307,11 +308,12 @@ Current prototype boundaries:
   Public result queries, deferred visualization, numbered/append output and
   registered slices/lift distributions use the existing rank-local readouts.
 - Public resident updates preserve native state for CFL, chunk length, I/O choices
-  and dimensional freestream pressure. Other setting/mesh changes close and cold
+  and dimensional freestream pressure. API 18 also preserves flow for successful
+  `setVolumeCoordinates()` updates. Other setting/mesh changes close and cold
   initialize a new context. Arbitrary live updates remain future work.
 - `resident` defaults to False. Updating builds alone does not opt into this path.
 
-Both extensions must be rebuilt for API 17 and existing Python processes restarted:
+Both extensions must be rebuilt for API 18 and existing Python processes restarted:
 
 ```bash
 python tools/build_python.py --jobs 8
