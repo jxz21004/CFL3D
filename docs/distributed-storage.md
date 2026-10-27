@@ -1,6 +1,6 @@
 # Distributed storage migration
 
-Native API 16 supports coarse-to-fine startup and opt-in resident advancement through `CFL3D.solve()`.
+Native API 17 retains coarse-to-fine startup and resident advancement, and adds experimental owned-coordinate updates with native geometry refresh. See [resident coordinate updates](python-wrapper.md#resident-coordinate-updates-experimental-native-api-17).
 It builds on API 14's growable histories, API 12's persistent coordinate/wall
 distribution and API 11's mean-flow/restart migration. Default `resident=False`
 solves still use restart-based continuation. MPI
@@ -311,7 +311,7 @@ Current prototype boundaries:
   initialize a new context. Arbitrary live updates remain future work.
 - `resident` defaults to False. Updating builds alone does not opt into this path.
 
-Both extensions must be rebuilt for API 16 and existing Python processes restarted:
+Both extensions must be rebuilt for API 17 and existing Python processes restarted:
 
 ```bash
 python tools/build_python.py --jobs 8

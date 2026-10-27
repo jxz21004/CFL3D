@@ -88,6 +88,15 @@ python module _native
             integer intent(in) :: ncells
             integer intent(out) :: status
         end subroutine py_configure
+        subroutine py_stage_geometry(xyz,rank,npoints,status)
+            real*8 dimension(npoints,3), intent(in) :: xyz
+            integer intent(in) :: rank
+            integer optional,intent(hide),depend(xyz) :: npoints=shape(xyz,0)
+            integer intent(out) :: status
+        end subroutine py_stage_geometry
+        subroutine py_geometry_info(updates)
+            integer intent(out) :: updates
+        end subroutine py_geometry_info
         subroutine py_set_coordinates(xyz,npoints) ! in :_native:source/python/python_state.F90
             real(kind=8) dimension(npoints,3),intent(in) :: xyz
             integer, optional,intent(in),check(shape(xyz, 0) == npoints),depend(xyz) :: npoints=shape(xyz, 0)

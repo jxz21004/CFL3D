@@ -1,7 +1,7 @@
 # Python interface reference
 
 This document describes the development tree following Python package **0.2.0**,
-native interface version **16**. Sections marked "after 0.2.0" are not included
+native interface version **17**. Sections marked "after 0.2.0" are not included
 in the `v0.2.0` tag.
 For the project motivation, requirements, and build commands, see the
 [README](../README.md). Validation records are maintained in
@@ -1401,10 +1401,10 @@ new_coordinates = adapter.warp(surface)  # local absolute coordinates, (N, 3)
 zone_coordinates = adapter.layout.unpack(new_coordinates)
 ```
 
-**This is a mesh-exchange API only. It does not yet install deformed coordinates
-into a resident solver or refresh native multigrid geometry. Do not assign these
-arrays directly to an active solver's mesh.** Native geometry refresh and safe
-flow continuation are the next implementation stage.
+The adapter stages coordinates only. To apply them to an already initialized
+resident solver, use `solver.setVolumeCoordinates(new_coordinates)` followed by
+`solver.solve()`. Build the adapter **after the initial solve**, once native zone
+ownership is known. Never assign arrays directly to an active solver's mesh.
 
 Volume vertices follow CGNS zone order and i-fastest ordering within each zone,
 with interleaved x/y/z components for IDWarp. Block-interface copies remain
@@ -1429,3 +1429,42 @@ including zero-motion agreement and nonzero deformation without mutating CFL3D:
 PYTHONPATH=tests/python python tests/python/validate_idwarp_exchange.py
 PYTHONPATH=tests/python mpirun -np 3 python tests/python/validate_idwarp_exchange.py
 ```
+
+
+### Resident coordinate updates (experimental, native API 17)
+
+```python
+# All solver.comm ranks execute these calls. resident=True is required.
+solver.solve(final=False)  # initialize native ownership and flow once
+x = solver.getVolumeCoordinates()  # owned vertices, (N,3), metres
+# x0 = x.copy()  # optional: only the application decides to retain a reference
+x[:, 2] *= 1.01  # example; use an external mesh warper for actual deformation
+solver.setVolumeCoordinates(x)
+solver.solve()  # refresh geometry once, then advance the existing flow
+```
+
+The setter accepts absolute coordinates in `VolumeLayout` order. It validates
+finite values, shape, and point-matched interface coordinates across MPI ranks.
+It stages copies without changing current coordinates or old result snapshots.
+The next solve updates all native grid levels, metrics, volumes and wall
+distances; the normal iteration routines update boundary ghost states. It skips
+flow/turbulence initialization, mesh-file reads, repartitioning and coarse-to-fine
+startup. Transported fields remain initial guesses for the deformed geometry.
+After a successful solve Python coordinates and result snapshots describe the
+new native geometry. `getRuntimeInfo()['geometry_updates']` counts these refreshes.
+
+An unchanged coordinate submission cancels a pending update and does not trigger
+native geometry work. Ordinary continuation adds no per-cycle geometry checks,
+coordinate transfers or geometry recomputation. Pending local arrays and native
+coordinate staging buffers are released after application. `close()` discards
+pending coordinates; `resetFlow()` also closes the context. Apply or cancel a
+pending update before changing options that require a cold initialization.
+
+Current scope is steady, fixed-topology, point-matched grids with an already
+paused resident context. The adapter must be rebuilt after any ownership change.
+This is not an ALE/unsteady moving-grid interface. Native metric/volume checks
+still apply; this version does not provide transactional rollback after a native
+geometry failure. A native failure can require a fresh Python/MPI process. Do not
+interpret finite coordinates and matching interfaces as a mesh-quality guarantee.
+The first validation covers small SA/SST and MPI gamma-theta fixtures; production-scale deformation
+and all model/override combinations are not yet established.

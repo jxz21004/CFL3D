@@ -34,6 +34,7 @@ class ResidentContext:
         return dict(active=bool(live), paused=bool(paused), cycles=cycles,
                     initializations=setups, history_capacity=capacity,
                     work_bytes=work, input_coordinate_values=xyz,
+                    geometry_updates=int(self.native.py_geometry_info()),
                     startup_cycles=self.startup_cycles,
                     fine_cycles=max(0, cycles-self.startup_cycles))
 
@@ -85,6 +86,18 @@ class ResidentContext:
             if first:
                 status, rows = native.py_solve()
             else:
+                if solver._pending_geometry is not None:
+                    import numpy as np
+                    parts = [solver._pending_geometry[z.name].reshape(-1, 3, order="F")
+                             for z in solver.mesh.zones if z.coordinates is not None]
+                    updated = np.asfortranarray(np.concatenate(parts) if parts else np.empty((0, 3)))
+                    rank = 0 if solver.comm is None else solver.comm.rank
+                    def stage():
+                        if native.py_stage_geometry(updated, rank):
+                            raise RuntimeError("Native resident geometry staging failed")
+                    solver._checked(stage)
+                    solver._progress("Refreshing resident multigrid geometry and wall distances")
+                    del updated
                 status, rows = native.py_advance_resident(
                     solver.options.iterations, solver.options.cfl if changed_cfl else 0.)
             def check_status():

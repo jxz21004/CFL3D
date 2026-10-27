@@ -851,6 +851,46 @@ c
          end if
 #ifdef PYTHON_API
  9103    continue
+c        No per-iteration geometry work: this runs once after an explicit
+c        update, on the existing distributed workspace, before mgblk resumes.
+         if (py_geometry_pending.and..not.py_resident_closing) then
+      call setup(lw,lw2,work,nstart,work(nstart+1),nwork,
+     .           iwork(1+3*maxgr+maxbl*8),
+     .           mworki-3*maxgr-maxbl*8,iwork(1),
+     .           iwork(1+maxgr),iwork(1+2*maxgr),
+     .           maxbl,mxbli,maxgr,maxseg,nsub1,maxxe,intmax,
+     .           iitot,ncycmax,lwdat,lig,lbg,iovrlp,
+     .           qb,nblock,iviscg,jdimg,kdimg,idimg,utrans,
+     .           vtrans,wtrans,omegax,omegay,omegaz,xorig,
+     .           yorig,zorig,dxmx,dymx,dzmx,dthxmx,dthymx,
+     .           dthzmx,thetax,thetay,thetaz,rfreqt,rfreqr,
+     .           xorig0,yorig0,zorig0,time2,thetaxl,thetayl,
+     .           thetazl,itrans,irotat,idefrm,bcvali,bcvalj,
+     .           bcvalk,nbci0,nbcidim,nbcj0,nbcjdim,
+     .           nbck0,nbckdim,ibcinfo,jbcinfo,kbcinfo,bcfilei,
+     .           bcfilej,bcfilek,ngrid,ncgg,nblg,iemg,inewgg,
+     .           rms,clw,cdw,cdpw,cdvw,cxw,cyw,czw,cmxw,cmyw,
+     .           cmzw,n_clcd,clcd,nblocks_clcd,blocks_clcd,
+     .           chdw,swetw,fmdotw,cfttotw,cftmomw,cftpw,
+     .           cftvw,rmstr,nneg,ntr,windex,
+     .           ninter,iindex,nblkpt,dthetxx,dthetyy,dthetzz,
+     .           iibg,kkbg,jjbg,ibcg,dxintg,dyintg,dzintg,iiig,
+     .           jjig,kkig,ibpntsg,iipntsg,mblk2nd,nou,bou,nbuf,
+     .           ibufdim,iwork(1+3*maxgr),igridg,bcfiles,mxbcfil,
+     .           utrnsae,vtrnsae,wtrnsae,omgxae,omgyae,omgzae,
+     .           xorgae,yorgae,zorgae,thtxae,thtyae,thtzae,
+     .           rfrqtae,rfrqrae,icsi,icsf,jcsi,jcsf,kcsi,kcsf,
+     .           freq,gmass,damp,x0,gf0,nmds,maxaes,aesrfdat,perturb,
+     .           islavept,nslave,iskip,jskip,kskip,bmat,stm,stmi,
+     .           gforcn,gforcnm,xxn,nsegdfrm,idfrmseg,iaesurf,
+     .           maxsegdg,nmaster,aehist,timekeep,inpl3d,nplots,
+     .           nplot3d,levelg,iadvance,xs,gforcs,xorgae0,yorgae0,
+     .           zorgae0,icouple,lfgm,nblk,limblk,isva,nblelst,iskmax,
+     .           jskmax,kskmax,ue,irdrea,nbli,nummem)
+            py_geometry_pending=.false.
+            py_geometry_updates=py_geometry_updates+1
+            deallocate(py_geometry_xyz,py_geometry_offsets)
+         end if
 #endif
          call mgblk(iseq,lw,lw2,work,nstart,work(nstart+1),
      .              work(nstart+1+maxbl),nwork1,

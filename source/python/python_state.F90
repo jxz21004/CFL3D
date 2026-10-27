@@ -29,6 +29,11 @@ module cfl3d_python_state
   logical :: py_resuming=.false.,py_resident_closing=.false.
   logical :: py_resident_open_ended=.false.
   logical :: py_resident_output_changed=.false.
+  ! Staged owned coordinates exist only between an explicit update and resume.
+  logical :: py_geometry_pending=.false.
+  integer :: py_geometry_updates=0
+  integer, allocatable :: py_geometry_offsets(:)
+  real(8), allocatable :: py_geometry_xyz(:,:)
   integer :: py_resident_stop=0,py_resident_done=0
   integer :: py_resident_written=0
   integer :: py_resident_initializations=0,py_resident_capacity=0
@@ -239,6 +244,25 @@ contains
     py_wall_forces(:,p)=loads/py_reference(1)
   end subroutine
 
+  subroutine py_copy_updated_grid(x,y,z,jd,kd,id,grid,ialph)
+    integer, intent(in) :: jd,kd,id,grid,ialph
+    real(8), intent(out) :: x(jd,kd,id),y(jd,kd,id),z(jd,kd,id)
+    integer :: i,j,k,p
+    do k=1,kd
+      do j=1,jd
+        do i=1,id
+          p=py_geometry_offsets(grid)+(i-1)+id*((j-1)+jd*(k-1))
+          x(j,k,i)=py_geometry_xyz(p,1)
+          if (ialph == 0) then
+            y(j,k,i)=py_geometry_xyz(p,2); z(j,k,i)=py_geometry_xyz(p,3)
+          else
+            y(j,k,i)=-py_geometry_xyz(p,3); z(j,k,i)=py_geometry_xyz(p,2)
+          end if
+        end do
+      end do
+    end do
+  end subroutine
+
   subroutine py_copy_grid(x,y,z,jd,kd,id,grid,ialph)
     integer, intent(in) :: jd,kd,id,grid,ialph
     real(8), intent(out) :: x(jd,kd,id),y(jd,kd,id),z(jd,kd,id)
@@ -315,7 +339,7 @@ end module
 subroutine py_api_version(version)
   implicit none
   integer, intent(out) :: version
-  version=16
+  version=17
 end subroutine
 
 subroutine py_set_restart_controls(override_alpha)
@@ -617,6 +641,8 @@ subroutine py_start_resident(cycles,open_ended,status)
   py_resuming=.false.; py_resident_closing=.false.
   py_resident_stop=cycles; py_resident_done=0
   py_resident_written=0
+  py_geometry_pending=.false.; py_geometry_updates=0
+  if (allocated(py_geometry_xyz)) deallocate(py_geometry_xyz,py_geometry_offsets)
   py_resident_initializations=0; py_resident_capacity=0
   py_resident_work_bytes=0; py_resident_cfl=0.d0
   py_write_restart=.false.
@@ -673,6 +699,8 @@ subroutine py_close_resident(status)
   py_resident_paused=.false.
   call py_solve(status,nrows)
   py_resident_closing=.false.
+  py_geometry_pending=.false.
+  if (allocated(py_geometry_xyz)) deallocate(py_geometry_xyz,py_geometry_offsets)
 end subroutine
 
 subroutine py_resident_info(enabled,paused,cycles,initializations,capacity,work_bytes,coordinate_values)
@@ -722,4 +750,39 @@ subroutine py_solve(status,nrows)
   nrows=py_nhistory
   ! An error may leave legacy allocations alive; only a successful run is reusable.
   if (status == 0) py_used=0
+end subroutine
+
+subroutine py_stage_geometry(xyz,rank,npoints,status)
+  use cfl3d_python_state
+  use, intrinsic :: ieee_arithmetic, only: ieee_is_finite
+  implicit none
+  integer, intent(in) :: rank,npoints
+  real(8), intent(in) :: xyz(npoints,3)
+  integer, intent(out) :: status
+  integer :: g,p
+  status=1
+  if (.not.py_resident_paused .or. py_used /= 0) return
+  p=0
+  do g=1,py_ngrid
+    if (py_zone_owners(g) == rank) p=p+product(py_dims(:,g))
+  end do
+  if (p /= npoints .or. .not.all(ieee_is_finite(xyz))) return
+  if (allocated(py_geometry_xyz)) deallocate(py_geometry_xyz,py_geometry_offsets)
+  allocate(py_geometry_xyz(npoints,3),py_geometry_offsets(py_ngrid))
+  py_geometry_xyz=xyz; py_geometry_offsets=0
+  p=1
+  do g=1,py_ngrid
+    if (py_zone_owners(g) /= rank) cycle
+    py_geometry_offsets(g)=p
+    p=p+product(py_dims(:,g))
+  end do
+  py_geometry_pending=.true.
+  status=0
+end subroutine
+
+subroutine py_geometry_info(updates)
+  use cfl3d_python_state, only: py_geometry_updates
+  implicit none
+  integer, intent(out) :: updates
+  updates=py_geometry_updates
 end subroutine

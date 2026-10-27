@@ -4,7 +4,7 @@ A Python interface to the NASA CFL3D V6 structured-grid CFD solver, using NumPy
 f2py to call the Fortran core in the same process. The package supports serial
 execution and the native MPI host/worker path.
 
-Python package version: **0.2.0**. Development native interface version: **16**.
+Python package version: **0.2.0**. Development native interface version: **17**.
 
 Version 0.2.0 establishes the steady-flow computation baseline before future
 aeroelastic coupling work. See the [release notes](docs/release-notes.md) for its

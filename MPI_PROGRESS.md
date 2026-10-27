@@ -840,3 +840,31 @@ PYTHONPATH=tests/python mpirun -np 4 python tests/python/validate_finalization_m
 - This stage does not install coordinates into native resident storage. All-level
   metrics, wall distance, boundary refresh and flow-preserving continuation remain
   separate pending work. Rebuild adapters after ownership changes.
+
+## 2026-10-27: Resident native geometry refresh (API 17, experimental)
+
+- Added `getVolumeCoordinates()` and collective `setVolumeCoordinates()` for an
+  already paused resident solver. Coordinates follow current owned-zone ordering.
+  Finite values/shape and cross-rank point-matched interfaces are checked before
+  staging. Unchanged input skips the native update. x0 remains caller-owned.
+- Native setup has a geometry-only entry: update owned coordinates and coarse
+  coordinates, recompute metrics/volumes and wall distances, but skip grid/restart
+  reads, history resets, flow/turbulence initialization and repartitioning. Boundary
+  ghost states are refreshed by the regular native iteration path. Geometry work
+  occurs once at resume after explicit changes, not in each iteration.
+- Staged native coordinates are released after refresh. Workspace allocation and
+  initialization counters remain unchanged. `geometry_updates` exposes refresh
+  counts. There is no claim of measured production speedup or complete RSS scaling.
+- Rebuilt serial and Intel MPI extensions. Full regression at the first native
+  implementation: 117 tests, 3 skipped, no failures. Final focused regression:
+  17 tests passed, including public staging/interface validation and resident/output
+  behavior. Native zero-motion refresh matches ordinary continuation to 1e-13;
+  transported flow is unchanged by staging and main workspace capacity is retained.
+- Three-rank SST nonzero update/no-change continuation passed. Three-rank
+  gamma-theta with y-up, W cycles and two coarse startup stages also passed.
+  Reproduce with `PYTHONPATH=tests/python mpirun -np 3 python
+  tests/python/validate_geometry_mpi.py --model gamma-theta --y-up`.
+- Limits: steady fixed topology only; no ALE, ownership changes or rollback after
+  native geometry failures. Invalid cells may trigger native termination. Complete
+  production-scale deformation and every boundary-override/model combination still
+  require validation. Rebuild both extensions and restart Python for API 17.

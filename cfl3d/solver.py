@@ -576,6 +576,7 @@ class CFL3D:
         self._surface_context = None
         self._flow_state = None
         self._resident_context = None
+        self._pending_geometry = None
         self._last_runtime_info = {"active": False}
         self._loaded_restart_file = None
         self._successful_options = None
@@ -1949,7 +1950,7 @@ class CFL3D:
                                + (" --mpi" if self.comm is not None else "")) from exc
         if bool(module.py_build_info()) != (self.comm is not None):
             raise RuntimeError("Native extension MPI mode does not match the solver")
-        if getattr(module, "py_api_version", lambda: 0)() != 16:
+        if getattr(module, "py_api_version", lambda: 0)() != 17:
             raise RuntimeError("Native interface changed; rebuild with python tools/build_python.py"
                                + (" --mpi" if self.comm is not None else "") + " and restart Python")
         return module
@@ -2083,9 +2084,52 @@ class CFL3D:
             if not context.started:
                 self._resident_context = None
             raise
+        if self._pending_geometry is not None:
+            for zone in self.mesh.zones:
+                if zone.coordinates is not None:
+                    zone.coordinates = self._pending_geometry[zone.name]
+            self._pending_geometry = None
         self._last_runtime_info = context.info()
         self._progress(f"Native solve finished: {len(values[1])} new cycles; results extracted")
         return context.arrays, values
+
+    def getVolumeCoordinates(self):
+        """Return owned current coordinates (N,3), metres, CGNS i-fastest order.
+
+        No reference grid is saved. The caller may retain this independent copy
+        as x0. Re-fetch after the first solve, which may change zone ownership.
+        Pending coordinates are not installed until the next successful solve.
+        """
+        from .mesh import VolumeLayout
+        return self._checked(lambda: VolumeLayout(self.mesh).coordinates(self.mesh))
+
+    def setVolumeCoordinates(self, coordinates):
+        """Stage absolute owned coordinates for a resident steady continuation.
+
+        Collective within comm. Topology, block ownership and vertex order must
+        remain unchanged. Native geometry is refreshed once at the next solve
+        boundary; q and turbulence remain warm initial guesses. No grid file is
+        written. This API currently requires an already paused resident solver.
+        """
+        from .mesh import VolumeLayout
+        self._check_resident_members()
+        def prepare():
+            if self._resident_context is None or not self._resident_context.info()['paused']:
+                raise RuntimeError("Coordinate updates require a paused resident solver")
+            layout = VolumeLayout(self.mesh)
+            pending = layout.unpack(coordinates)
+            changed = any(not np.array_equal(pending[z.name], z.coordinates)
+                          for z in self.mesh.zones if z.coordinates is not None)
+            return pending, changed
+        pending, changed = self._checked(prepare)
+        if self.comm is not None:
+            changed = any(self.comm.allgather(changed))
+        if changed:
+            from .mesh.validation import validate_interfaces
+            owners = self._mesh_owners if self.comm is not None else (0,)*len(self.mesh.zones)
+            validate_interfaces(self.mesh, pending, owners, self.comm, self._checked)
+        self._pending_geometry = pending if changed else None
+        return self
 
     def getRuntimeInfo(self):
         """Return local resident counters; work_bytes is workspace capacity, not RSS."""
@@ -2099,6 +2143,7 @@ class CFL3D:
         Closing does not create a full-state restart snapshot.
         """
         self._check_resident_members()
+        self._pending_geometry = None
         if self._resident_context is not None:
             context = self._resident_context
             context.close()
@@ -2154,6 +2199,8 @@ class CFL3D:
         if self.comm is not None and len(set(self.comm.allgather(self._solve_counter))) != 1:
             raise RuntimeError("CFL3D solve counters differ within comm")
         def check_pending_reset():
+            if self._pending_geometry is not None and reset_reasons:
+                raise ValueError("Apply or cancel the pending coordinate update before changing cold-start options")
             if self._solution_pending and reset_reasons:
                 raise ValueError("Finalize or resetFlow() before reinitializing an unfinished calculation")
         self._checked(check_pending_reset)
@@ -2187,6 +2234,7 @@ class CFL3D:
         # Legacy filename fields are 80 bytes; reserve room for auxiliary suffixes.
         self._checked(lambda: self._validate_native_stem(stem))
         self._progress(f"Validation complete; output index {solve_index:03d}")
+        geometry_changed = self._pending_geometry is not None
         self._last_result = None  # Native failures must not expose stale loads.
         if self.options.resident:
             arrays, values = self._solve_resident_native(output_directory, stem,
@@ -2259,6 +2307,9 @@ class CFL3D:
         self._output_session = (output_identity, solve_index)
         self._output_session_history = result.cumulative_history.copy()
         self._successful_options = dict(self.options)
+        if geometry_changed:
+            mesh_signature = (self._distributed_mesh_signature() if self.comm is not None
+                              else self._mesh_signature())
         self._successful_mesh_signature = mesh_signature
         if checkpoint is not None:
             checkpoint.fields = self._last_fields
