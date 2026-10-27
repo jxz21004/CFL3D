@@ -319,7 +319,8 @@ uses Roe fluxes and scalar inversions.
 
 `restart_interval` controls native binary checkpoint updates during a solve, not
 the frequency of Python CGNS, Tecplot, or PLOT3D snapshots. Those exports are
-written after each completed `solve()`, according to their output flags. The
+written when a calculation is finalized (the default for `solve()`), or for
+nonfinal chunks when `writeIntermediateSolutions=True`, according to their output flags. The
 native checkpoint uses the internal temporary `.cfl3d-state.bin`; a completed
 solve caches its bytes and removes that temporary file. Numbered restart exports
 are separate final snapshots. The native solver also writes a restart at the end
@@ -446,7 +447,8 @@ the new reference is applied by the next solve.
 | `output_directory` | `"cfl3d-output"` | Automatic output directory |
 | `name` | `"out"` | Case name used in automatic filenames |
 | `progress` | `True` | Print flushed mesh, native solve, and output phase checkpoints on communicator rank 0; set False to disable these checkpoints |
-| `numberSolutions` | `True` | Allocate a new output number; False can append a continued calculation |
+| `numberSolutions` | `True` | Use a new output number after finalization; False can reuse a continued calculation's number |
+| `writeIntermediateSolutions` | `False` | Also write snapshots after `solve(final=False)`, with a separate `_chunk_NNN` suffix; existing output flags select the file types |
 | `writevolumesolution` | `True` | Write CGNS/ADF volume output and include volume arrays in automatic NPZ |
 | `writeTecplotSurfaceSolution` | `True` | Write the main Tecplot ASCII wall file |
 | `writeflowsolution` | `False` | Write native-compatible PLOT3D `.x/.q` |
@@ -621,13 +623,15 @@ contain only the requested additional fine cycles. `getRuntimeInfo()` reports
 `startup_cycles`, `fine_cycles`, and their cumulative sum `cycles`. History capacity
 is grown against that total; only the final stage's budget is extended.
 
-Each solve returns that call's history rows and consumes the usual output index.
+Each solve returns that call's history rows. By default it finalizes the calculation;
+`solve(final=False)` keeps the current output index open for subsequent chunks.
 `start_mode="restart"` is retained as the continuation label; a resident advance
 does not use a restart file. With `numberSolutions=False`, logs/history append to
-the active index while visualizations update. With True, diagnostics and outputs
-use new numbered names. Initial preprocessing logs belong to the initial index;
+the active index while visualizations update. With True, the next calculation after finalization uses new numbered names. Initial preprocessing logs belong to the initial index;
 compatible later calls do not preprocess again. Registered slices/lift
-distributions still write their Tecplot files automatically after each solve.
+distributions write automatically at finalization, or at nonfinal boundaries when
+`writeIntermediateSolutions=True`. Finalization retains the native workspace;
+`close()` releases it and does not implicitly finalize an unfinished calculation.
 
 With all visualization flags False and no registered surface analyses, a resident
 advance writes no grid, internal restart or automatic solution NPZ. Native text
@@ -700,7 +704,7 @@ use the collective checkpoint writer for a portable whole-case state.
 
 | Operation | MPI calling requirement |
 | --- | --- |
-| `solve()`, `gatherFields()` | Every rank in `solver.comm` |
+| `solve()`, `finalizeSolution()`, `gatherFields()` | Every rank in `solver.comm` |
 | `writeVolumeSolution()`, `writeFlowSolution()`, `writeRestartFile()` | Every rank in `solver.comm`; root writes the file |
 | `getFlowState()`, `setFlowState()` | Local; install matching owned shards on every rank before the next solve |
 | `getSolution()` | Local cached integral query |
@@ -953,11 +957,59 @@ The surface `.plt` file contains Tecplot ASCII text, not Tecplot binary data.
 The extension is a filename convention; slices and lift distributions retain
 their `.dat` extensions. Explicit surface filenames keep the suffix you provide.
 
+### Final calculations and intermediate chunks
+
+`solve(final=True)` and `solver(final=True)` retain the default behavior: advance
+`iterations` cycles and output the completed calculation according to the existing
+output flags. For an external convergence/coupling loop, mark intermediate calls
+as nonfinal:
+
+```python
+# All ranks in solver.comm execute these calls.
+for _ in range(4):
+    solver.solve(final=False)
+result = solver.solve()       # Fifth chunk; final output uses out_000_...
+
+# Alternatively, decide that the latest nonfinal result is already sufficient:
+solver.solve(final=False)     # Starts the next calculation, out_001
+result = solver.finalizeSolution()  # Output only; no extra iterations
+solver.close()                # Release the resident workspace when no longer needed
+```
+
+`final=False` still returns current local flow/wall data and updates the continuation
+state. It suppresses automatic volume, surface, slice/lift, NPZ and restart exports
+unless `writeIntermediateSolutions=True`. Native logs/history and the nonresident
+internal restart mechanism retain their existing behavior. Explicit deferred
+writers remain callable. No new `x0` or reference-grid copy is created.
+Use `resident=True` when repeated advances should retain the native workspace
+and avoid repeated setup/internal restart I/O. The `final` flag controls output
+grouping; it does not change either continuation mode's numerical behavior or
+automatically determine convergence.
+
+With `writeIntermediateSolutions=True`, the existing output flags select which
+snapshots to write. For example, intermediate surface files are named
+`out_000_chunk_000_surf.plt`, `out_000_chunk_001_surf.plt`; final output is
+`out_000_surf.plt`. Registered slices/lift files use the same chunk prefix.
+Native logs always use the main index. `result.chunk_output_paths` lists the
+intermediate targets, while `result.output_paths` lists the final/native targets;
+listed targets may be disabled and absent on disk.
+
+`result.chunk_index` is zero-based within an output stream; it resets on a new
+main index. With `numberSolutions=False`, it keeps increasing in the reused stream
+to avoid overwriting earlier chunks. `result.finalized` records whether the result
+was finalized successfully. Finalization is idempotent, does not advance the flow,
+and retains the cache/resident workspace. If a writer fails, it remains pending
+and can be retried. Finalization is collective; all ranks must also agree on the
+`final` flag passed to `solve()`.
+
+### Numbering and continued output
+
 Fortran writes numbered logs from the beginning of computation. It does not first
 write a fixed `cfl3d.out` and copy it afterward. Existing files from older versions
 are not deleted or renamed.
 
-`numberSolutions=True` allocates a new index for each completed native solve.
+`numberSolutions=True` allocates a new index for the next calculation after
+finalization. All nonfinal chunks of one calculation use the same index.
 False reuses the previous index only for a continued calculation within the same
 object, with the same case name, directory, and filename labels:
 
@@ -979,10 +1031,14 @@ chunk's status. The returned `history` contains only the current chunk;
 `chunk_history` contains the current chunk.
 
 Cold initialization, `resetFlow()`, or an output-identity change starts a new
-number even if numbering is disabled. New objects do not claim old disk logs just
+number even if numbering is disabled. While a calculation is pending, finalize
+it or call `resetFlow()` before changing its output identity or requiring cold
+initialization. `resetFlow()` discards the unfinished calculation without final output. New objects do not claim old disk logs just
 because `restartFile` was set. `solver.nSolve` counts successful native calls,
-independently of output indices. Configuration failures do not consume a number;
-a completed native solve retains its number if a later write fails.
+independently of output indices. `solver.nSolutions` counts successful finalizations.
+Configuration failures do not consume a number; a completed native chunk reserves
+its number even if output fails. Retry `finalizeSolution()` after a failed final
+output; it does not repeat native iterations or log/history records.
 
 Custom filenames are labels after the case/index prefix, retaining their parent
 directories. For example, `surface_filename="plots/wall.dat"` gives
@@ -991,7 +1047,8 @@ gives `out_000_grid.cgns`. `result.output_paths` lists target paths, including t
 that may not exist because their outputs were disabled.
 
 All three main output flags can be False while complete state remains cached.
-Registered surface analyses and the result/history NPZ still write automatically.
+At finalization, registered surface analyses still write automatically; the
+nonresident path also writes result/history NPZ metadata.
 After a successful solve, files can be written without rerunning the core:
 
 ```python

@@ -792,3 +792,36 @@ calculation chunks，原生设计及边界见 docs/distributed-storage.md。
 附加选项的构建命令为
 `python tools/build_python.py --mpi --compiler-family intel --fc mpiifort --jobs 8 --extra-fflags="-ip -fno-alias -xHost"`；
 每个配置均需完整重编，并在新的 Python/MPI 进程中计时。
+
+
+## 完整计算与迭代分段输出（2026-10-27）
+
+- `solve(final=True)` / `solver(final=True)` 默认仍在本次迭代结束后完成输出。
+  `final=False` 保留计算状态和主输出编号，只推进本段并返回结果；多个分段可以
+  由最后一次默认求解完成，也可调用 collective `finalizeSolution()` 单独完成输出。
+- `finalizeSolution()` 不增加迭代、不释放缓存或驻留工作区；成功后重复调用不重复
+  输出或计数。输出失败保持 pending，可在修复输出问题后重试；原生计算不会重复。
+- 新增 `writeIntermediateSolutions=False`。开启后，非 final 分段按原有输出开关写
+  `out_000_chunk_000_*` 等快照；最终结果仍为 `out_000_*`。原生日志/历史共用主编号。
+  `numberSolutions=False` 继续支持复用主编号，分段编号在该输出流内递增，避免覆盖。
+- `nSolve` 保留成功原生调用次数，`nSolutions` 统计成功完成的计算任务；结果新增
+  `chunk_index`、`finalized` 和 `chunk_output_paths`。主编号会在原生成功后预留，
+  但 pending 分段继续复用；主动 reset 会放弃未完成任务，不覆盖其已有日志。
+- MPI 检查 final 标志、完成状态、计数及最终输出前的表面分析注册一致性。
+  未完成任务改变输出身份或触发冷初始化时，要求先 finalize 或显式 resetFlow。
+- 本轮仅调整 Python 输出生命周期；Native API 保持 16，无需重编 Fortran。
+  网格坐标接收与内部几何刷新尚未实现；未增加参考网格 x0 副本，也未改变 .res 写出时机。
+
+验证：完整 Python 回归 114 项，111 通过、3 项可选 HDF5 跳过；其中新增 5 项
+finalization 测试覆盖普通/驻留续算、独立分段快照、最终输出、幂等完成、写失败重试、
+编号复用与 reset、NPZ/CGNS/restart 导出。三进程普通/驻留分段计算的历史和流场
+与相同 MPI 配置的连续计算逐项一致；不一致 final 标志及表面注册均能集体报错并恢复。
+四进程分成两组独立通信器的普通/驻留输出及续算对照通过。
+
+复现（使用新的输出目录，避免与已保留的编号文件冲突）：
+
+```bash
+python -m unittest discover -s tests/python -v
+PYTHONPATH=tests/python mpirun -np 3 python tests/python/validate_finalization_mpi.py --directory build/native-output-finalization-mpi3
+PYTHONPATH=tests/python mpirun -np 4 python tests/python/validate_finalization_mpi.py --split --directory build/native-output-finalization-split
+```

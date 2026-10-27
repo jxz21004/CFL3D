@@ -69,7 +69,8 @@ class ResidentRuntimeTests(unittest.TestCase):
                     with self.assertRaisesRegex(OSError,'injected'):
                         solver.solve(output_directory=root/'resident')
                 self.assertEqual((solver.nSolve,solver.getRuntimeInfo()['cycles']),(1,2))
-                solver.writeVolumeSolution()
+                solver.finalizeSolution()
+                self.assertEqual(solver.nSolutions, 1)
                 self.assertEqual(solver.getRuntimeInfo()['cycles'],2)
                 result = solver.solve(output_directory=root/'resident')
                 self.assertEqual((result.solve_index,solver.getRuntimeInfo()['cycles']),(1,4))

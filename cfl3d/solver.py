@@ -131,6 +131,7 @@ class SolverOptions:
     output_directory: str | Path = "cfl3d-output"
     name: str = "out"
     numberSolutions: bool = True
+    writeIntermediateSolutions: bool = False  # Optional snapshots for solve(final=False).
     writevolumesolution: bool = True
     writeTecplotSurfaceSolution: bool = True
     writeflowsolution: bool = False
@@ -231,7 +232,7 @@ _OPTION_CATEGORIES = {
     "mesh": frozenset(("input_grid",)),
     "restart": frozenset(("restartFile",)),
     "runtime": frozenset(("resident",)),
-    "io": frozenset(("name", "output_directory", "numberSolutions", "writevolumesolution",
+    "io": frozenset(("name", "output_directory", "numberSolutions", "writeIntermediateSolutions", "writevolumesolution",
                      "writeTecplotSurfaceSolution", "writeflowsolution", "volume_filename",
                      "surface_filename", "flow_prefix", "progress")),
 }
@@ -257,7 +258,7 @@ def _validate_options(values):
             continue
         if not isinstance(value, (str, Path)) or not str(value).strip():
             raise ValueError(f"{name} must be a nonempty path")
-    for name in ("writevolumesolution", "writeTecplotSurfaceSolution", "writeflowsolution", "numberSolutions", "resident", "progress"):
+    for name in ("writevolumesolution", "writeTecplotSurfaceSolution", "writeflowsolution", "numberSolutions", "writeIntermediateSolutions", "resident", "progress"):
         if not isinstance(values[name], bool):
             raise ValueError(f"{name} must be a boolean")
     if values["mesh_sequence"] and values["coarse_grid_stages"] is not None:
@@ -502,6 +503,9 @@ class SolverResult:
     changed_options: tuple[str, ...] = ()
     reset_reasons: tuple[str, ...] = ()
     zone_owners: dict[str, int] = field(default_factory=dict)
+    chunk_index: int = 0
+    finalized: bool = False
+    chunk_output_paths: dict[str, Path] = field(default_factory=dict)
 
     @property
     def coefficients(self):
@@ -518,6 +522,7 @@ class SolverResult:
                   "chunk_history": self.history, "iteration_offset": np.asarray(self.iteration_offset),
                   "final_alpha": np.asarray(self.final_alpha),
                   "solve_index": np.asarray(self.solve_index), "name": np.asarray(self.name),
+                  "chunk_index": np.asarray(self.chunk_index), "finalized": np.asarray(self.finalized),
                   "start_mode": np.asarray(self.start_mode),
                   "changed_options": np.asarray(self.changed_options, dtype=str),
                   "reset_reasons": np.asarray(self.reset_reasons, dtype=str)}
@@ -558,6 +563,9 @@ class CFL3D:
         self.comm = comm
         self._last_result = None
         self._solve_counter = 0
+        self._solution_counter = 0
+        self._solution_pending = False
+        self._output_chunk_counter = 0
         self._next_output_index = 0
         self._output_session = None
         self._output_session_history = None
@@ -759,12 +767,12 @@ class CFL3D:
         self._progress("Native input ready")
         return arrays, prepared[1] if self.comm.rank == 0 else np.empty((0,3), order="F")
 
-    def __call__(self, *, output_directory=None):
+    def __call__(self, *, output_directory=None, final=True):
         """等价于 solve()：返回 SolverResult，沿用参数更新、续算和输出编号规则。
 
         MPI 下仍需本对象 comm 中的所有 rank 一起调用。
         """
-        return self.solve(output_directory=output_directory)
+        return self.solve(output_directory=output_directory, final=final)
 
     @property
     def name(self):
@@ -779,8 +787,15 @@ class CFL3D:
         """Number of completed native solves; resetFlow() preserves output numbering."""
         return self._solve_counter
 
-    def _numbered_output_names(self, index):
+    @property
+    def nSolutions(self):
+        """Number of successfully finalized CFD calculations (independent of nSolve)."""
+        return self._solution_counter
+
+    def _numbered_output_names(self, index, chunk=None):
         stem = f"{self.name}_{index:03d}"
+        if chunk is not None:
+            stem += f"_chunk_{chunk:03d}"
         def filename(configured, default):
             if configured is None:
                 return Path(stem+default)
@@ -809,7 +824,9 @@ class CFL3D:
                        ("volume_filename", "surface_filename", "flow_prefix"))
         identity = (str(directory), self.name, labels)
         session = self._output_session
-        if (not self.options.numberSolutions and continuing and session is not None
+        if self._solution_pending and (not continuing or session is None or session[0] != identity):
+            raise ValueError("Finalize or resetFlow() before changing an unfinished calculation/output identity")
+        if ((self._solution_pending or not self.options.numberSolutions) and continuing and session is not None
                 and session[0] == identity):
             return session[1], True, len(self._output_session_history), identity
         index = self._next_output_index
@@ -1000,6 +1017,7 @@ class CFL3D:
         """Start the next solve from freestream instead of cached state or restartFile."""
         self.close()
         self._flow_state = None
+        self._solution_pending = False
         self._continuing = False
         self._loaded_restart_file = None
         self.options.restartFile = None
@@ -2103,13 +2121,18 @@ class CFL3D:
         self.close()
         return False
 
-    def solve(self, *, output_directory=None):
+    def solve(self, *, output_directory=None, final=True):
+        """Advance iterations; finalize/output by default, or accumulate a nonfinal chunk.
+
+        All communicator members must supply the same final flag. Finalization
+        retains the flow and resident workspace for subsequent calculations.
+        """
         from ._runtime import check_owner
         self._progress_origin = self._progress_last = perf_counter()
         self._progress("Checking options and mesh before solve")
         self._checked(lambda: check_owner(self))
         self._check_resident_members()
-        self._last_result = None  # Failed solves must not expose an older run's loads.
+        self._check_finalization_state(final)
         self._surface_analysis_mesh = None
         self.checkOptions()
         self._check_surface_requests()
@@ -2130,6 +2153,10 @@ class CFL3D:
                 raise RuntimeError("CFL3D configuration/mesh change decisions differ within comm")
         if self.comm is not None and len(set(self.comm.allgather(self._solve_counter))) != 1:
             raise RuntimeError("CFL3D solve counters differ within comm")
+        def check_pending_reset():
+            if self._solution_pending and reset_reasons:
+                raise ValueError("Finalize or resetFlow() before reinitializing an unfinished calculation")
+        self._checked(check_pending_reset)
         if reset_reasons and self._resident_context is not None:
             self.close()
         if self.options.resident:
@@ -2154,11 +2181,13 @@ class CFL3D:
         if self.comm is not None:
             selected = self.comm.bcast(selected, root=0)
         solve_index, append_output, iteration_offset, output_identity = selected
+        chunk_index = self._output_chunk_counter if append_output else 0
         output_names = self._checked(lambda: self._numbered_output_names(solve_index))
         stem = f"{self.name}_{solve_index:03d}"
         # Legacy filename fields are 80 bytes; reserve room for auxiliary suffixes.
         self._checked(lambda: self._validate_native_stem(stem))
         self._progress(f"Validation complete; output index {solve_index:03d}")
+        self._last_result = None  # Native failures must not expose stale loads.
         if self.options.resident:
             arrays, values = self._solve_resident_native(output_directory, stem,
                                                         changed_options, append_output, iteration_offset)
@@ -2198,7 +2227,7 @@ class CFL3D:
                 wall_forces[key] = wall_force_values[:,offset:offset+count].T.reshape(shape, order="F").copy()
             offset += count
         result = SolverResult(fields, history, output_directory, final_alpha, surfaces, walls, wall_forces,
-                              solve_index=solve_index, name=self.name,
+                              solve_index=solve_index, chunk_index=chunk_index, name=self.name,
                               output_paths={key: output_directory/value for key,value in output_names.items()},
                               iteration_offset=iteration_offset,
                               cumulative_history=(np.concatenate([self._output_session_history, history])
@@ -2221,8 +2250,11 @@ class CFL3D:
         if self.comm is not None:
             self._cache_wall_areas()
         self._last_output_names = output_names
-        # Consume an index once native computation succeeds, even if a later write needs retrying.
+        # Reserve the index after native success, including output failures.
+        # Pending chunks reuse it; only finalization increments nSolutions.
         self._solve_counter += 1
+        self._solution_pending = True
+        self._output_chunk_counter = chunk_index + 1
         self._next_output_index = solve_index + 1
         self._output_session = (output_identity, solve_index)
         self._output_session_history = result.cumulative_history.copy()
@@ -2231,7 +2263,71 @@ class CFL3D:
         if checkpoint is not None:
             checkpoint.fields = self._last_fields
         self._flow_state = checkpoint
-        self._progress("Flow and boundary results cached; writing requested outputs")
+        self._progress("Flow and boundary results cached")
+        if final:
+            self.finalizeSolution()
+        elif self.options.writeIntermediateSolutions:
+            names = self._numbered_output_names(solve_index, chunk_index)
+            saved_names = self._last_output_names
+            try:
+                # Deferred writers share the same local cached result; only snapshot
+                # paths change. Native log/history paths stay on the main index.
+                self._last_output_names = names
+                result.chunk_output_paths = {
+                    key: output_directory / names[key] for key in
+                    ("volume", "surface", "slices", "lift", "flow_prefix", "solution", "restart", "checkpoint")}
+                self._write_solution_outputs()
+            finally:
+                self._last_output_names = saved_names
+        if not self.options.resident:
+            self._checked(lambda: self._cleanup_empty_native_files(output_directory, stem)
+                          if rank == 0 else None)
+        self._progress(f"Solve {solve_index:03d} complete" if final else
+                       f"Solve {solve_index:03d} chunk {chunk_index:03d} complete (pending finalization)")
+        return result
+
+    def _check_finalization_state(self, final):
+        def validate():
+            if not isinstance(final, bool):
+                raise TypeError("final must be a bool")
+        self._checked(validate)
+        if self.comm is not None:
+            state = (final, self._solution_pending, self._solution_counter, self._output_chunk_counter)
+            if len(set(self.comm.allgather(state))) != 1:
+                raise RuntimeError("CFL3D finalization/chunk states differ within comm")
+
+    def finalizeSolution(self):
+        """Collectively output the latest result without advancing or closing the solver.
+
+        Safe to repeat after success. If output fails, the calculation remains
+        pending so this method can retry without performing more iterations.
+        """
+        self._check_finalization_state(True)
+        self._checked(self._require_result)
+        self.checkOptions()
+        self._check_surface_requests()
+        if not self._solution_pending:
+            if not self._last_result.finalized:
+                raise RuntimeError("No pending calculation; resetFlow() discarded the unfinished calculation")
+            return self._last_result
+        self._checked(lambda: self._select_output(self._last_output_directory, True)
+                      if self.comm is None or self.comm.rank == 0 else None)
+        # Writers must serialize final=True, but a failed output must remain retryable.
+        self._last_result.finalized = True
+        try:
+            self._write_solution_outputs()
+        except BaseException:
+            self._last_result.finalized = False
+            raise
+        self._solution_pending = False
+        self._solution_counter += 1
+        return self._last_result
+
+    def _write_solution_outputs(self):
+        result = self._last_result
+        output_names = self._last_output_names
+        output_directory = self._last_output_directory
+        rank = self.comm.rank if self.comm is not None else 0
         from .solution_io import result_output
         path = self._checked(lambda: self._output_path(None, output_names["solution"]) if rank == 0 else None)
         if self.options.writevolumesolution:
@@ -2246,20 +2342,15 @@ class CFL3D:
         elif self.nLiftDist or self.nSlice:
             self._progress("Writing registered surface analyses")
             self.writeSurfaceAnalysis()
-        if checkpoint is not None and (self.options.writevolumesolution or self.options.writeflowsolution):
+        if self._flow_state is not None and (self.options.writevolumesolution or self.options.writeflowsolution):
             self._progress("Writing native restart output")
-            self._stage_flow_state(checkpoint, output_directory / output_names["restart"])
+            self._stage_flow_state(self._flow_state, output_directory / output_names["restart"])
         if self.options.writevolumesolution:
             self._progress("Writing CGNS volume solution")
             self.writeVolumeSolution()
         if self.options.writeflowsolution:
             self._progress("Writing PLOT3D flow solution")
             self.writeFlowSolution()
-        if not self.options.resident:
-            self._checked(lambda: self._cleanup_empty_native_files(output_directory, stem)
-                          if rank == 0 else None)
-        self._progress(f"Solve {solve_index:03d} complete")
-        return result
 
     @staticmethod
     def _validate_native_stem(stem):
