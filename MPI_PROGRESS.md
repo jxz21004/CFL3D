@@ -825,3 +825,18 @@ python -m unittest discover -s tests/python -v
 PYTHONPATH=tests/python mpirun -np 3 python tests/python/validate_finalization_mpi.py --directory build/native-output-finalization-mpi3
 PYTHONPATH=tests/python mpirun -np 4 python tests/python/validate_finalization_mpi.py --split --directory build/native-output-finalization-split
 ```
+
+## 2026-10-27: Mesh-exchange foundation and IDWarp adapter
+
+- Added `cfl3d.mesh.VolumeLayout`: local structured vertex ordering, common CGNS
+  coordinate-component indices and detached per-zone unpacking. No automatic x0.
+- Added optional `IDWarpAdapter`: global coupling IDs are converted to local
+  face connectivity, with remote coordinates requested from their owners.
+  Common-volume IDs stay distinct from canonical surface IDs.
+- Actual installed IDWarp passed serial and three-rank two-zone zero-motion
+  mapping (absolute tolerance 1e-12) and nonzero deformation staging. Unit tests
+  cover unequal dimensions and partial ownership. No CFD solve is performed by
+  these exchange tests.
+- This stage does not install coordinates into native resident storage. All-level
+  metrics, wall distance, boundary refresh and flow-preserving continuation remain
+  separate pending work. Rebuild adapters after ownership changes.

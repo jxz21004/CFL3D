@@ -1380,3 +1380,52 @@ Debug builds add symbols and bounds checks to the new state interface. The legac
 Fortran core uses cross-dimensional storage access, so global bounds checking is
 not enabled for every legacy routine. Detailed build setup is maintained only in
 the [README](../README.md#minimal-installation).
+
+## Mesh deformation exchange (experimental)
+
+`cfl3d.mesh` separates the solver-independent volume layout (`VolumeLayout`)
+from the optional `IDWarpAdapter`. Importing this subpackage does not require
+IDWarp. The caller creates an IDWarp `USMesh` on the same communicator, using
+the same structured CGNS file/zone order as CFL3D.
+
+```python
+from cfl3d.mesh import IDWarpAdapter
+
+surface = solver.getSurfaceMesh()
+adapter = IDWarpAdapter(warper, solver.mesh, surface, comm=solver.comm)
+# Optional reference storage, owned by this application; omit for plain CFD.
+x0 = adapter.layout.coordinates(solver.mesh)
+
+surface["coordinates"] += displacement  # metres, in getSurfaceMesh node order
+new_coordinates = adapter.warp(surface)  # local absolute coordinates, (N, 3)
+zone_coordinates = adapter.layout.unpack(new_coordinates)
+```
+
+**This is a mesh-exchange API only. It does not yet install deformed coordinates
+into a resident solver or refresh native multigrid geometry. Do not assign these
+arrays directly to an active solver's mesh.** Native geometry refresh and safe
+flow continuation are the next implementation stage.
+
+Volume vertices follow CGNS zone order and i-fastest ordering within each zone,
+with interleaved x/y/z components for IDWarp. Block-interface copies remain
+separate. These indices are not the canonical IDs returned by `getSurfaceMesh`.
+The adapter converts global surface connectivity to local point indices and
+requests remote face-node coordinates. It gathers node IDs for an ownership
+directory, not full surface coordinates; IDWarp itself gathers its surface
+inside `setSurfaceDefinition`.
+
+All ranks participate, including ranks with empty arrays. Rebuild the adapter
+if ownership changes (including the initial native load balance). Surface IDs
+and connectivity must remain unchanged during repeated calls. No reference
+coordinate array is retained by this adapter. IDWarp may maintain its own
+reference/internal mesh independently of CFL3D.
+
+Validation: `test_mesh_exchange.py` checks unequal-zone indexing, partial
+ownership, copies and global-to-local surface connectivity.
+`validate_idwarp_exchange.py` exercises the installed IDWarp on a two-zone mesh,
+including zero-motion agreement and nonzero deformation without mutating CFL3D:
+
+```bash
+PYTHONPATH=tests/python python tests/python/validate_idwarp_exchange.py
+PYTHONPATH=tests/python mpirun -np 3 python tests/python/validate_idwarp_exchange.py
+```
