@@ -1058,3 +1058,70 @@ Updated package metadata, README, interface reference and release notes to
 0.3.2 / native API 21. Release documentation includes both native deformation
 methods, mesh import changes, rebuild instructions and scalability limits.
 Numerical validation is recorded in the preceding entry.
+
+## 2026-10-28: Distributed native deformation (working-tree API 22)
+
+Replaced the API 21 root control solve with zone-owned control graphs, local
+native FMEM assembly and distributed diagonally preconditioned restarted GMRES.
+Canonical node owners sum shared-row contributions and return interface values.
+Only scalar/small dot-product reductions are global. Exponential decay and spring
+smoothing use the original equations on local controls. Distance queries stream
+source batches of at most 256 points; no complete boundary array is retained.
+Surface targets are routed to canonical owners and requesting zone owners instead
+of allgathered. TFI stays on zone owners, and a host with no zones has no controls
+or matrix. Global zone/connection metadata and axis index lists remain replicated.
+
+FMEM reuses native elmetricsfe/elglobfe coefficients but replaces the old global
+Gauss-Seidel order and 1e-6 displacement-update stopping test with a distributed
+residual criterion. Legacy alpha1 is accepted but no longer controls relaxation.
+No implicit fallback to root solving or replicated matrices exists. API 22 adds
+py_warp_matrix; both extensions must be rebuilt and Python processes restarted.
+
+Validation:
+
+- Intel serial and MPI builds pass. Full suite: 126 tests, 123 passed and 3
+  optional HDF5 skips (`/tmp/cfl3d-distributed-warp-suite.log`).
+- A single-block comparison with the original py_warp_controls kernel passes:
+  exponential (including two smoothing sweeps) within 1e-15 absolute, FMEM within
+  2e-6 absolute (legacy stopping accuracy). Serial/MPI new-path coordinates match
+  within 5e-15, and continued fields/histories/wall forces within rtol=2e-12,
+  atol=5e-14 on the repeated two-block deformation fixture.
+- Three-rank and split four-rank tests pass. The adapter communicator rejects
+  gather/scatter and array/dictionary allgather, checks streaming batch sizes,
+  and asserts owned control storage, including an empty host. Injected assembly
+  failure on one owner returns collectively, and a subsequent warp succeeds.
+  Logs: `/tmp/cfl3d-distributed-warp-mpi.log`,
+  `/tmp/cfl3d-distributed-warp-split.log`.
+- Candidate-only calls preserve subsequent resident flow/history exactly, and
+  two installed geometry updates retain one initialization.
+
+This is not intra-zone decomposition or a production speedup measurement.
+Boundary searches still examine all source batches against local queries; GMRES
+needs synchronization and a bounded set of local Krylov vectors. TFI temporary
+storage scales with the local zone. Large-mesh timing/RSS and more transformed
+interface configurations remain to be measured. No CFD iteration code changed.
+
+## 2026-10-28: Public control-point selection
+
+CFL3DMeshAdapter now exposes control_mode=minimal/auto_stride/stride/indices.
+Manual strides accept a scalar, three directional values, or a complete mapping
+by zone name. Explicit index mappings use zero-based, strictly increasing lists
+for all zones. Required physical/interface endpoints and matching indices are
+added; getControlIndices() returns the effective lattice as metadata only.
+The automatic uniform mode uses the largest common stride consistent with these
+constraints, iterating interface propagation. Defaults remain stride mode/4.
+
+Removed the implicit FMEM five-indices-per-axis rule. Coarse free-control systems
+may require explicit refinement; an all-prescribed lattice bypasses the unnecessary
+linear solve. This is documented as a sampling behavior change. The control-point selection guide is integrated into docs/python-wrapper.md
+under the native adapter section and linked from README and release notes.
+No native API or Fortran change beyond the preceding API 22 work was needed.
+
+Validation: full suite 129 tests, 126 passed and 3 optional HDF5 skips
+(/tmp/cfl3d-control-selection-suite.log). Three-rank MPI passes both methods,
+explicit/minimal/automatic uniform zero-motion checks, repeated deformation,
+owned storage assertions and collective rejection of invalid indices supplied
+on just one rank (/tmp/cfl3d-control-selection-mpi.log). Unit checks cover per-zone
+anisotropic spacing, interface index propagation, automatic GCD spacing, no hidden
+FMEM floor, nonmutating index queries, equivalent-lattice deformation, conflicting
+options, invalid index bounds/order/types and all-prescribed minimal controls.

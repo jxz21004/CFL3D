@@ -357,7 +357,7 @@ end module
 subroutine py_api_version(version)
   implicit none
   integer, intent(out) :: version
-  version=21
+  version=22
 end subroutine
 
 subroutine py_set_restart_controls(override_alpha)
@@ -986,4 +986,43 @@ contains
       w(:,:,:,1,1),w(:,:,:,2,1),w(:,:,:,3,1),w(:,:,:,1,2),w(:,:,:,2,2),w(:,:,:,3,2), &
       a(:,:,:,1),a(:,:,:,2),a(:,:,:,3),i1,i2,j1,j2,k1,k2,nou,bou,1,4,0)
   end subroutine
+end subroutine
+
+! Assemble only the caller's block contributions. Shared-node row summation and
+! the distributed linear solve belong to the adapter; no global grid is passed.
+subroutine py_warp_matrix(points,graph,modulus,n,sa,ija,status)
+  use, intrinsic :: ieee_arithmetic, only: ieee_is_finite
+  implicit none
+  integer,intent(in) :: n,graph(n,21)
+  real(8),intent(in) :: points(n,3),modulus(n)
+  real(8),intent(out) :: sa(245*n+2)
+  integer,intent(out) :: ija(245*n+2),status
+  integer,allocatable :: slave(:,:,:)
+  real(8),allocatable :: metric(:,:)
+  real(8) :: stiff(24,24)
+  integer :: owners(1),blocks(1,2),i,old2d,i2d
+  common /twod/ i2d
+  status=1; sa=0.d0; ija=0
+  if(n<1.or..not.all(ieee_is_finite(points)).or..not.all(ieee_is_finite(modulus))) return
+  if(any(graph(:,2:7)<1).or.any(graph(:,2:7)>n)) return
+  if(any(graph(:,9)/=1).or.any(graph(:,11)/=1)) return
+  allocate(slave(n,21,5),metric(n,10))
+  slave=0; slave(:,:,1)=graph; owners=0; blocks=0
+  old2d=i2d; i2d=0
+  ija(1)=3*n+2
+  do i=1,n
+    ija(3*(i-1)+2)=ija(3*(i-1)+1)+graph(i,10)
+    ija(3*(i-1)+3)=ija(3*(i-1)+2)+graph(i,10)
+    ija(3*i+1)=ija(3*(i-1)+3)+graph(i,10)
+  end do
+  call elmetricsfe(metric(:,1),metric(:,2),metric(:,3),metric(:,4),metric(:,5), &
+    metric(:,6),metric(:,7),metric(:,8),metric(:,9),metric(:,10), &
+    points(:,1),points(:,2),points(:,3),1.d-13,slave,n,21,1,0,0,0,owners,1,1)
+  call elglobfe(sa,points(:,1),points(:,2),points(:,3), &
+    metric(:,1),metric(:,2),metric(:,3),metric(:,4),metric(:,5),metric(:,6), &
+    metric(:,7),metric(:,8),metric(:,9),modulus,modulus,modulus,modulus,modulus,modulus, &
+    metric(:,10),1.d-13,stiff,slave,ija,n,21,1,0,0,0,owners,blocks,1,1)
+  i2d=old2d
+  status=0
+  if(.not.all(ieee_is_finite(sa))) status=2
 end subroutine

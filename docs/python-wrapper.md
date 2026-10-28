@@ -1,6 +1,6 @@
 # Python interface reference
 
-This document describes Python package **0.3.2**, native interface version **21**.
+This document describes Python package **0.3.2**, working-tree native interface version **22**.
 Sections marked "after 0.2.0" are included in 0.3.0 but absent from the `v0.2.0`
 tag. Experimental features retain their documented limitations.
 For the project motivation, requirements, and build commands, see the
@@ -1437,7 +1437,7 @@ PYTHONPATH=tests/python mpirun -np 3 python tests/python/validate_idwarp_exchang
 ```
 
 
-### Native CFL3D deformation adapter (API 21, experimental)
+### Native CFL3D deformation adapter (API 22, experimental)
 
 `CFL3DMeshAdapter` provides two original CFL3D control-point methods followed by
 native arc-length edge, face and volume TFI. It does not require IDWarp:
@@ -1451,7 +1451,7 @@ adapter = CFL3DMeshAdapter(
     solver.mesh, surface, comm=solver.comm,
     method="fmem",             # "fmem" or "exponential"
     control_stride=4,
-    beta1=5.0, alpha1=0.5,       # FMEM material decay and relaxation
+    beta1=5.0,                  # FMEM material decay
     beta2=5.0, alpha2=0.1,       # exponential decay and inner moving region
     smoothing_iterations=0,   # exponential spring-smoothing sweeps
 )
@@ -1468,13 +1468,26 @@ candidate still requires `setVolumeCoordinates()` and native geometry checks at
 reference coordinates, if needed, belong to the caller. Do not repeatedly add a
 total displacement to the already deformed surface.
 
-The exponential path calls native `expdecay` and coincidence enforcement. FMEM
-calls native `deform_el` (material properties, stiffness assembly and iterative
-solution). Both then call `arclen`, `tfiedge`, `tfiface`, and `tfivol`. COMMON
-controls are restored after these isolated calls. FMEM's adapter-only failure
-path returns an error instead of its legacy nonconvergence `STOP`; normal native
-solver behavior is unchanged. A failed adapter raises collectively before any
-candidate is installed. It does not return the CFD `SolveFailure` type.
+Exponential decay and optional spring smoothing use the original equations on
+local control points. Nearest-boundary searches stream batches of at most 256
+source points from each owner; no global surface array is retained. FMEM uses
+native `elmetricsfe` and `elglobfe` to assemble block-local contributions. Shared
+rows are summed through canonical-node owners, and a distributed diagonally
+preconditioned GMRES solves for displacement (restart length 30, maximum 100
+restarts). Scalar and small dot-product reductions count each shared node once.
+The stopping threshold is max(1e-13, 1e-11 times the initial preconditioned RHS
+norm). This replaces the old global Gauss-Seidel iteration order, so FMEM results
+are not promised bitwise equal to the legacy 1e-6 update-norm solve. `alpha1` is
+accepted for call compatibility but no longer controls the GMRES iteration.
+Both methods still call native `arclen`, `tfiedge`, `tfiface`, and `tfivol`.
+
+Target surface coordinates go only to their canonical owner and requesting zone
+owners. Control graphs, matrices and solution vectors are local; root has no
+special solving role. A host owning no zones has no control matrix. Shared
+interface contributions/values are exchanged, never a complete control solution.
+Native shared controls are restored. Handled assembly or iterative failures
+raise collectively before candidate installation; these adapter errors are
+separate from the CFD `SolveFailure` returned by geometry refresh.
 
 Current boundaries and costs:
 
@@ -1484,21 +1497,155 @@ Current boundaries and costs:
   omitted from the surface are fixed, including symmetry boundaries. Native
   sliding/free-symmetry and arbitrary original motion-table semantics are not
   exposed. Shared interface identities come from topology, never nearest points.
-- `control_stride` is a maximum initial spacing. Patch endpoints and matching
-  interface indices are inserted automatically. FMEM uses at least five indices
-  per axis where available to resolve material-distance layers. Extremely coarse
-  or degenerate systems can fail; no fallback silently changes the method.
-- Native TFI supports at most 500 control indices per axis; native coincident
-  control groups support at most ten vertices. Overset, nonmatching and periodic
-  transforms are outside this interface's supported contract.
-- Surface targets are replicated, and coarse control coordinates are gathered
-  for a root control solve; control topology is replicated. This is not a fully
-  distributed deformation solver. Full volume interpolation remains zone-local,
-  with temporary workspace comparable to native TFI. Dense control lattices can
-  be expensive, especially FMEM; production memory/performance is unmeasured.
+- Control selection supports `minimal`, `auto_stride`, `stride` and `indices`.
+  The default is `stride` with spacing 4. Physical/interface endpoints are added
+  and matching indices propagated. There is no forced minimum of five indices
+  for FMEM. Extremely coarse or degenerate systems can fail and require explicit
+  refinement; no fallback silently changes the method. See the
+  [control-point selection](#control-point-selection) for examples and inspect
+  the effective lattice with `getControlIndices()`.
+- Native TFI supports at most 500 control indices per axis. Overset, nonmatching
+  and periodic transforms are outside this interface's supported contract.
+- Global zone/connectivity metadata and axis index lists remain replicated, but
+  control coordinates, connectivity graphs and matrices do not. The partition is
+  still by whole zones: a single large zone is not split among ranks.
+- Boundary searches stream all source batches past local queries; communication
+  and all-pairs distance work can still be expensive. FMEM retains a bounded
+  number of local Krylov vectors and requires synchronization. TFI has temporary
+  zone-sized workspace. Production memory/performance remains unmeasured.
 - The **serial native extension is required on every rank**, even when CFD uses
-  the MPI extension. Rebuild both extensions for API 21. Constructing no adapter
+  the MPI extension. Rebuild both extensions for API 22. Constructing no adapter
   adds no deformation work or persistent reference-grid copy to ordinary CFD.
+
+#### Control-point selection
+
+`CFL3DMeshAdapter` supports exponential decay and FMEM followed by native TFI.
+Control points are selected existing volume vertices, not additional CFD nodes.
+The Cartesian product of each zone's i, j and k index lists forms its control
+lattice. Adjacent controls form eight-node macro-elements. Choosing 5 indices in
+each direction means 125 controls and 64 macro-elements in that zone.
+
+##### Selection modes
+
+| `control_mode` | Selection | Additional argument |
+| --- | --- | --- |
+| `"minimal"` | Block ends, physical boundary segment ends and point-matched interface segment ends; propagate matching indices | None |
+| `"auto_stride"` | Largest uniform index stride consistent with required indices in each direction; iterate interface matching to consistency | None |
+| `"stride"` (default) | User-specified spacing, then necessary topology additions | `control_stride`, default 4 |
+| `"indices"` | Explicit index lists, then necessary topology additions | `control_indices` |
+
+The first two modes correspond in intent to the original CFL3D automatic minimal
+and automatic uniform options. This adapter implements index selection from its
+CGNS topology; it does not read the original motion tables or `meshdef.inp`.
+No exact equivalence to every legacy input configuration is claimed.
+
+**All explicit indices are zero-based Python i/j/k indices**, unlike the
+one-based indices in original CFL3D input files. Indices refer to the original
+zone axes, not a flattened vector or the native internal axis permutation.
+Every supplied list must be nonempty, strictly increasing, integer and in range.
+Block ends are inserted automatically if omitted. An index outside the zone is
+an error, not silently clipped. There is a native limit of 500 indices per axis.
+
+##### Control-point configuration examples
+
+Construct the adapter after the first resident solve establishes ownership.
+All ranks in `solver.comm` must participate and supply consistent control
+settings for all zones, including zones whose coordinates are owned elsewhere.
+The following are alternative configurations; choose one.
+
+```python
+from cfl3d.mesh import CFL3DMeshAdapter
+
+surface = solver.getSurfaceMesh()
+
+# Minimal topology-conforming control lattice.
+adapter = CFL3DMeshAdapter(
+    solver.mesh, surface, comm=solver.comm,
+    method="fmem", control_mode="minimal",
+)
+
+# Automatically choose uniform spacing satisfying all required segment indices.
+adapter = CFL3DMeshAdapter(
+    solver.mesh, surface, comm=solver.comm,
+    method="fmem", control_mode="auto_stride",
+)
+
+# Manual global spacing: scalar or separate (i, j, k) spacing.
+adapter = CFL3DMeshAdapter(
+    solver.mesh, surface, comm=solver.comm,
+    method="fmem", control_stride=(2, 4, 2),
+)
+
+# Manual spacing per zone; mapping must include exactly all zone names.
+strides = {zone.name: (2, 4, 2) for zone in solver.mesh.zones}
+adapter = CFL3DMeshAdapter(
+    solver.mesh, surface, comm=solver.comm,
+    method="fmem", control_mode="stride", control_stride=strides,
+)
+
+# Explicit indices per zone. Here choose roughly four intervals per direction;
+# replace these lists with desired indices for your geometry.
+indices = {}
+for zone in solver.mesh.zones:
+    indices[zone.name] = tuple(
+        sorted(set(range(0, n, max(1, (n-1)//4))) | {n-1})
+        for n in zone.dimensions
+    )
+adapter = CFL3DMeshAdapter(
+    solver.mesh, surface, comm=solver.comm,
+    method="fmem", control_mode="indices", control_indices=indices,
+)
+```
+
+Only provide the argument belonging to the selected mode. For example,
+`control_mode="minimal", control_stride=2` is rejected, as is supplying
+`control_indices` without selecting `"indices"`. Mapping keys are actual zone
+names, not boundary groups. No dictionary entry implicitly falls back to a
+per-zone default.
+
+##### Inspect, refine and apply control points
+
+```python
+# Local metadata query: no coordinate gathering or MPI communication.
+effective = adapter.getControlIndices()
+if solver.comm.rank == 0:
+    for name, (i, j, k) in effective.items():
+        print(name, "control points:", len(i)*len(j)*len(k), i, j, k)
+
+# effective is a new dictionary of immutable index tuples. It can be reused
+# as control_indices when constructing a new adapter, optionally after editing.
+surface["coordinates"] += displacement
+candidate = adapter.warp(surface)
+solver.setVolumeCoordinates(candidate)
+result = solver.solve(final=False)
+# Close solver collectively when the calculation session is finished.
+```
+
+The effective lists may contain more indices than requested: physical segment
+ends and matching interface indices are mandatory. Across a point-matched face,
+only the corresponding interface directions/indices are propagated according to
+the connection transform. This ensures compatible control lattices without
+matching unrelated points merely because their coordinates coincide.
+
+Unlike the initial implementation, FMEM does **not** force at least five indices
+per direction. A smaller lattice may be sufficient; an overly coarse one can
+produce degenerate material-distance ranges or unsuitable macro-elements. An
+all-prescribed control lattice needs no FMEM linear solve. If a free-control
+system is degenerate, refine it explicitly rather than relying on automatic
+hidden point insertion. A successful control solve still does not prove the
+final volume grid valid: the existing interface and CFD geometry checks apply.
+
+The default remains `control_mode="stride"` with `control_stride=4`. Existing
+scalar-stride calls are valid, but removing the FMEM minimum-count rule can make
+previously auto-refined small meshes coarser. Select an explicit smaller stride
+(e.g. 2 for a 9-point axis) when reproducing those earlier tests.
+
+Minimal selection avoids increasing controls just because the CFD mesh is finer.
+Automatic uniform selection can be much denser: required indices 0, 3, 8 have
+largest common stride 1. Inspect the resulting lists before production runs.
+These modes do not eliminate whole-zone partition limits or guarantee a specific
+warping time. For ownership, boundary policies and API 22 rebuild requirements,
+see the [adapter reference](#native-cfl3d-deformation-adapter-api-22-experimental).
 
 ### Resident coordinate updates (experimental, native API 18)
 

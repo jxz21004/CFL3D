@@ -1,5 +1,23 @@
 # Release notes
 
+## Unreleased — distributed mesh deformation (native API 22)
+
+Control selection now exposes `minimal`, `auto_stride`, `stride` and `indices`
+modes, with per-zone/per-direction options and `getControlIndices()` inspection.
+The default remains stride 4, but the implicit FMEM five-index floor is removed:
+only required topology constraints add indices. Very coarse FMEM selections may
+need explicit refinement. See the [selection guide](python-wrapper.md#control-point-selection).
+
+Replaces the root control solve with owned control graphs, native local FMEM
+assembly and distributed GMRES. Prescribed surface targets are routed to their
+owners and consumers; nearest-boundary searches use bounded streaming batches.
+No rank retains a whole-case surface/control coordinate array or global matrix.
+TFI remains zone-local. FMEM uses a different iteration order and tighter residual
+tolerance than the original Gauss-Seidel solve. Legacy `alpha1` remains accepted
+but does not control GMRES. Whole-zone partitioning and distance-search traffic
+still limit scaling; performance on production grids is unmeasured. Rebuild both
+extensions and restart Python. See the [current adapter reference](python-wrapper.md#native-cfl3d-deformation-adapter-api-22-experimental).
+
 ## 0.3.2 — native mesh deformation adapters
 
 Release date: 2026-10-28. Native interface version: **21**.
@@ -23,7 +41,7 @@ not expose unsteady ALE, sliding symmetry, overset or periodic transforms.
 Unspecified physical surface points remain fixed. Control solving occurs on
 root and surface targets are replicated; TFI is zone-local. Production-scale
 warping performance remains unmeasured. See the
-[adapter contract](python-wrapper.md#native-cfl3d-deformation-adapter-api-21-experimental).
+[adapter contract](python-wrapper.md#native-cfl3d-deformation-adapter-api-22-experimental).
 
 Upgrade: rebuild **both** extensions and restart Python/MPI processes. The serial
 extension is required on every MPI rank for native deformation; API 20 binaries

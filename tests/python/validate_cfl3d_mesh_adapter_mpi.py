@@ -10,6 +10,34 @@ from cfl3d.mesh import CFL3DMeshAdapter
 from test_cfl3d_mesh_adapter import mesh3d, target_surface
 
 
+class PartitionComm:
+    """Reject accidental global payload collection in the adapter itself."""
+
+    def __init__(self, comm):
+        self._comm = comm
+        self.max_batch = 0
+
+    def __getattr__(self, name):
+        return getattr(self._comm, name)
+
+    def gather(self, *args, **kwargs):
+        raise AssertionError("Global gather is forbidden in the mesh adapter")
+
+    def scatter(self, *args, **kwargs):
+        raise AssertionError("Global scatter is forbidden in the mesh adapter")
+
+    def allgather(self, value):
+        assert not isinstance(value, (dict, np.ndarray)), "No replicated grid payload"
+        return self._comm.allgather(value)
+
+    def bcast(self, value, root=0):
+        result = self._comm.bcast(value, root=root)
+        if isinstance(result, tuple):
+            assert len(result) == 3 and len(result[0]) <= 256
+            self.max_batch = max(self.max_batch, len(result[0]))
+        return result
+
+
 def run(comm, root):
     config = dict(
         resident=True,
@@ -46,7 +74,38 @@ def run(comm, root):
         with CFL3D(mesh3d(), config, comm=comm) as solver:
             solver.solve(output_directory=root / (method + "-mpi"))
             surface = solver.getSurfaceMesh()
-            adapter = CFL3DMeshAdapter(solver.mesh, surface, comm=comm, method=method, control_stride=2)
+            partition = PartitionComm(comm)
+            adapter = CFL3DMeshAdapter(solver.mesh, surface, comm=partition, method=method, control_stride=2)
+            assert set(adapter.graphs) == set(adapter.layout.owned)
+            assert len(adapter.nodes) == sum(len(adapter.graphs[g]) for g in adapter.layout.owned)
+            if not adapter.layout.owned:
+                assert len(adapter.nodes) == len(adapter.unique) == 0
+            effective = adapter.getControlIndices()
+            explicit = CFL3DMeshAdapter(
+                solver.mesh, surface, comm=partition, method=method, control_mode="indices", control_indices=effective
+            )
+            np.testing.assert_array_equal(explicit.warp(surface), adapter.layout.coordinates(solver.mesh))
+            for mode in ("minimal", "auto_stride"):
+                automatic = CFL3DMeshAdapter(solver.mesh, surface, comm=partition, method=method, control_mode=mode)
+                np.testing.assert_array_equal(automatic.warp(surface), adapter.layout.coordinates(solver.mesh))
+            # Incorrect index input on one rank must fail collectively before
+            # shared-node communication rather than stranding other ranks.
+            bad_indices = dict(effective)
+            if comm.rank == 1:
+                bad_indices[next(iter(bad_indices))] = ([0, -1], [0], [0])
+            try:
+                CFL3DMeshAdapter(
+                    solver.mesh,
+                    surface,
+                    comm=partition,
+                    method=method,
+                    control_mode="indices",
+                    control_indices=bad_indices,
+                )
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("Expected collective control-index validation error")
             for step in range(2):
                 before = solver.getRuntimeInfo().copy()
                 warped = adapter.warp(target_surface(solver.getSurfaceMesh(), 0.001))
@@ -73,6 +132,27 @@ def run(comm, root):
                 pass
             else:
                 raise AssertionError("Expected collective invalid-input error")
+            if method == "fmem":
+                from cfl3d import _native
+
+                original = _native.py_warp_matrix
+
+                def fail_assembly(*args, **kwargs):
+                    raise ValueError("injected owner-local assembly failure")
+
+                if comm.rank == 1:
+                    _native.py_warp_matrix = fail_assembly
+                try:
+                    try:
+                        adapter.warp(target_surface(solver.getSurfaceMesh(), 0.001))
+                    except ValueError as exc:
+                        assert "injected owner-local" in str(exc)
+                    else:
+                        raise AssertionError("Assembly failure did not reach every rank")
+                finally:
+                    _native.py_warp_matrix = original
+                # Retrying the adapter does not require reset/CFD reinitialization.
+                adapter.warp(target_surface(solver.getSurfaceMesh(), 0.001))
         if comm.rank == 0:
             print("NATIVE_WARPER_PASS", method, flush=True)
 

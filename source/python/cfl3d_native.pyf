@@ -1,5 +1,14 @@
 python module _native
     interface
+        subroutine py_warp_matrix(points,graph,modulus,n,sa,ija,status)
+            integer intent(hide),depend(points) :: n=shape(points,0)
+            real*8 dimension(n,3),intent(in) :: points
+            integer dimension(n,21),intent(in) :: graph
+            real*8 dimension(n),intent(in) :: modulus
+            real*8 dimension(245*n+2),intent(out),depend(n) :: sa
+            integer dimension(245*n+2),intent(out),depend(n) :: ija
+            integer intent(out) :: status
+        end subroutine py_warp_matrix
         subroutine py_warp_controls(points,graph,displacement,method,parameters,sweeps,n,maxbl,result,status)
             integer intent(hide),depend(points) :: n=shape(points,0)
             integer intent(in) :: maxbl,method,sweeps

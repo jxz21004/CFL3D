@@ -149,13 +149,17 @@ diagnostics append to native text files. A single very large call still reserves
 its history in memory, and caller-retained results retain their own arrays.
 Low-level `open_ended=1` remains the cumulative compatibility/test interface.
 
-### Native deformation adapter (API 21)
+### Native deformation adapter (API 22)
 
-`CFL3DMeshAdapter` exposes exponential and finite macro-element deformation with
-native TFI for fixed-topology point-matched structured meshes. Omitted physical
-boundaries remain fixed (including symmetry); original moving-boundary tables,
-free/sliding symmetry and ALE time integration are not exposed. Surface targets
-are replicated and the coarse control system is solved on root. Full volume
-interpolation is local; production scaling is not established. The serial native
-extension is required on every MPI rank. Native FMEM nonconvergence/nonfinite
-output becomes an adapter error, not an installed grid or CFD result.
+The native adapter supports steady point-matched fixed-topology deformation;
+unspecified physical boundary points are fixed, including symmetry boundaries.
+Sliding symmetry, periodic transforms, overset and unsteady ALE are not exposed.
+Control assembly/solving is distributed by zone, with shared-node communication.
+No global control matrix or full surface coordinate copy is retained on root or
+replicated per rank. Boundary searches still stream every source batch to local
+queries, and GMRES requires reductions; production scaling is not established.
+A single zone cannot be split across ranks. TFI requires zone-sized temporary
+arrays and at most 500 control indices per axis. Both native extensions are
+required in MPI jobs. Degenerate material ranges, nonfinite local assembly and
+iterative nonconvergence are rejected before installing a candidate. Successful
+warping does not replace the subsequent native CFD geometry validity checks.

@@ -332,7 +332,7 @@ Current prototype boundaries:
   initialize a new context. Arbitrary live updates remain future work.
 - `resident` defaults to False. Updating builds alone does not opt into this path.
 
-Both extensions must be rebuilt for API 20 and existing Python processes restarted:
+Both extensions must be rebuilt for API 22 and existing Python processes restarted:
 
 ```bash
 python tools/build_python.py --jobs 8
@@ -488,18 +488,21 @@ The checkpoint/output-streaming stage kept native API 12. The resident prototype
 now requires rebuilding for API 16 as described above. Result NPZ member order is
 not an interface guarantee; existing array names and values remain compatible.
 
-## Optional native mesh deformation (API 21)
+## Optional native mesh deformation (API 22)
 
-`CFL3DMeshAdapter` provides exponential decay and finite macro-element (FMEM)
-control displacement, followed by native arc-length TFI. It returns candidate
-owned volume coordinates; `setVolumeCoordinates()` and `solve()` perform the
-existing geometry refresh and validity checks. Calling the adapter does not
-advance or overwrite the resident flow. It retains no reference volume grid.
+`CFL3DMeshAdapter` returns candidate owned volume coordinates for the existing
+resident geometry-update interface. Exponential and FMEM control operations are
+now partitioned by zone; root no longer gathers or solves the control system.
+Native block-local stiffness assembly and distributed GMRES exchange shared-node
+contributions and values. Canonical owners route prescribed surface targets only
+to requesting zone owners. Nearest-boundary queries consume batches of at most
+256 source points, retaining no global coordinate array. Scalar/small reductions
+provide distance extrema and solver norms. A host with no zones stores no matrix.
 
-This opt-in adapter gathers coarse controls on root and replicates prescribed
-surface coordinates. TFI runs on each zone owner with temporary zone-sized
-workspace; full volume coordinates are not gathered. The coarse FMEM system is
-currently serial and can limit scalability. Both native extensions must be built
-for MPI usage because deformation kernels use the serial extension on each rank.
-This is steady fixed-topology deformation, not an unsteady ALE interface. See
-[adapter usage and restrictions](python-wrapper.md#native-cfl3d-deformation-adapter-api-21-experimental).
+TFI runs on each zone owner with temporary zone-sized workspace. The adapter
+retains no x0 and does not change resident flow until a candidate is submitted.
+Whole-zone partitioning, replicated topology metadata, distance-search traffic
+and Krylov synchronization remain limitations; production scaling is unmeasured.
+Both native extensions must be rebuilt for API 22 and Python restarted. This is
+steady fixed-topology deformation, not an unsteady ALE interface. See
+[adapter usage](python-wrapper.md#native-cfl3d-deformation-adapter-api-22-experimental).
