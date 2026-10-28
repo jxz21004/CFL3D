@@ -1452,7 +1452,7 @@ solver's `options` dictionary. MPI ranks must supply consistent settings.
 | --- | --- | --- |
 | `method` | `"exponential"` | `"exponential"` or `"fmem"`; selects control-point deformation method. |
 | `linear_solver` | `"native-gauss-seidel"` | FMEM backend: original native GS or explicit `"petsc-gmres"`. PETSc is never selected automatically. Exponential decay uses no linear solver and rejects `"petsc-gmres"`. |
-| `petsc_restart` | `None` (effective 30 for PETSc) | Positive GMRES restart length; may be supplied only with `linear_solver="petsc-gmres"`. Larger values increase Krylov storage. |
+| `linear_solver_options` | `None` | Dictionary of settings for the selected backend; PETSc currently supports `{"restart": 30}`. Native GS currently accepts an empty dictionary. Unknown or inapplicable keys are errors. |
 | `control_mode` | `"stride"` | `"minimal"`, `"auto_stride"`, `"stride"`, or `"indices"`; selects the control lattice. |
 | `control_stride` | `None` (effective 4 in stride mode) | Positive scalar, three directional strides, or complete zone-name mapping; may be supplied only in stride mode. |
 | `control_indices` | `None` | Required in indices mode: complete zone-name mapping to zero-based i/j/k index lists. Invalid in other modes. |
@@ -1517,7 +1517,8 @@ adapter = CFL3DMeshAdapter(
 # Explicit opt-in; uses the existing compatible petsc4py installation.
 adapter = CFL3DMeshAdapter(
     solver.mesh, surface, comm=solver.comm, method="fmem",
-    linear_solver="petsc-gmres", petsc_restart=30,
+    linear_solver="petsc-gmres",
+    linear_solver_options={"restart": 30},
     control_stride=2,
 )
 ```
@@ -1529,10 +1530,26 @@ GMRES. Canonical-node owners sum shared rows and exchange interface values.
 PETSc vectors contain only canonical owned degrees of freedom, including zero
 local length on a host with no zones. Defaults are restart 30, at most 3000
 iterations, relative tolerance 1e-11 and absolute tolerance 1e-13 on the
-preconditioned residual. `petsc_restart` must be a positive integer and is only
-valid with this backend; increasing it increases local Krylov storage.
+preconditioned residual. `linear_solver_options["restart"]` must be a positive
+integer and is only valid with this backend; increasing it increases local
+Krylov storage. Omit the dictionary or pass `{}` to use the default restart 30.
 `alpha1` does not control PETSc. Unrelated application PETSc options are not
 implicitly read to replace these settings.
+
+Backend provenance remains explicit in `linear_solver`: `native-gauss-seidel`
+and `petsc-gmres` are distinct selections. `linear_solver_options` is a shared
+configuration entry point, interpreted and validated for that selection. A
+concept has one option name rather than duplicate backend-specific names;
+parameters with different meanings are not equated. Currently only `restart`
+is exposed in this dictionary, and it applies to PETSc GMRES. Native GS accepts
+only `None` or `{}` here and retains its existing native stopping controls and
+`alpha1` relaxation. No arbitrary PETSc option passthrough is provided.
+
+The dictionary is copied and its normalized values are read-only on the adapter;
+mutating the caller's dictionary does not reconfigure a running MPI case. All
+ranks must provide equivalent effective settings. **Migration:** replace the
+former top-level `petsc_restart=12` with
+`linear_solver_options={"restart": 12}`; the old constructor keyword is removed.
 
 PETSc is loaded **only on explicit selection**, on all solver communicator ranks.
 When the application has not already initialized PETSc, the adapter initializes

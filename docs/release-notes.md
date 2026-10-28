@@ -2,6 +2,11 @@
 
 ## Unreleased — distributed mesh deformation (native API 22)
 
+Linear solver tuning is grouped in `linear_solver_options`; the former top-level
+`petsc_restart` keyword is replaced by the dictionary's `restart` key. Backend
+names remain explicitly `native-gauss-seidel` and `petsc-gmres`. Unknown or
+backend-inapplicable options are rejected, and caller dictionaries are copied.
+
 Optional PETSc tests skip automatically when the package is absent. Unit and MPI
 tests support `CFL3D_SKIP_PETSC_TESTS=1`, and the MPI validator also accepts
 `--skip-petsc`. MPI ranks agree on the skip before importing PETSc; installed
@@ -17,8 +22,7 @@ FMEM now defaults to `linear_solver="native-gauss-seidel"`, restoring the origin
 native assembly/GS sequence and alpha1 relaxation on the coarse control system.
 Only that system is gathered on root; full volume interpolation remains local.
 Explicit `linear_solver="petsc-gmres"` uses installed petsc4py, PETSc GMRES/Jacobi
-and distributed stiffness contributions, with configurable petsc_restart
-(default 30). Handwritten GMRES has been removed. Dependencies never select a
+and distributed stiffness contributions, with configurable `linear_solver_options={"restart": 30}`. Handwritten GMRES has been removed. Dependencies never select a
 backend automatically and failures never trigger fallback. Native interface
 neighbours and sparse row capacities are constructed across point-matched blocks.
 Surface targets remain routed to owners/consumers; nearest queries stream bounded

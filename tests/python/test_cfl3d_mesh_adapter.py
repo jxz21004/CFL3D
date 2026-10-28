@@ -252,8 +252,8 @@ class NativeMeshAdapterTests(unittest.TestCase):
             for kwargs in (
                 dict(linear_solver="gmres"),
                 dict(linear_solver="native"),
-                dict(petsc_restart=10),
-                dict(linear_solver="petsc-gmres", petsc_restart=0),
+                dict(linear_solver_options={"restart": 10}),
+                dict(linear_solver="petsc-gmres", linear_solver_options={"restart": 0}),
             ):
                 with self.assertRaises(ValueError):
                     CFL3DMeshAdapter(mesh, surface, method="fmem", **kwargs)
@@ -272,7 +272,12 @@ class NativeMeshAdapterTests(unittest.TestCase):
                 surface = solver.getSurfaceMesh()
                 native = CFL3DMeshAdapter(mesh, surface, method="fmem", control_stride=2)
                 petsc = CFL3DMeshAdapter(
-                    mesh, surface, method="fmem", control_stride=2, linear_solver="petsc-gmres", petsc_restart=12
+                    mesh,
+                    surface,
+                    method="fmem",
+                    control_stride=2,
+                    linear_solver="petsc-gmres",
+                    linear_solver_options={"restart": 12},
                 )
                 target = target_surface(surface, 0.001)
                 x = native.warp(target)
@@ -281,3 +286,38 @@ class NativeMeshAdapterTests(unittest.TestCase):
                 # preconditioned residual: solutions agree within legacy tolerance.
                 np.testing.assert_allclose(x, y, rtol=0, atol=2e-6)
                 np.testing.assert_array_equal(petsc.warp(surface), native.warp(surface))
+
+    def test_linear_solver_options_validation_and_copy(self):
+        from unittest.mock import patch
+        from cfl3d.mesh import _petsc_warp
+
+        mesh = mesh3d(False)
+        with CFL3D(mesh, comm=None) as solver:
+            surface = solver.getSurfaceMesh()
+            with patch.object(_petsc_warp, "load_petsc", return_value=object()):
+                options = {"restart": 12}
+                adapter = CFL3DMeshAdapter(
+                    mesh, surface, method="fmem", linear_solver="petsc-gmres", linear_solver_options=options
+                )
+                options["restart"] = 99
+                self.assertEqual(adapter.linear_solver_options["restart"], 12)
+                with self.assertRaises(TypeError):
+                    adapter.linear_solver_options["restart"] = 8
+                default = CFL3DMeshAdapter(mesh, surface, method="fmem", linear_solver="petsc-gmres")
+                self.assertEqual(dict(default.linear_solver_options), {"restart": 30})
+                native = CFL3DMeshAdapter(mesh, surface, method="fmem", linear_solver_options={})
+                self.assertEqual(dict(native.linear_solver_options), {})
+            invalid = [
+                [],
+                {"petsc_restart": 12},
+                {"restart": None},
+                {"restart": True},
+                {"restart": 1.5},
+                {"restart": -1},
+                {"restat": 30},
+            ]
+            for options in invalid:
+                with self.subTest(options=options), self.assertRaises(ValueError):
+                    CFL3DMeshAdapter(
+                        mesh, surface, method="fmem", linear_solver="petsc-gmres", linear_solver_options=options
+                    )

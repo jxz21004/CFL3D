@@ -65,6 +65,8 @@ def run(comm, root):
         cases = [("exponential", "native-gauss-seidel"), ("fmem", "native-gauss-seidel")]
     for method, backend in cases:
         backend_options = dict(linear_solver=backend)
+        if backend == "petsc-gmres":
+            backend_options["linear_solver_options"] = {"restart": 12}
         reference = None
         error = None
         if comm.rank == 0:
@@ -98,6 +100,20 @@ def run(comm, root):
             assert len(adapter.nodes) == sum(len(adapter.graphs[g]) for g in adapter.layout.owned)
             if not adapter.layout.owned:
                 assert len(adapter.nodes) == len(adapter.unique) == 0
+            if backend == "petsc-gmres":
+                try:
+                    CFL3DMeshAdapter(
+                        solver.mesh,
+                        surface,
+                        comm=comm,
+                        method=method,
+                        linear_solver=backend,
+                        linear_solver_options={"restart": 12 + int(comm.rank == 1)},
+                    )
+                except ValueError as exc:
+                    assert "differ between ranks" in str(exc)
+                else:
+                    raise AssertionError("Inconsistent solver options were not rejected collectively")
             effective = adapter.getControlIndices()
             explicit = CFL3DMeshAdapter(
                 solver.mesh,

@@ -505,7 +505,7 @@ FMEM backend selection is explicit:
   Shared-node contributions/values are exchanged; no complete coarse matrix or
   vector is gathered. PETSc vectors store canonical owned nodes; a host owning
   no zones has zero local degrees of freedom. Krylov storage depends on
-  `petsc_restart` (default 30), and solving requires reductions/synchronization.
+  `linear_solver_options["restart"]` (default 30), and solving requires reductions/synchronization.
 
 There is no handwritten GMRES and no automatic dependency-based switching or
 failure fallback. Neither backend retains x0 or changes resident flow until a

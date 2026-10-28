@@ -10,6 +10,7 @@ absolute targets are applied relative to the mesh's current accepted coordinates
 from itertools import product
 from collections.abc import Mapping
 from numbers import Integral
+from types import MappingProxyType
 import numpy as np
 from .volume_layout import VolumeMeshLayout
 from ._interface_validation import validate_interfaces
@@ -32,7 +33,7 @@ class CFL3DMeshAdapter:
     cost more. Physical boundary points absent from ``surface`` are held fixed.
     FMEM defaults to ``linear_solver='native-gauss-seidel'`` (original control
     assembly/GS on root). Explicit ``'petsc-gmres'`` requires petsc4py and uses
-    distributed GMRES/Jacobi with ``petsc_restart`` (default 30). ``alpha1``
+    distributed GMRES/Jacobi with ``linear_solver_options={"restart": 30}``. ``alpha1``
     controls native GS relaxation only. No backend is selected by availability,
     and failures never trigger automatic fallback. Exponential decay needs no
     linear solver; selecting petsc-gmres with it is rejected.
@@ -48,7 +49,7 @@ class CFL3DMeshAdapter:
         *,
         method="exponential",
         linear_solver="native-gauss-seidel",
-        petsc_restart=None,
+        linear_solver_options=None,
         control_stride=None,
         control_mode="stride",
         control_indices=None,
@@ -69,15 +70,21 @@ class CFL3DMeshAdapter:
                 raise ValueError("linear_solver must be 'native-gauss-seidel' or 'petsc-gmres'")
             if method != "fmem" and linear_solver != "native-gauss-seidel":
                 raise ValueError("linear_solver='petsc-gmres' applies only to method='fmem'")
-            if petsc_restart is not None:
-                if linear_solver != "petsc-gmres":
-                    raise ValueError("petsc_restart applies only to linear_solver='petsc-gmres'")
-                if (
-                    isinstance(petsc_restart, (bool, np.bool_))
-                    or not isinstance(petsc_restart, Integral)
-                    or petsc_restart < 1
-                ):
-                    raise ValueError("petsc_restart must be a positive integer")
+            if linear_solver_options is not None and not isinstance(linear_solver_options, Mapping):
+                raise ValueError("linear_solver_options must be a mapping or None")
+            options = {} if linear_solver_options is None else dict(linear_solver_options)
+            allowed = {"restart"} if linear_solver == "petsc-gmres" else set()
+            unknown = set(options) - allowed
+            if unknown:
+                raise ValueError(f"Unsupported linear_solver_options for {linear_solver}: {sorted(unknown, key=str)}")
+            if linear_solver == "petsc-gmres":
+                restart = options.get("restart", 30)
+                if isinstance(restart, (bool, np.bool_)) or not isinstance(restart, Integral) or restart < 1:
+                    raise ValueError("linear_solver_options['restart'] must be a positive integer")
+                options["restart"] = int(restart)
+            # Copy/freeze configuration: caller mutations must not silently change
+            # one MPI rank's solver settings after collective validation.
+            self.linear_solver_options = MappingProxyType(options)
             if (
                 isinstance(smoothing_iterations, bool)
                 or not isinstance(smoothing_iterations, int)
@@ -105,14 +112,13 @@ class CFL3DMeshAdapter:
         self.parameters = self._checked(prepare)
         self.method, self.sweeps = method, smoothing_iterations
         self.linear_solver = linear_solver
-        self.petsc_restart = 30 if petsc_restart is None else int(petsc_restart)
         self._petsc = None
         self.axes = self._checked(lambda: self._axes(control_mode, control_stride, control_indices))
         self.control_mode = control_mode
         settings = (
             method,
             linear_solver,
-            self.petsc_restart,
+            tuple(sorted(self.linear_solver_options.items())),
             control_mode,
             tuple(tuple(a) for a in self.axes),
             tuple(self.parameters),
@@ -593,7 +599,10 @@ class CFL3DMeshAdapter:
             rhs[fixed_unique] = 0
             from ._petsc_warp import solve_petsc
 
-            result = solve_petsc(self._petsc, self.shared, matvec, rhs, diagonal, self.petsc_restart) + boundary
+            result = (
+                solve_petsc(self._petsc, self.shared, matvec, rhs, diagonal, self.linear_solver_options["restart"])
+                + boundary
+            )
             result[fixed_unique] = boundary[fixed_unique]
             u = result[self.inverse]
         return {g: u[idx] for g, idx in self.zone_nodes.items()}

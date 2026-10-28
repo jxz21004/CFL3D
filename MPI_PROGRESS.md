@@ -1190,3 +1190,22 @@ and one-rank-missing decisions are covered by isolated policy tests. Three-rank
 --skip-petsc and four-rank --mixed with the environment switch pass native cases
 and print explicit skip notices. Logs: /tmp/cfl3d-optional-petsc-mpi.log and
 /tmp/cfl3d-optional-petsc-mixed.log. No dependencies were installed or upgraded.
+
+## 2026-10-28: Group linear solver settings in a backend options dictionary
+
+Replaced top-level petsc_restart with linear_solver_options={"restart": N}.
+The provenance-bearing backend names remain native-gauss-seidel (default) and
+petsc-gmres. One dictionary entry point is validated against the chosen backend:
+currently PETSc accepts restart (default 30), native GS accepts no tuning keys
+here and retains its native controls/alpha1. Unknown or inapplicable keys fail;
+no duplicate backend-specific spelling or arbitrary PETSc passthrough is added.
+Caller dictionaries are copied, normalized and exposed read-only; MPI effective
+settings must agree. Updated the unified options table, examples and migration
+notes. Native API remains 22 and numerical kernels are unchanged.
+
+Validation: 14 adapter/dependency tests pass with real PETSc enabled, including
+restart=12, native defaults, invalid values/keys and caller-mutation isolation
+(/tmp/cfl3d-solver-options-enabled.log). Three-rank validation passes both FMEM
+backends and exponential decay, and collectively rejects different restart
+values on one rank (/tmp/cfl3d-solver-options-mpi.log). An explicit PETSc-skip
+adapter run also passes (11 tests, 10 passed and 1 skipped).
