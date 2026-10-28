@@ -1,6 +1,6 @@
 # Python interface reference
 
-This document describes Python package **0.3.0**, native interface version **18**.
+This document describes Python package **0.3.1**, native interface version **20**.
 Sections marked "after 0.2.0" are included in 0.3.0 but absent from the `v0.2.0`
 tag. Experimental features retain their documented limitations.
 For the project motivation, requirements, and build commands, see the
@@ -1469,24 +1469,37 @@ pending update before changing options that require a cold initialization.
 Current scope is steady, fixed-topology, point-matched grids with an already
 paused resident context. The adapter must be rebuilt after any ownership change.
 This is not an ALE/unsteady moving-grid interface. Native metric/volume checks
-still apply. API 18 converts expected failures in the resident geometry-update
-path to a collective return, without rolling back native geometry:
+still apply. API 18 introduced collective expected geometry failures; API 20
+allows a new coordinate submission to retry while retaining the flow. Native
+geometry is not automatically rolled back:
 
 ```python
 result = solver.solve()
 if result.fail:
     print(result.reason, result.native_status)
-    solver.resetFlow()  # close the invalid native context collectively
-    # Python still holds the last accepted grid. It can be used for a cold solve.
+    # All ranks submit corrected coordinates, or explicitly restore the last
+    # accepted coordinates retained on the Python side.
+    solver.setVolumeCoordinates(solver.getVolumeCoordinates())
+    result = solver.solve()  # rebuild geometry before resuming the retained flow
 ```
 
 Successful `SolverResult` objects have `fail=False`. A `SolveFailure` instead has
 `fail=True`, `reason`, `native_status` (41: metrics, 42: volumes), and
-`reset_required=True`; it has no flow results. Failed updates do not advance
-iterations, increment the solution count, or export a new solution. Repeated
-`solve()` calls return failure until `close()`/`resetFlow()` releases the context.
-Old result extraction is disabled. Python coordinates stay at the last accepted
-grid, but Fortran is invalid until closed: this is not a rollback.
+`reset_required=False`, `geometry_update_required=True`; it has no flow results.
+Failed updates do not advance iterations, increment the solution count, or export
+a new solution. Without a new coordinate submission, `solve()` returns failure
+again. After `setVolumeCoordinates()`, the next solve fully refreshes all geometry
+levels and runs only if checks pass. Even coordinates equal to the last accepted
+Python grid are restaged after failure. Repeated rejected updates remain retryable.
+
+The flow and turbulence stay resident, but native geometry may be partially
+updated and is unusable until a successful refresh. Current result extraction is
+disabled after failure; previously returned result snapshots remain independent.
+Python coordinates stay at the last accepted grid until a successful solve. No
+extra rollback grid copy is allocated. `resetFlow()`/`close()` remain optional
+ways to discard the resident context. Merely staging a pending grid before any
+failure does not prevent inspecting the last successful result; `solutionIsCurrent`
+is false until that pending grid is processed.
 
 Only expected errors encountered during the resident metric/volume update are
 handled this way. Shape/nonfinite/interface input errors still raise before

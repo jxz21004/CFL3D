@@ -1,5 +1,37 @@
 # Release notes
 
+## 0.3.1 — bounded histories and geometry retry
+
+Release date: 2026-10-28. Native interface version: **20**.
+
+- Public resident histories reuse storage across calls, retaining the previous
+  row needed by boundary conditions. Global cycle, CFL-ramp and trim counters
+  remain unchanged. Capacity follows the largest chunk or startup allocation,
+  rather than cumulative iterations.
+- Python no longer accumulates output-session history in either solve mode.
+  **Compatibility change:** `cumulative_history`, NPZ `history`, and
+  `chunk_history` now contain only the current call. Full diagnostics remain in
+  native text logs; `iteration_offset` preserves output-session numbering.
+- Expected resident geometry failures retain flow and allow a new coordinate
+  submission to retry. `SolveFailure` now reports `reset_required=False` and
+  `geometry_update_required=True`. No iteration runs until a complete refresh
+  passes checks. Resubmitting the last accepted coordinates is supported; there
+  is no automatic geometry rollback. Other native faults remain outside this path.
+- Result geometry metadata and `solutionIsCurrent` identify pending geometry
+  without preventing access to a last successful result before native failure.
+  A failed native solve does not expose old loads as a current successful result.
+
+Rebuild both native extensions and restart Python/MPI processes. API 18/19
+extensions are incompatible with this Python interface. Check downstream scripts
+that relied on cumulative in-memory histories. Resident restart import/export,
+complete coupling frameworks, and production-scale validation remain unfinished.
+
+Validation: 121 unit tests, 118 passing and 3 optional HDF5 skips; three-rank and
+split four-rank MPI geometry retry checks passed, including repeated failures and
+exact continuation comparisons. History storage checks cover coarse startup,
+V/W cycles, trim and CFL ramps. See [MPI_PROGRESS.md](../MPI_PROGRESS.md).
+
+
 ## 0.3.0 — coupling interfaces and resident geometry updates
 
 Release date: 2026-10-27. Native interface version: **18**.

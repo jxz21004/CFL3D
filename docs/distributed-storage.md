@@ -1,5 +1,10 @@
 # Distributed storage migration
 
+Native API 20 permits retrying expected resident geometry failures by submitting
+new fixed-topology coordinates. Flow is retained; complete geometry refresh and
+checks must succeed before iteration resumes. Geometry is not automatically
+rolled back, and repeated solve calls without new coordinates return failure.
+
 Native API 19 bounds public resident history storage by the largest call/startup
 budget, retaining one preceding row for numerical use. Python results contain
 only the current call's history; full diagnostics remain in native text files.
@@ -327,7 +332,7 @@ Current prototype boundaries:
   initialize a new context. Arbitrary live updates remain future work.
 - `resident` defaults to False. Updating builds alone does not opt into this path.
 
-Both extensions must be rebuilt for API 19 and existing Python processes restarted:
+Both extensions must be rebuilt for API 20 and existing Python processes restarted:
 
 ```bash
 python tools/build_python.py --jobs 8

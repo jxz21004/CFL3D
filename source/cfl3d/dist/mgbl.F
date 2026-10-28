@@ -861,6 +861,9 @@ c
 c        No per-iteration geometry work: this runs once after an explicit
 c        update, on the existing distributed workspace, before mgblk resumes.
          if (py_geometry_pending.and..not.py_resident_closing) then
+c           Retry only with a fully staged coordinate set. setup overwrites
+c           all grid levels/metrics before any flow iteration may resume.
+            py_geometry_failed=0
       call setup(lw,lw2,work,nstart,work(nstart+1),nwork,
      .           iwork(1+3*maxgr+maxbl*8),
      .           mworki-3*maxgr-maxbl*8,iwork(1),
@@ -898,7 +901,7 @@ c        update, on the existing distributed workspace, before mgblk resumes.
             deallocate(py_geometry_xyz,py_geometry_offsets)
             if (py_geometry_failed.ne.0) then
 c              All ranks leave at the same boundary, with no iteration run.
-c              Leave allocations alive for the normal collective close path.
+c              Retain flow for a later full geometry refresh or close.
                py_resident_paused=.true.
                return
             end if

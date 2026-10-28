@@ -355,7 +355,7 @@ end module
 subroutine py_api_version(version)
   implicit none
   integer, intent(out) :: version
-  version=19
+  version=20
 end subroutine
 
 subroutine py_set_restart_controls(override_alpha)
@@ -680,7 +680,7 @@ subroutine py_advance_resident(cycles,cfl,status,nrows)
   integer :: last,startup
   status=1; nrows=py_nhistory
   if (.not.py_resident_enabled .or. .not.py_resident_paused .or. py_used /= 0) return
-  if (py_geometry_failed /= 0) then
+  if (py_geometry_failed /= 0 .and. .not.py_geometry_pending) then
     status=40+py_geometry_failed
     return
   end if

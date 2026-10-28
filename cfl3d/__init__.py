@@ -1,5 +1,5 @@
 """Python-owned CGNS meshes and native f2py CFL3D solver."""
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 
 from .cgns import Boundary, CGNSMesh, Connection, Zone
 from .restart import FlowState

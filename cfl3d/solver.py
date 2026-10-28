@@ -485,11 +485,12 @@ def _face(point_range, dims):
 
 @dataclass(frozen=True)
 class SolveFailure:
-    """No valid result: close/reset the context before attempting another solve."""
+    """Geometry update failed: submit valid coordinates before advancing again."""
     reason: str
     native_status: int
     fail: bool = True
-    reset_required: bool = True
+    reset_required: bool = False
+    geometry_update_required: bool = True
 
 
 @dataclass
@@ -516,6 +517,9 @@ class SolverResult:
     chunk_index: int = 0
     finalized: bool = False
     chunk_output_paths: dict[str, Path] = field(default_factory=dict)
+    geometry_version: int = 0
+    # (zero-based cumulative-history row, geometry version); immutable snapshot.
+    history_geometry_segments: tuple[tuple[int, int], ...] = ()
 
     @property
     def fail(self):
@@ -537,6 +541,9 @@ class SolverResult:
                   "final_alpha": np.asarray(self.final_alpha),
                   "solve_index": np.asarray(self.solve_index), "name": np.asarray(self.name),
                   "chunk_index": np.asarray(self.chunk_index), "finalized": np.asarray(self.finalized),
+                  "geometry_version": np.asarray(self.geometry_version),
+                  "history_geometry_segments": np.asarray(self.history_geometry_segments,
+                                                          dtype=np.int64).reshape(-1, 2),
                   "start_mode": np.asarray(self.start_mode),
                   "changed_options": np.asarray(self.changed_options, dtype=str),
                   "reset_reasons": np.asarray(self.reset_reasons, dtype=str)}
@@ -591,6 +598,8 @@ class CFL3D:
         self._flow_state = None
         self._resident_context = None
         self._pending_geometry = None
+        self._geometry_version = 0
+        self._output_geometry_segments = ()
         self._last_runtime_info = {"active": False}
         self._loaded_restart_file = None
         self._successful_options = None
@@ -1153,13 +1162,17 @@ class CFL3D:
             return {key: value for part in gathered for key, value in part.items()}
         return None
 
+    @property
+    def solutionIsCurrent(self):
+        """Whether cached result queries are valid for the requested geometry."""
+        return self._last_result is not None and self._pending_geometry is None
+
     def _require_result(self):
         if self._last_result is None:
             raise RuntimeError("Call solve() successfully before accessing a solution")
 
     def _output_path(self, filename, default):
-        if self._last_result is None:
-            raise RuntimeError("Call solve() successfully before writing a solution")
+        self._require_result()
         path = Path(filename) if filename is not None else self._last_output_directory / default
         if self._last_mesh.source and path.resolve() == Path(self._last_mesh.source).resolve():
             raise ValueError("Solution output must not overwrite the input CGNS mesh")
@@ -1431,6 +1444,7 @@ class CFL3D:
         No native solve, file output, or global surface gather is performed.
         """
         def controls():
+            self._require_result()
             if self._last_result is None:
                 raise RuntimeError("Call solve() successfully before querying surface forces")
             if not isinstance(component, str) or component.lower() not in ("total", "pressure", "viscous"):
@@ -1472,6 +1486,7 @@ class CFL3D:
         A group prefixes all numerical keys and their entries in units.
         This is a local call: any rank may query without an MPI collective.
         """
+        self._require_result()
         members = self._group_members(groupName)
         total = (np.sum([self._last_surface_coefficients[key] for key in sorted(members)], axis=0)
                  if members else np.zeros(10))
@@ -1616,6 +1631,8 @@ class CFL3D:
 
     def _analysis_surface(self, require_solution=False):
         from .surface_analysis import SurfaceMesh
+        if require_solution:
+            self._require_result()
         if self._surface_context is not None:
             return self._surface_context["surface"]
         if require_solution and self._last_result is None:
@@ -1964,7 +1981,7 @@ class CFL3D:
                                + (" --mpi" if self.comm is not None else "")) from exc
         if bool(module.py_build_info()) != (self.comm is not None):
             raise RuntimeError("Native extension MPI mode does not match the solver")
-        if getattr(module, "py_api_version", lambda: 0)() != 19:
+        if getattr(module, "py_api_version", lambda: 0)() != 20:
             raise RuntimeError("Native interface changed; rebuild with python tools/build_python.py"
                                + (" --mpi" if self.comm is not None else "") + " and restart Python")
         return module
@@ -2130,13 +2147,13 @@ class CFL3D:
         def prepare():
             if self._resident_context is None or not self._resident_context.info()['paused']:
                 raise RuntimeError("Coordinate updates require a paused resident solver")
-            if self._resident_context.failure is not None:
-                raise RuntimeError("Geometry update failed; call resetFlow() before reuse")
             layout = VolumeLayout(self.mesh)
             pending = layout.unpack(coordinates)
             changed = any(not np.array_equal(pending[z.name], z.coordinates)
                           for z in self.mesh.zones if z.coordinates is not None)
-            return pending, changed
+            # Native geometry may be partially overwritten after failure. Even
+            # the last accepted Python coordinates must be staged again.
+            return pending, changed or self._resident_context.failure is not None
         pending, changed = self._checked(prepare)
         if self.comm is not None:
             changed = any(self.comm.allgather(changed))
@@ -2188,14 +2205,15 @@ class CFL3D:
         All communicator members must supply the same final flag. Finalization
         retains the flow and resident workspace for subsequent calculations.
         Expected resident geometry failures return SolveFailure (fail=True),
-        without a flow result; close/reset is required before further advancement.
+        without a flow result; submit new coordinates before further advancement.
         """
         from ._runtime import check_owner, GeometryUpdateFailure
         self._progress_origin = self._progress_last = perf_counter()
         self._progress("Checking options and mesh before solve")
         self._checked(lambda: check_owner(self))
         self._check_resident_members()
-        if self._resident_context is not None and self._resident_context.failure is not None:
+        if (self._resident_context is not None and self._resident_context.failure is not None
+                and self._pending_geometry is None):
             failure = self._resident_context.failure
             return SolveFailure(str(failure), failure.status)
         self._check_finalization_state(final)
@@ -2256,6 +2274,8 @@ class CFL3D:
         self._checked(lambda: self._validate_native_stem(stem))
         self._progress(f"Validation complete; output index {solve_index:03d}")
         geometry_changed = self._pending_geometry is not None
+        new_geometry = geometry_changed or (self._successful_mesh_signature is not None
+                                            and mesh_signature != self._successful_mesh_signature)
         self._last_result = None  # Native failures must not expose stale loads.
         if self.options.resident:
             try:
@@ -2264,7 +2284,7 @@ class CFL3D:
             except GeometryUpdateFailure as failure:
                 self._pending_geometry = None
                 self._solution_pending = False
-                self._progress(f"Geometry update failed: {failure}; resetFlow() required")
+                self._progress(f"Geometry update failed: {failure}; submit valid coordinates to retry")
                 return SolveFailure(str(failure), failure.status)
             q, history, final_alpha, surface_values, wall_counts, wall_values, wall_force_values, force_angles = values
             checkpoint = None
@@ -2301,8 +2321,16 @@ class CFL3D:
                 walls[key] = wall_values[:,offset:offset+count].T.reshape(shape, order="F").copy()
                 wall_forces[key] = wall_force_values[:,offset:offset+count].T.reshape(shape, order="F").copy()
             offset += count
+        if new_geometry:
+            self._geometry_version += 1
+        segments = ()
+        history_row = self._output_session_iterations if append_output else 0
+        if not segments or segments[-1][1] != self._geometry_version:
+            segments = (*segments, (history_row, self._geometry_version))
         result = SolverResult(fields, history, output_directory, final_alpha, surfaces, walls, wall_forces,
                               solve_index=solve_index, chunk_index=chunk_index, name=self.name,
+                              geometry_version=self._geometry_version,
+                              history_geometry_segments=segments,
                               output_paths={key: output_directory/value for key,value in output_names.items()},
                               iteration_offset=iteration_offset,
                               cumulative_history=history,
@@ -2332,6 +2360,7 @@ class CFL3D:
         self._next_output_index = solve_index + 1
         self._output_session = (output_identity, solve_index)
         self._output_session_iterations = iteration_offset + len(history)
+        self._output_geometry_segments = segments
         self._successful_options = dict(self.options)
         if geometry_changed:
             mesh_signature = (self._distributed_mesh_signature() if self.comm is not None

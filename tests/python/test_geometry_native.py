@@ -80,6 +80,48 @@ class GeometryNativeTests(unittest.TestCase):
                 solver.solve(output_directory=directory)
                 self.assertEqual(solver.getRuntimeInfo()['geometry_updates'], 1)
 
+    def test_failed_updates_retry_without_reset_or_flow_loss(self):
+        from cfl3d import CFL3D
+        config = dict(resident=True, iterations=2, multigrid_levels=3,
+                      turbulence='sst', cfl=1., writevolumesolution=False,
+                      writeTecplotSurfaceSolution=False, progress=False)
+        for scale in (1., 1.01):
+            with self.subTest(scale=scale), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                results = []
+                for fail_first in (False, True):
+                    with CFL3D(grouped_plate(), config, comm=None) as solver:
+                        solver.solve(output_directory=root/str(fail_first))
+                        xyz = solver.getVolumeCoordinates()
+                        good = xyz.copy()
+                        good[:,2] *= scale
+                        if fail_first:
+                            bad = xyz.copy()
+                            bad[:,2] *= -1
+                            for _ in range(2):
+                                solver.setVolumeCoordinates(bad)
+                                failure = solver.solve(output_directory=root/str(fail_first))
+                                self.assertTrue(failure.fail)
+                                self.assertFalse(failure.reset_required)
+                                self.assertTrue(failure.geometry_update_required)
+                                self.assertEqual(solver.getRuntimeInfo()['cycles'],2)
+                                self.assertTrue(solver.solve().fail)
+                            with self.assertRaises(ValueError):
+                                solver.setVolumeCoordinates(np.full_like(xyz,np.nan))
+                            self.assertTrue(solver.solve().fail)
+                        solver.setVolumeCoordinates(good)
+                        result = solver.solve(output_directory=root/str(fail_first))
+                        self.assertFalse(result.fail)
+                        self.assertEqual(solver.getRuntimeInfo()['initializations'],1)
+                        self.assertEqual(solver.getRuntimeInfo()['cycles'],4)
+                        np.testing.assert_array_equal(solver.getVolumeCoordinates(),good)
+                        results.append(result)
+                np.testing.assert_array_equal(results[0].history,results[1].history)
+                for name in results[0].fields:
+                    np.testing.assert_array_equal(results[0].fields[name],results[1].fields[name])
+                for key in results[0].wall_forces:
+                    np.testing.assert_array_equal(results[0].wall_forces[key],results[1].wall_forces[key])
+
     def test_negative_volume_returns_failure_and_can_reset(self):
         from cfl3d import CFL3D, SolveFailure
         with tempfile.TemporaryDirectory() as directory:

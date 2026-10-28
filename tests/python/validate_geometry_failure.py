@@ -1,6 +1,5 @@
 """Expected native geometry failures return on all ranks without MPI abort."""
 import argparse
-import argparse
 from pathlib import Path
 import tempfile
 import numpy as np
@@ -38,7 +37,7 @@ for mode in ('volume', 'one-owner'):
         solver.setVolumeCoordinates(bad)
         info = solver.getRuntimeInfo()
         result = solver.solve(output_directory=path/mode)
-        assert isinstance(result, SolveFailure) and result.fail and result.reset_required
+        assert isinstance(result, SolveFailure) and result.fail and not result.reset_required and result.geometry_update_required
         assert len(set(comm.allgather(result.native_status))) == 1
         assert solver.getRuntimeInfo()['cycles'] == info['cycles']
         assert solver.getRuntimeInfo()['geometry_updates'] == 0
@@ -51,11 +50,30 @@ for mode in ('volume', 'one-owner'):
             pass
         else:
             raise AssertionError('Failed geometry exposed old loads')
+        # A second bad attempt must remain recoverable, with no flow advance.
+        solver.setVolumeCoordinates(bad)
+        assert solver.solve(output_directory=path/mode).fail
+        assert solver.getRuntimeInfo()['cycles'] == info['cycles']
+        # Even coordinates identical to the accepted Python mesh must be
+        # restaged: the Fortran geometry was partially overwritten by failure.
+        solver.setVolumeCoordinates(original)
+        retried = solver.solve(output_directory=path/mode)
+        assert not retried.fail
+        assert solver.getRuntimeInfo()['initializations'] == 1
+        assert solver.getRuntimeInfo()['cycles'] == info['cycles'] + 2
+        assert solver.getRuntimeInfo()['geometry_updates'] == 1
         solver.resetFlow()
         # Python never installed the rejected coordinates; restart on its good mesh.
         recovered = solver.solve(output_directory=path/(mode+'-recovered'))
         assert not recovered.fail
+    with CFL3D(grouped_plate(), {**options, 'iterations':4}, comm=comm) as reference_solver:
+        reference = reference_solver.solve(output_directory=path/(mode+'-reference'))
+        np.testing.assert_array_equal(retried.history,reference.history[2:])
+        for zone in retried.fields:
+            np.testing.assert_array_equal(retried.fields[zone],reference.fields[zone])
+        for key in retried.wall_forces:
+            np.testing.assert_array_equal(retried.wall_forces[key],reference.wall_forces[key])
 comm.Barrier()
 if comm.rank == 0:
-    print('Collective geometry failure, no advance, cleanup and recovery passed')
+    print('Collective geometry failure, repeated retry with preserved flow, cleanup and recovery passed')
     root.cleanup()

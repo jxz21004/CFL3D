@@ -117,6 +117,7 @@ class ResidentContext:
                 if rows != requested or self.info()["cycles"] != self.cycles+requested:
                     raise RuntimeError("Resident advance stopped before the requested cycle boundary")
             solver._checked(check_status)
+            self.failure = None
             self.cycles += rows
             values = solver._checked(lambda: solver._read_native_result(native, self.arrays, rows))
             values = list(values)

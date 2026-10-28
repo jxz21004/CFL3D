@@ -955,3 +955,52 @@ Validation:
 
 Full unit log: `/tmp/cfl3d-bounded-full-tests.log`. This establishes bounded
 history growth across calls, not a total-memory or production-speed guarantee.
+
+
+## 2026-10-28: Retry expected geometry failures without resetting flow (API 20)
+
+Expected resident metric/volume failures no longer permanently lock the context.
+`SolveFailure` reports `reset_required=False`, `geometry_update_required=True`.
+Without a new coordinate submission, repeated solve calls still return failure
+without advancing. A new `setVolumeCoordinates()` submission permits a complete
+native geometry refresh before iteration resumes. This includes coordinates
+identical to the last accepted Python grid: after a native failure they cannot
+be treated as a no-op. Shape/nonfinite/interface validation still occurs before
+staging; invalid input does not unlock the failed context.
+
+The failure flag is cleared only at the full native refresh entry, and is set
+again collectively if the new metrics/volumes fail. Flow, turbulence and native
+iteration counters remain resident. This is retry with retained flow, not an
+automatic rollback of coordinates/metrics. No extra rollback grid snapshot or
+per-iteration communication was introduced. `resetFlow()` and `close()` remain
+available; unexpected native faults are outside this recoverable path.
+
+The earlier result-geometry metadata draft now allows last-successful queries
+while an update is merely pending; `solutionIsCurrent` exposes freshness without
+forbidding access. A failed native solve still has no current successful result.
+Previously returned result snapshots remain independent.
+
+Validation after full Intel serial and MPI rebuilds:
+
+- 121 unit tests: 118 passed, 3 optional HDF5 skips. Log:
+  `/tmp/cfl3d-retry-full.log`.
+- New serial SST checks inject two consecutive failures, reject a nonfinite
+  submission, then restore either the accepted grid or a new valid deformation.
+  Histories, mean flow and wall forces match a no-failure reference exactly;
+  native initialization count remains one.
+- Three-rank and split four-rank geometry failure validators pass metric failure
+  on one owner and negative-volume failures, repeated bad submissions, restoration
+  of the accepted grid, exact continuation results, and explicit reset/cleanup.
+  Logs: `/tmp/cfl3d-retry-mpi-test.log`, `/tmp/cfl3d-retry-split-test.log`.
+
+Both native extensions must be rebuilt and Python restarted for API 20. These
+checks do not establish recovery from arbitrary native errors or every boundary
+condition/model combination on production meshes.
+
+
+## 2026-10-28: Version 0.3.1
+
+Package metadata, README and interface reference now identify version 0.3.1,
+native API 20. Release notes document bounded histories, the cumulative-history
+compatibility change, and geometry retry with retained flow. This release does
+not add resident restart import/export. Validation is recorded above.
