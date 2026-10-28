@@ -1440,7 +1440,31 @@ PYTHONPATH=tests/python mpirun -np 3 python tests/python/validate_idwarp_exchang
 ### Native CFL3D deformation adapter (API 22, experimental)
 
 `CFL3DMeshAdapter` provides two original CFL3D control-point methods followed by
-native arc-length edge, face and volume TFI. It does not require IDWarp:
+native arc-length edge, face and volume TFI. It does not require IDWarp.
+
+#### Adapter options
+
+Pass these keyword arguments to `CFL3DMeshAdapter(...)`, alongside `mesh`,
+`surface` and `comm`. They are mesh-adapter options, not entries in the CFD
+solver's `options` dictionary. MPI ranks must supply consistent settings.
+
+| Argument | Default | Values and purpose |
+| --- | --- | --- |
+| `method` | `"exponential"` | `"exponential"` or `"fmem"`; selects control-point deformation method. |
+| `linear_solver` | `"native-gauss-seidel"` | FMEM backend: original native GS or explicit `"petsc-gmres"`. PETSc is never selected automatically. Exponential decay uses no linear solver and rejects `"petsc-gmres"`. |
+| `petsc_restart` | `None` (effective 30 for PETSc) | Positive GMRES restart length; may be supplied only with `linear_solver="petsc-gmres"`. Larger values increase Krylov storage. |
+| `control_mode` | `"stride"` | `"minimal"`, `"auto_stride"`, `"stride"`, or `"indices"`; selects the control lattice. |
+| `control_stride` | `None` (effective 4 in stride mode) | Positive scalar, three directional strides, or complete zone-name mapping; may be supplied only in stride mode. |
+| `control_indices` | `None` | Required in indices mode: complete zone-name mapping to zero-based i/j/k index lists. Invalid in other modes. |
+| `beta1` | `5.0` | Positive FMEM material-decay parameter, used by both FMEM backends. |
+| `alpha1` | `0.5` | Native GS relaxation, `0 < alpha1 <= 1`; has no effect on PETSc iteration. |
+| `beta2` | `5.0` | Positive exponential-decay parameter. |
+| `alpha2` | `0.1` | Exponential inner moving-region parameter, `0 <= alpha2 < 1`. |
+| `smoothing_iterations` | `0` | Nonnegative integer spring-smoothing sweeps for exponential decay. |
+
+See [FMEM backends](#fmem-linear-solver-backends) for numerical behaviour and
+memory costs, and [control-point selection](#control-point-selection) for
+per-zone configuration examples. Example using native FMEM:
 
 ```python
 from cfl3d.mesh import CFL3DMeshAdapter
@@ -1449,9 +1473,11 @@ from cfl3d.mesh import CFL3DMeshAdapter
 surface = solver.getSurfaceMesh()
 adapter = CFL3DMeshAdapter(
     solver.mesh, surface, comm=solver.comm,
-    method="fmem",             # "fmem" or "exponential"
+    method="fmem",                         # "fmem" or "exponential"
+    linear_solver="native-gauss-seidel",   # default; alternative: "petsc-gmres"
+    control_mode="stride",
     control_stride=4,
-    beta1=5.0,                  # FMEM material decay
+    beta1=5.0, alpha1=0.5,       # FMEM material decay and native GS relaxation
     beta2=5.0, alpha2=0.1,       # exponential decay and inner moving region
     smoothing_iterations=0,   # exponential spring-smoothing sweeps
 )
