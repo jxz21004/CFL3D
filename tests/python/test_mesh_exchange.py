@@ -2,8 +2,8 @@
 import unittest
 import numpy as np
 from cfl3d.cgns import CGNSMesh, Zone
-from cfl3d.mesh import VolumeLayout
-from cfl3d.mesh.idwarp import local_surface
+from cfl3d.mesh import VolumeMeshLayout
+from cfl3d.mesh.adapter_idwarp import local_surface
 
 
 class MeshExchangeTests(unittest.TestCase):
@@ -11,7 +11,7 @@ class MeshExchangeTests(unittest.TestCase):
         a = np.arange(2*3*4*3.).reshape(2, 3, 4, 3)
         b = np.arange(3*2*2*3.).reshape(3, 2, 2, 3)+1000
         mesh = CGNSMesh([Zone('a', a), Zone('b', b)])
-        layout = VolumeLayout(mesh)
+        layout = VolumeMeshLayout(mesh)
         xyz = layout.coordinates(mesh)
         expected = [v[i, j, k] for v in (a, b) for k in range(v.shape[2])
                     for j in range(v.shape[1]) for i in range(v.shape[0])]
@@ -25,7 +25,7 @@ class MeshExchangeTests(unittest.TestCase):
         mesh.zones[0].coordinates = None
         with self.assertRaises(ValueError):
             layout.coordinates(mesh)
-        partial = VolumeLayout(mesh)
+        partial = VolumeMeshLayout(mesh)
         np.testing.assert_array_equal(partial.component_indices(), np.arange(a.size, a.size+b.size))
         np.testing.assert_array_equal(partial.unpack(partial.coordinates(mesh))['b'], b)
         with self.assertRaises(ValueError):

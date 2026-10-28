@@ -5,7 +5,7 @@ import tempfile
 import numpy as np
 from mpi4py import MPI
 from cfl3d import CFL3D, SolveFailure
-from cfl3d.mesh import VolumeLayout
+from cfl3d.mesh import VolumeMeshLayout
 from test_surface_forces import grouped_plate
 
 parser = argparse.ArgumentParser()
@@ -27,7 +27,7 @@ for mode in ('volume', 'one-owner'):
         if mode == 'volume':
             bad[:, 2] *= -1
         else:
-            zones = VolumeLayout(solver.mesh).unpack(bad)
+            zones = VolumeMeshLayout(solver.mesh).unpack(bad)
             name = solver.mesh.zones[0].name
             if name in zones:
                 zones[name][:, 2:-2, 1:-1, 2] *= -1

@@ -2,7 +2,7 @@
 import numpy as np
 
 
-class VolumeLayout:
+class VolumeMeshLayout:
     """Describe one rank's owned zones without retaining coordinate copies.
 
     Zones follow CGNS file order, vertices use i-fastest order, and each vertex

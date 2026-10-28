@@ -5,7 +5,7 @@ same CGNS zone order as the CFL3D mesh. This layer returns staged coordinates;
 it cannot yet install them into a resident CFL3D calculation.
 """
 import numpy as np
-from .layout import VolumeLayout
+from .volume_layout import VolumeMeshLayout
 
 
 def local_surface(surface, comm=None):
@@ -65,7 +65,7 @@ class IDWarpAdapter:
         self._surface_ids = np.asarray(surface["node_ids"]).copy()
         self._faces = np.asarray(surface["connectivity"]).copy()
         self.warper = warper
-        self.layout = VolumeLayout(mesh)
+        self.layout = VolumeMeshLayout(mesh)
         indices = self.layout.component_indices()
         # IDWarp's usual build uses 32-bit Fortran integers. Refuse overflow.
         too_large = bool(len(indices) and indices.max() > np.iinfo(np.int32).max)

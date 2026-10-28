@@ -1004,3 +1004,12 @@ Package metadata, README and interface reference now identify version 0.3.1,
 native API 20. Release notes document bounded histories, the cumulative-history
 compatibility change, and geometry retry with retained flow. This release does
 not add resident restart import/export. Validation is recorded above.
+
+
+## 2026-10-28: Clarify mesh module names
+
+Renamed the public layout to `cfl3d.mesh.VolumeMeshLayout` in
+`volume_layout.py`, the IDWarp module to `adapter_idwarp.py` (class remains
+`IDWarpAdapter`), and internal checks to `_interface_validation.py`. Updated
+imports, tests and interface documentation; numerical behavior is unchanged.
+Existing callers importing `VolumeLayout` should use `VolumeMeshLayout`.

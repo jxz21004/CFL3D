@@ -1389,7 +1389,7 @@ the [README](../README.md#minimal-installation).
 
 ## Mesh deformation exchange (experimental)
 
-`cfl3d.mesh` separates the solver-independent volume layout (`VolumeLayout`)
+`cfl3d.mesh` separates the solver-independent volume layout (`VolumeMeshLayout`)
 from the optional `IDWarpAdapter`. Importing this subpackage does not require
 IDWarp. The caller creates an IDWarp `USMesh` on the same communicator, using
 the same structured CGNS file/zone order as CFL3D.
@@ -1449,7 +1449,7 @@ solver.setVolumeCoordinates(x)
 solver.solve()  # refresh geometry once, then advance the existing flow
 ```
 
-The setter accepts absolute coordinates in `VolumeLayout` order. It validates
+The setter accepts absolute coordinates in `VolumeMeshLayout` order. It validates
 finite values, shape, and point-matched interface coordinates across MPI ranks.
 It stages copies without changing current coordinates or old result snapshots.
 The next solve updates all native grid levels, metrics, volumes and wall

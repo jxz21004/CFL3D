@@ -4,7 +4,7 @@ import tempfile
 import unittest
 import numpy as np
 from cfl3d import _native
-from cfl3d.mesh import VolumeLayout
+from cfl3d.mesh import VolumeMeshLayout
 from test_surface_forces import grouped_plate
 from test_resident_native import native_session, readout
 
@@ -12,7 +12,7 @@ from test_resident_native import native_session, readout
 class GeometryNativeTests(unittest.TestCase):
     def test_refresh_preserves_flow_and_workspace(self):
         mesh = grouped_plate()
-        xyz = VolumeLayout(mesh).coordinates(mesh)
+        xyz = VolumeMeshLayout(mesh).coordinates(mesh)
         options = dict(turbulence='sst', mach=.2, cfl=1., iterations=4,
                        multigrid_levels=3, writevolumesolution=False,
                        writeTecplotSurfaceSolution=False)
@@ -61,7 +61,7 @@ class GeometryNativeTests(unittest.TestCase):
                 bad[0, 0] = np.nan
                 with self.assertRaises(ValueError):
                     solver.setVolumeCoordinates(bad)
-                layout = VolumeLayout(solver.mesh)
+                layout = VolumeMeshLayout(solver.mesh)
                 broken = original.copy()
                 count = int(np.prod(solver.mesh.zones[0].dimensions))
                 broken[:count, 0] += .01

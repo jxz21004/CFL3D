@@ -2131,8 +2131,8 @@ class CFL3D:
         as x0. Re-fetch after the first solve, which may change zone ownership.
         Pending coordinates are not installed until the next successful solve.
         """
-        from .mesh import VolumeLayout
-        return self._checked(lambda: VolumeLayout(self.mesh).coordinates(self.mesh))
+        from .mesh import VolumeMeshLayout
+        return self._checked(lambda: VolumeMeshLayout(self.mesh).coordinates(self.mesh))
 
     def setVolumeCoordinates(self, coordinates):
         """Stage absolute owned coordinates for a resident steady continuation.
@@ -2142,12 +2142,12 @@ class CFL3D:
         boundary; q and turbulence remain warm initial guesses. No grid file is
         written. This API currently requires an already paused resident solver.
         """
-        from .mesh import VolumeLayout
+        from .mesh import VolumeMeshLayout
         self._check_resident_members()
         def prepare():
             if self._resident_context is None or not self._resident_context.info()['paused']:
                 raise RuntimeError("Coordinate updates require a paused resident solver")
-            layout = VolumeLayout(self.mesh)
+            layout = VolumeMeshLayout(self.mesh)
             pending = layout.unpack(coordinates)
             changed = any(not np.array_equal(pending[z.name], z.coordinates)
                           for z in self.mesh.zones if z.coordinates is not None)
@@ -2158,7 +2158,7 @@ class CFL3D:
         if self.comm is not None:
             changed = any(self.comm.allgather(changed))
         if changed:
-            from .mesh.validation import validate_interfaces
+            from .mesh._interface_validation import validate_interfaces
             owners = self._mesh_owners if self.comm is not None else (0,)*len(self.mesh.zones)
             validate_interfaces(self.mesh, pending, owners, self.comm, self._checked)
         self._pending_geometry = pending if changed else None
