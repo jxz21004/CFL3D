@@ -115,8 +115,8 @@ class NativeMeshAdapterTests(unittest.TestCase):
     def test_single_zone_control_solution_against_original_kernel(self):
         from cfl3d import _native
 
-        # The parallel solver changes iteration order/tolerance, not the native
-        # macro-element stiffness. Compare a one-block problem to the old kernel.
+        # The default FMEM path must reproduce a direct native call with the
+        # original j-fastest control ordering, not just a loose approximation.
         for method in ("exponential", "fmem"):
             mesh = mesh3d(False)
             with CFL3D(mesh, comm=None) as solver:
@@ -132,13 +132,26 @@ class NativeMeshAdapterTests(unittest.TestCase):
                         graph[i, 7] = 0
                         prescribed[i] = targets[int(node)] - points[i]
                 graph[graph[:, 7] == 0, 9] = 0
+                if method == "fmem":
+                    order = np.array(
+                        sorted(
+                            range(len(adapter.nodes)),
+                            key=lambda i: (adapter.nodes[i][1][0], adapter.nodes[i][1][2], adapter.nodes[i][1][1]),
+                        )
+                    )
+                    inverse = np.empty_like(order)
+                    inverse[order] = np.arange(len(order))
+                    graph = graph[order].copy()
+                    graph[:, 1:7] = inverse[graph[:, 1:7] - 1] + 1
+                    points, prescribed = points[order], prescribed[order]
                 expected, status = _native.py_warp_controls(
                     points, graph, prescribed, int(method == "fmem"), adapter.parameters, adapter.sweeps, 1
                 )
                 self.assertEqual(status, 0)
-                # Original GS stops at 1e-6 displacement-update norm. GMRES uses
-                # a tighter preconditioned residual; agreement is not bitwise.
-                np.testing.assert_allclose(actual, expected, rtol=0, atol=2e-6 if method == "fmem" else 1e-15)
+                if method == "fmem":
+                    np.testing.assert_array_equal(actual, expected[inverse])
+                else:
+                    np.testing.assert_allclose(actual, expected, rtol=0, atol=1e-15)
 
     def test_control_storage_is_owned_only(self):
         mesh = mesh3d()
@@ -221,3 +234,50 @@ class NativeMeshAdapterTests(unittest.TestCase):
             for node, xyz in zip(target["node_ids"], target["coordinates"]):
                 _, point = topology.decode(node)
                 np.testing.assert_allclose(candidate[point], xyz, rtol=0, atol=1e-15)
+
+    def test_backend_selection_and_lazy_dependency(self):
+        from unittest.mock import patch
+        from cfl3d.mesh import _petsc_warp
+
+        mesh = mesh3d(False)
+        with CFL3D(mesh, comm=None) as solver:
+            surface = solver.getSurfaceMesh()
+            with patch.object(_petsc_warp, "load_petsc", side_effect=ImportError("petsc4py missing")) as load:
+                adapter = CFL3DMeshAdapter(mesh, surface, method="fmem", control_stride=2)
+                self.assertEqual(adapter.linear_solver, "native-gauss-seidel")
+                adapter.warp(target_surface(surface, 0.001))
+                load.assert_not_called()
+                with self.assertRaisesRegex(ValueError, "petsc4py missing"):
+                    CFL3DMeshAdapter(mesh, surface, method="fmem", linear_solver="petsc-gmres")
+            for kwargs in (
+                dict(linear_solver="gmres"),
+                dict(linear_solver="native"),
+                dict(petsc_restart=10),
+                dict(linear_solver="petsc-gmres", petsc_restart=0),
+            ):
+                with self.assertRaises(ValueError):
+                    CFL3DMeshAdapter(mesh, surface, method="fmem", **kwargs)
+            with self.assertRaisesRegex(ValueError, "only"):
+                CFL3DMeshAdapter(mesh, surface, method="exponential", linear_solver="petsc-gmres")
+
+    def test_petsc_backend_matches_native_one_and_two_blocks(self):
+        from optional_dependencies import petsc_skip_reason
+
+        reason = petsc_skip_reason()
+        if reason is not None:
+            self.skipTest(reason)
+        for multiblock in (False, True):
+            mesh = mesh3d(multiblock)
+            with CFL3D(mesh, comm=None) as solver:
+                surface = solver.getSurfaceMesh()
+                native = CFL3DMeshAdapter(mesh, surface, method="fmem", control_stride=2)
+                petsc = CFL3DMeshAdapter(
+                    mesh, surface, method="fmem", control_stride=2, linear_solver="petsc-gmres", petsc_restart=12
+                )
+                target = target_surface(surface, 0.001)
+                x = native.warp(target)
+                y = petsc.warp(target)
+                # Original GS uses a 1e-6 displacement-update norm, PETSc a tighter
+                # preconditioned residual: solutions agree within legacy tolerance.
+                np.testing.assert_allclose(x, y, rtol=0, atol=2e-6)
+                np.testing.assert_array_equal(petsc.warp(surface), native.warp(surface))

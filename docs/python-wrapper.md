@@ -1468,23 +1468,64 @@ candidate still requires `setVolumeCoordinates()` and native geometry checks at
 reference coordinates, if needed, belong to the caller. Do not repeatedly add a
 total displacement to the already deformed surface.
 
-Exponential decay and optional spring smoothing use the original equations on
-local control points. Nearest-boundary searches stream batches of at most 256
-source points from each owner; no global surface array is retained. FMEM uses
-native `elmetricsfe` and `elglobfe` to assemble block-local contributions. Shared
-rows are summed through canonical-node owners, and a distributed diagonally
-preconditioned GMRES solves for displacement (restart length 30, maximum 100
-restarts). Scalar and small dot-product reductions count each shared node once.
-The stopping threshold is max(1e-13, 1e-11 times the initial preconditioned RHS
-norm). This replaces the old global Gauss-Seidel iteration order, so FMEM results
-are not promised bitwise equal to the legacy 1e-6 update-norm solve. `alpha1` is
-accepted for call compatibility but no longer controls the GMRES iteration.
-Both methods still call native `arclen`, `tfiedge`, `tfiface`, and `tfivol`.
+#### FMEM linear solver backends
 
-Target surface coordinates go only to their canonical owner and requesting zone
-owners. Control graphs, matrices and solution vectors are local; root has no
-special solving role. A host owning no zones has no control matrix. Shared
-interface contributions/values are exchanged, never a complete control solution.
+The default is `linear_solver="native-gauss-seidel"`. It gathers **only the coarse
+control system** on communicator root, orders controls block/i/k/j (j fastest),
+constructs cross-block stencil neighbours/coincident groups, and calls original
+`deform_el` (including `hookefe`, `elmetricsfe`, `elglobfe`, `gaussseidel` and
+coincidence enforcement). `alpha1` controls GS relaxation. Original stopping
+controls are retained: 1e-6 displacement-update norm, at most 9 times the control
+node count in sweeps, with the existing divergence detection. This backend
+prioritizes original numerical behaviour and requires no PETSc installation.
+It does not promise equivalence to arbitrary legacy motion-table inputs: control
+selection and surface prescriptions still belong to this adapter.
+
+```python
+adapter = CFL3DMeshAdapter(
+    solver.mesh, surface, comm=solver.comm, method="fmem",
+    linear_solver="native-gauss-seidel",  # default
+    control_stride=2, alpha1=0.5,
+)
+
+# Explicit opt-in; uses the existing compatible petsc4py installation.
+adapter = CFL3DMeshAdapter(
+    solver.mesh, surface, comm=solver.comm, method="fmem",
+    linear_solver="petsc-gmres", petsc_restart=30,
+    control_stride=2,
+)
+```
+
+`petsc-gmres` assembles native block-local stiffness contributions and supplies a
+distributed Python-shell operator to **PETSc KSP GMRES**, with Jacobi
+preconditioning. PETSc owns all Krylov iteration/storage; there is no handwritten
+GMRES. Canonical-node owners sum shared rows and exchange interface values.
+PETSc vectors contain only canonical owned degrees of freedom, including zero
+local length on a host with no zones. Defaults are restart 30, at most 3000
+iterations, relative tolerance 1e-11 and absolute tolerance 1e-13 on the
+preconditioned residual. `petsc_restart` must be a positive integer and is only
+valid with this backend; increasing it increases local Krylov storage.
+`alpha1` does not control PETSc. Unrelated application PETSc options are not
+implicitly read to replace these settings.
+
+PETSc is loaded **only on explicit selection**, on all solver communicator ranks.
+When the application has not already initialized PETSc, the adapter initializes
+it on `MPI.COMM_SELF`, then creates KSP objects on the solver communicator. This
+avoids requiring unrelated communicator groups to import PETSc. Existing
+application initialization is preserved. A real double-precision PETSc build
+compatible with the MPI runtime is required.
+Missing/unusable petsc4py is an error, not a fallback. Neither backend silently
+switches to the other after failure. `linear_solver="petsc-gmres"` is rejected
+for `method="exponential"`, which needs no linear-system solve.
+
+Exponential decay and optional spring smoothing use the original equations on
+local controls. Distance queries stream at most 256 boundary samples per batch;
+surface targets go only to canonical owners and requesting zone owners. Both
+FMEM backends share control selection and constraints, and both deformation
+methods use native `arclen`, `tfiedge`, `tfiface` and `tfivol` on zone owners.
+Default GS preserves original control-solving behaviour; PETSc uses a different
+iteration order/stopping test, so the two solutions need not agree bit for bit.
+
 Native shared controls are restored. Handled assembly or iterative failures
 raise collectively before candidate installation; these adapter errors are
 separate from the CFD `SolveFailure` returned by geometry refresh.
@@ -1506,16 +1547,44 @@ Current boundaries and costs:
   the effective lattice with `getControlIndices()`.
 - Native TFI supports at most 500 control indices per axis. Overset, nonmatching
   and periodic transforms are outside this interface's supported contract.
-- Global zone/connectivity metadata and axis index lists remain replicated, but
-  control coordinates, connectivity graphs and matrices do not. The partition is
-  still by whole zones: a single large zone is not split among ranks.
-- Boundary searches stream all source batches past local queries; communication
-  and all-pairs distance work can still be expensive. FMEM retains a bounded
-  number of local Krylov vectors and requires synchronization. TFI has temporary
-  zone-sized workspace. Production memory/performance remains unmeasured.
+- Global zone/connectivity metadata and axis index lists remain replicated.
+  Default native GS temporarily stores the complete coarse control system on
+  root and supports at most ten coincident controls per group. PETSc keeps the
+  system distributed but adds Krylov storage and synchronization. Neither gathers
+  full volume grids; TFI uses temporary zone-sized workspace.
+- The partition is still by whole zones: a single large zone is not split among
+  ranks. Boundary-search traffic can be expensive. Production timing and peak
+  memory for both backends remain unmeasured.
 - The **serial native extension is required on every rank**, even when CFD uses
   the MPI extension. Rebuild both extensions for API 22. Constructing no adapter
   adds no deformation work or persistent reference-grid copy to ordinary CFD.
+
+
+##### Optional PETSc tests
+
+PETSc numerical tests automatically skip when `petsc4py` cannot be found. An
+installed but unusable PETSc, or a failed numerical check, remains a test failure.
+Native/exponential tests always run. To explicitly disable optional PETSc tests
+without uninstalling it, use the same environment switch for unit and MPI tests:
+
+```bash
+CFL3D_SKIP_PETSC_TESTS=1 PYTHONPATH=tests/python python -m unittest discover -s tests/python
+CFL3D_SKIP_PETSC_TESTS=1 PYTHONPATH=tests/python mpirun -np 3 python tests/python/validate_cfl3d_mesh_adapter_mpi.py
+```
+
+The MPI validator also accepts `--skip-petsc`:
+
+```bash
+PYTHONPATH=tests/python mpirun -np 3 python tests/python/validate_cfl3d_mesh_adapter_mpi.py --skip-petsc
+```
+
+Skip decisions are agreed across all ranks before any PETSc import. If one rank
+lacks the package or requests a skip, the optional case is skipped collectively.
+With `--mixed`, disabling PETSc reports the mixed-backend scenario as skipped and
+runs native cases in both groups; it does not claim mixed-backend coverage.
+Unset `CFL3D_SKIP_PETSC_TESTS` (or set it to a value other than `1`) and omit
+`--skip-petsc` to run installed PETSc tests. These switches affect tests only;
+production `linear_solver="petsc-gmres"` still errors if its dependency is missing.
 
 #### Control-point selection
 

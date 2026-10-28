@@ -154,12 +154,15 @@ Low-level `open_ended=1` remains the cumulative compatibility/test interface.
 The native adapter supports steady point-matched fixed-topology deformation;
 unspecified physical boundary points are fixed, including symmetry boundaries.
 Sliding symmetry, periodic transforms, overset and unsteady ALE are not exposed.
-Control assembly/solving is distributed by zone, with shared-node communication.
-No global control matrix or full surface coordinate copy is retained on root or
-replicated per rank. Boundary searches still stream every source batch to local
-queries, and GMRES requires reductions; production scaling is not established.
+FMEM defaults to original native Gauss-Seidel and temporarily gathers its coarse
+control system on root (at most ten coincident controls per group). Explicit
+petsc-gmres distributes the system through PETSc KSP but adds local Krylov storage
+and synchronization. petsc4py must use real double precision and a compatible MPI
+runtime. No automatic fallback exists. The same control lattice and surface
+constraints do not guarantee bitwise identical backend results.
 A single zone cannot be split across ranks. TFI requires zone-sized temporary
 arrays and at most 500 control indices per axis. Both native extensions are
-required in MPI jobs. Degenerate material ranges, nonfinite local assembly and
-iterative nonconvergence are rejected before installing a candidate. Successful
-warping does not replace the subsequent native CFD geometry validity checks.
+required in MPI jobs. Handled solve failures are rejected before installing a
+candidate. Successful warping does not replace native CFD geometry checks.
+Production scaling/peak memory and broader transformed-interface tests remain
+pending. See the [backend reference](python-wrapper.md#fmem-linear-solver-backends).

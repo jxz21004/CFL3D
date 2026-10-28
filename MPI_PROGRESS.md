@@ -1125,3 +1125,68 @@ on just one rank (/tmp/cfl3d-control-selection-mpi.log). Unit checks cover per-z
 anisotropic spacing, interface index propagation, automatic GCD spacing, no hidden
 FMEM floor, nonmutating index queries, equivalent-lattice deformation, conflicting
 options, invalid index bounds/order/types and all-prescribed minimal controls.
+
+## 2026-10-28: Restore native GS default; explicit PETSc GMRES backend
+
+Replaced handwritten GMRES with two explicitly named FMEM backends:
+`native-gauss-seidel` (default) and `petsc-gmres`. Default native mode gathers
+only coarse controls, builds original block/i/k/j ordering and cross-interface
+stencil neighbours/coincident groups, and calls deform_el including original
+assembly, alpha1 relaxation, Gauss-Seidel stopping and coincidence enforcement.
+TFI and full volume coordinates remain on zone owners. The cross-block stencil
+slots also determine native sparse row capacity; restoring these was necessary
+to avoid dropping neighbouring-block contributions in the global native system.
+
+The optional backend uses existing petsc4py (tested PETSc 3.21.6), KSP GMRES and
+Jacobi preconditioning with a distributed local-assembly Python-shell operator.
+PETSc owns Krylov iteration/storage; the previous hand-written iteration is
+removed. Restart length defaults to 30 and can be set using petsc_restart;
+rtol=1e-11, atol=1e-13, max_it=3000. Only explicit selection loads PETSc; missing
+or incompatible dependencies are errors, with no automatic fallback. Fresh
+adapter-owned PETSc initialization uses COMM_SELF, preserving existing application
+initialization and allowing disjoint native-only and PETSc cases. KSP uses the
+actual solver communicator. PETSc is not installed or upgraded by the adapter.
+
+Validation:
+
+- Full suite: 131 tests, 128 pass and 3 optional HDF5 skips, including real PETSc
+  execution (/tmp/cfl3d-backends-suite.log).
+- Default single-block controls match direct original-kernel evaluation in the
+  native ordering bit for bit. Single- and two-block native/PETSc candidates
+  agree within 2e-6 absolute tolerance; the two-block fixture measured about
+  3.14e-7 maximum coordinate difference, with original GS using its 1e-6
+  displacement-update norm rather than PETSc's tighter residual criterion.
+- Three-rank and split four-rank validation pass exponential, native FMEM and
+  PETSc FMEM, repeated deformation/continuation, empty host, exact unchanged
+  runtime counters during candidate generation, invalid-input rejection and
+  injected backend failures followed by retry. Per-backend serial/MPI candidates
+  agree within 5e-15 absolute and flow/history/wall readouts within rtol=2e-12,
+  atol=5e-14. Logs: /tmp/cfl3d-backends-mpi.log and
+  /tmp/cfl3d-backends-split.log.
+- A fresh four-rank mixed-backend run passes with one communicator using only
+  native GS and the other loading PETSc, without global import requirements
+  (/tmp/cfl3d-backends-mixed.log).
+
+README, interface reference, limitations, storage notes and unreleased notes now
+state the default root coarse-system tradeoff and optional PETSc memory costs.
+Native API remains 22; no Fortran interface change was needed in this step.
+Production scaling and broad transformed-interface coverage remain pending.
+
+## 2026-10-28: Optional PETSc test policy
+
+Unified unit/MPI optional-dependency detection without importing PETSc during
+probing. Missing petsc4py skips optional numerical tests; installed but unusable
+PETSc and numerical failures still fail. CFL3D_SKIP_PETSC_TESTS=1 explicitly
+skips PETSc tests in both runners, and the MPI validator also accepts
+--skip-petsc. All world ranks agree before a PETSc import. Native checks still
+run; --mixed reports missing mixed-backend coverage rather than substituting
+native results without a skip notice. Production backend selection is unchanged.
+
+Validation: 134-test full suite with the explicit skip switch passes (130 passed,
+4 skips: PETSc plus 3 optional HDF5), log /tmp/cfl3d-optional-petsc-suite.log.
+The 13 adapter/skip-policy tests pass with PETSc enabled, including real PETSc
+numerical comparisons (/tmp/cfl3d-optional-petsc-enabled.log). Missing-package
+and one-rank-missing decisions are covered by isolated policy tests. Three-rank
+--skip-petsc and four-rank --mixed with the environment switch pass native cases
+and print explicit skip notices. Logs: /tmp/cfl3d-optional-petsc-mpi.log and
+/tmp/cfl3d-optional-petsc-mixed.log. No dependencies were installed or upgraded.

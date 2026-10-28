@@ -14,6 +14,8 @@ and caller-managed. See the [adapter examples](docs/python-wrapper.md#native-cfl
 the [control-point selection guide](docs/python-wrapper.md#control-point-selection),
 and [release notes](docs/release-notes.md) for usage, validation and limitations.
 Rebuild both native extensions when upgrading and restart Python/MPI processes.
+FMEM defaults to original native Gauss-Seidel. PETSc GMRES is available only via
+explicit `linear_solver="petsc-gmres"`; see [backend selection and memory costs](docs/python-wrapper.md#fmem-linear-solver-backends).
 
 ## Why modernize the CFL3D interface?
 

@@ -2,21 +2,29 @@
 
 ## Unreleased — distributed mesh deformation (native API 22)
 
+Optional PETSc tests skip automatically when the package is absent. Unit and MPI
+tests support `CFL3D_SKIP_PETSC_TESTS=1`, and the MPI validator also accepts
+`--skip-petsc`. MPI ranks agree on the skip before importing PETSc; installed
+but broken dependencies and numerical failures are not silently skipped.
+
 Control selection now exposes `minimal`, `auto_stride`, `stride` and `indices`
 modes, with per-zone/per-direction options and `getControlIndices()` inspection.
 The default remains stride 4, but the implicit FMEM five-index floor is removed:
 only required topology constraints add indices. Very coarse FMEM selections may
 need explicit refinement. See the [selection guide](python-wrapper.md#control-point-selection).
 
-Replaces the root control solve with owned control graphs, native local FMEM
-assembly and distributed GMRES. Prescribed surface targets are routed to their
-owners and consumers; nearest-boundary searches use bounded streaming batches.
-No rank retains a whole-case surface/control coordinate array or global matrix.
-TFI remains zone-local. FMEM uses a different iteration order and tighter residual
-tolerance than the original Gauss-Seidel solve. Legacy `alpha1` remains accepted
-but does not control GMRES. Whole-zone partitioning and distance-search traffic
-still limit scaling; performance on production grids is unmeasured. Rebuild both
-extensions and restart Python. See the [current adapter reference](python-wrapper.md#native-cfl3d-deformation-adapter-api-22-experimental).
+FMEM now defaults to `linear_solver="native-gauss-seidel"`, restoring the original
+native assembly/GS sequence and alpha1 relaxation on the coarse control system.
+Only that system is gathered on root; full volume interpolation remains local.
+Explicit `linear_solver="petsc-gmres"` uses installed petsc4py, PETSc GMRES/Jacobi
+and distributed stiffness contributions, with configurable petsc_restart
+(default 30). Handwritten GMRES has been removed. Dependencies never select a
+backend automatically and failures never trigger fallback. Native interface
+neighbours and sparse row capacities are constructed across point-matched blocks.
+Surface targets remain routed to owners/consumers; nearest queries stream bounded
+batches. Both backends share control selection, constraints and TFI, with different
+stopping tests and memory costs. Production performance is unmeasured. See the
+[backend reference](python-wrapper.md#fmem-linear-solver-backends).
 
 ## 0.3.2 — native mesh deformation adapters
 

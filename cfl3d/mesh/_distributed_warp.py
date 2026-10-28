@@ -45,20 +45,6 @@ class SharedNodes:
             result[indices] = part
         return result
 
-    def dot(self, a, b):
-        return scalar(self.comm, float(np.sum(a[self.owned] * b[self.owned])))
-
-    def dots(self, basis, vector):
-        # A small vector reduction avoids one synchronization per basis vector.
-        local = np.array([np.sum(v[self.owned] * vector[self.owned]) for v in basis])
-        if self.comm is None:
-            return local
-        from mpi4py import MPI
-
-        result = np.empty_like(local)
-        self.comm.Allreduce(local, result, op=MPI.SUM)
-        return result
-
 
 def nearest(adapter, queries, sources, source_values=None, source_keys=None):
     """Exact distributed nearest search in bounded batches (ties use global keys).
@@ -107,53 +93,3 @@ def nearest(adapter, queries, sources, source_values=None, source_keys=None):
     if scalar(adapter.comm, int(np.any(~np.isfinite(best))), "max"):
         raise ValueError("No finite prescribed control points for mesh deformation")
     return np.sqrt(best), values
-
-
-def solve(shared, matvec, rhs, diagonal):
-    """Restarted, diagonally preconditioned distributed GMRES.
-
-    Dot products count each canonical node once. Local vectors include only owned
-    nodes and interface copies; there is no global matrix/vector or root solve.
-    """
-    if scalar(shared.comm, int(np.any(~np.isfinite(diagonal)) or np.any(diagonal == 0)), "max"):
-        raise ValueError("Degenerate FMEM control matrix")
-
-    def norm(v):
-        squared = shared.dot(v, v)
-        if not np.isfinite(squared):
-            raise ValueError("Nonfinite distributed FMEM residual")
-        return np.sqrt(max(0.0, squared))
-
-    def apply(v):
-        return matvec(v) / diagonal
-
-    b = rhs / diagonal
-    x = np.zeros_like(b)
-    tolerance = max(1e-13, norm(b) * 1e-11)
-    # Keep storage independent of total iterations: at most 31 local vectors.
-    for restart in range(100):
-        residual = b - apply(x)
-        beta = norm(residual)
-        if beta <= tolerance:
-            return x
-        basis = [residual / beta]
-        h = np.zeros((31, 30))
-        target = np.zeros(31)
-        target[0] = beta
-        for j in range(30):
-            v = apply(basis[j])
-            # Reorthogonalization protects small residuals on stiff near-wall grids.
-            for _ in range(2):
-                coefficients = shared.dots(basis, v)
-                for i, coeff in enumerate(coefficients):
-                    h[i, j] += coeff
-                    v -= coeff * basis[i]
-            h[j + 1, j] = norm(v)
-            y = np.linalg.lstsq(h[: j + 2, : j + 1], target[: j + 2], rcond=None)[0]
-            estimate = np.linalg.norm(target[: j + 2] - h[: j + 2, : j + 1] @ y)
-            if estimate <= tolerance or h[j + 1, j] < 1e-30 or j == 29:
-                for coefficient, vector in zip(y, basis):
-                    x += coefficient * vector
-                break
-            basis.append(v / h[j + 1, j])
-    raise ValueError("Distributed FMEM solve did not converge")

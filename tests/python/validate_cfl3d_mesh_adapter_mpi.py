@@ -5,6 +5,7 @@ import argparse
 import tempfile
 import numpy as np
 from mpi4py import MPI
+from optional_dependencies import petsc_skip_reason
 from cfl3d import CFL3D
 from cfl3d.mesh import CFL3DMeshAdapter
 from test_cfl3d_mesh_adapter import mesh3d, target_surface
@@ -13,18 +14,23 @@ from test_cfl3d_mesh_adapter import mesh3d, target_surface
 class PartitionComm:
     """Reject accidental global payload collection in the adapter itself."""
 
-    def __init__(self, comm):
+    def __init__(self, comm, native=False):
         self._comm = comm
+        self.native = native
         self.max_batch = 0
 
     def __getattr__(self, name):
         return getattr(self._comm, name)
 
     def gather(self, *args, **kwargs):
-        raise AssertionError("Global gather is forbidden in the mesh adapter")
+        assert self.native, "Global gather is forbidden in the distributed backend"
+        for data in args[0].values():
+            assert len(data) == 5 and data[4].shape == (len(data[0]), 21)
+        return self._comm.gather(*args, **kwargs)
 
     def scatter(self, *args, **kwargs):
-        raise AssertionError("Global scatter is forbidden in the mesh adapter")
+        assert self.native, "Global scatter is forbidden in the distributed backend"
+        return self._comm.scatter(*args, **kwargs)
 
     def allgather(self, value):
         assert not isinstance(value, (dict, np.ndarray)), "No replicated grid payload"
@@ -50,7 +56,15 @@ def run(comm, root):
         writeTecplotSurfaceSolution=False,
         progress=False,
     )
-    for method in ("exponential", "fmem"):
+    cases = [("exponential", "native-gauss-seidel"), ("fmem", "native-gauss-seidel"), ("fmem", "petsc-gmres")]
+    if args.mixed:
+        cases = [("fmem", "native-gauss-seidel" if world.rank // 2 == 0 else "petsc-gmres")]
+    if args.petsc_skip_reason is not None:
+        # Still run native validation when the optional mixed-backend scenario
+        # cannot run. Never silently label native-only runs as mixed coverage.
+        cases = [("exponential", "native-gauss-seidel"), ("fmem", "native-gauss-seidel")]
+    for method, backend in cases:
+        backend_options = dict(linear_solver=backend)
         reference = None
         error = None
         if comm.rank == 0:
@@ -58,7 +72,9 @@ def run(comm, root):
                 grids = []
                 with CFL3D(mesh3d(), config, comm=None) as solver:
                     solver.solve(output_directory=root / (method + "-serial"))
-                    adapter = CFL3DMeshAdapter(solver.mesh, solver.getSurfaceMesh(), method=method, control_stride=2)
+                    adapter = CFL3DMeshAdapter(
+                        solver.mesh, solver.getSurfaceMesh(), method=method, control_stride=2, **backend_options
+                    )
                     for _ in range(2):
                         candidate = adapter.warp(target_surface(solver.getSurfaceMesh(), 0.001))
                         grids.append(adapter.layout.unpack(candidate))
@@ -74,19 +90,29 @@ def run(comm, root):
         with CFL3D(mesh3d(), config, comm=comm) as solver:
             solver.solve(output_directory=root / (method + "-mpi"))
             surface = solver.getSurfaceMesh()
-            partition = PartitionComm(comm)
-            adapter = CFL3DMeshAdapter(solver.mesh, surface, comm=partition, method=method, control_stride=2)
+            partition = comm if backend == "petsc-gmres" else PartitionComm(comm, native=method == "fmem")
+            adapter = CFL3DMeshAdapter(
+                solver.mesh, surface, comm=partition, method=method, control_stride=2, **backend_options
+            )
             assert set(adapter.graphs) == set(adapter.layout.owned)
             assert len(adapter.nodes) == sum(len(adapter.graphs[g]) for g in adapter.layout.owned)
             if not adapter.layout.owned:
                 assert len(adapter.nodes) == len(adapter.unique) == 0
             effective = adapter.getControlIndices()
             explicit = CFL3DMeshAdapter(
-                solver.mesh, surface, comm=partition, method=method, control_mode="indices", control_indices=effective
+                solver.mesh,
+                surface,
+                comm=partition,
+                method=method,
+                control_mode="indices",
+                control_indices=effective,
+                **backend_options,
             )
             np.testing.assert_array_equal(explicit.warp(surface), adapter.layout.coordinates(solver.mesh))
             for mode in ("minimal", "auto_stride"):
-                automatic = CFL3DMeshAdapter(solver.mesh, surface, comm=partition, method=method, control_mode=mode)
+                automatic = CFL3DMeshAdapter(
+                    solver.mesh, surface, comm=partition, method=method, control_mode=mode, **backend_options
+                )
                 np.testing.assert_array_equal(automatic.warp(surface), adapter.layout.coordinates(solver.mesh))
             # Incorrect index input on one rank must fail collectively before
             # shared-node communication rather than stranding other ranks.
@@ -99,6 +125,7 @@ def run(comm, root):
                     surface,
                     comm=partition,
                     method=method,
+                    **backend_options,
                     control_mode="indices",
                     control_indices=bad_indices,
                 )
@@ -135,13 +162,15 @@ def run(comm, root):
             if method == "fmem":
                 from cfl3d import _native
 
-                original = _native.py_warp_matrix
+                function = "py_warp_matrix" if backend == "petsc-gmres" else "py_warp_controls"
+                original = getattr(_native, function)
 
                 def fail_assembly(*args, **kwargs):
                     raise ValueError("injected owner-local assembly failure")
 
-                if comm.rank == 1:
-                    _native.py_warp_matrix = fail_assembly
+                failure_rank = 1 if backend == "petsc-gmres" else 0
+                if comm.rank == failure_rank:
+                    setattr(_native, function, fail_assembly)
                 try:
                     try:
                         adapter.warp(target_surface(solver.getSurfaceMesh(), 0.001))
@@ -150,18 +179,25 @@ def run(comm, root):
                     else:
                         raise AssertionError("Assembly failure did not reach every rank")
                 finally:
-                    _native.py_warp_matrix = original
+                    setattr(_native, function, original)
                 # Retrying the adapter does not require reset/CFD reinitialization.
                 adapter.warp(target_surface(solver.getSurfaceMesh(), 0.001))
         if comm.rank == 0:
-            print("NATIVE_WARPER_PASS", method, flush=True)
+            print("NATIVE_WARPER_PASS", method, backend, flush=True)
 
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--split", action="store_true")
+parser.add_argument("--mixed", action="store_true")
+parser.add_argument("--skip-petsc", action="store_true", help="Skip optional PETSc cases; native cases still run")
 args = parser.parse_args()
 world = MPI.COMM_WORLD
-comm = world.Split(world.rank // 2, world.rank) if args.split else world
+args.petsc_skip_reason = petsc_skip_reason(world, skip=args.skip_petsc)
+if args.petsc_skip_reason is not None and world.rank == 0:
+    print("PETSC_TESTS_SKIPPED:", args.petsc_skip_reason, flush=True)
+    if args.mixed:
+        print("MIXED_BACKEND_TEST_SKIPPED: running native cases only", flush=True)
+comm = world.Split(world.rank // 2, world.rank) if args.split or args.mixed else world
 scratch = tempfile.TemporaryDirectory() if comm.rank == 0 else None
 root = Path(comm.bcast(scratch.name if scratch else None, root=0))
 try:

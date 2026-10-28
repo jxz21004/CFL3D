@@ -1,8 +1,9 @@
 """Native CFL3D exponential/FMEM control displacement and arc-length TFI.
 
 Opt-in steady mesh deformation, separate from the resident flow workspace.
-Control assembly, solving and volume interpolation stay on zone owners.
-Only shared-node values and bounded boundary-search batches are exchanged. No x0 is retained:
+Default FMEM gathers only coarse controls for original native Gauss-Seidel;
+explicit petsc-gmres keeps control assembly/solving distributed. Volume TFI stays
+on zone owners for both backends. No x0 is retained:
 absolute targets are applied relative to the mesh's current accepted coordinates.
 """
 
@@ -13,7 +14,7 @@ import numpy as np
 from .volume_layout import VolumeMeshLayout
 from ._interface_validation import validate_interfaces
 from ..surface_mesh import SurfaceTopology
-from ._distributed_warp import SharedNodes, exchange, scalar, nearest, solve
+from ._distributed_warp import SharedNodes, exchange, scalar, nearest
 
 
 class CFL3DMeshAdapter:
@@ -29,6 +30,12 @@ class CFL3DMeshAdapter:
     inspect the effective lattice with ``getControlIndices()``. Sparse FMEM
     lattices can be degenerate and require explicit refinement. Smaller strides
     cost more. Physical boundary points absent from ``surface`` are held fixed.
+    FMEM defaults to ``linear_solver='native-gauss-seidel'`` (original control
+    assembly/GS on root). Explicit ``'petsc-gmres'`` requires petsc4py and uses
+    distributed GMRES/Jacobi with ``petsc_restart`` (default 30). ``alpha1``
+    controls native GS relaxation only. No backend is selected by availability,
+    and failures never trigger automatic fallback. Exponential decay needs no
+    linear solver; selecting petsc-gmres with it is rejected.
     The serial native extension is required, including in MPI jobs. CFD
     installation/metric checks remain a separate setVolumeCoordinates/solve step.
     """
@@ -40,6 +47,8 @@ class CFL3DMeshAdapter:
         comm=None,
         *,
         method="exponential",
+        linear_solver="native-gauss-seidel",
+        petsc_restart=None,
         control_stride=None,
         control_mode="stride",
         control_indices=None,
@@ -56,6 +65,19 @@ class CFL3DMeshAdapter:
         def prepare():
             if method not in ("exponential", "fmem"):
                 raise ValueError("method must be 'exponential' or 'fmem'")
+            if linear_solver not in ("native-gauss-seidel", "petsc-gmres"):
+                raise ValueError("linear_solver must be 'native-gauss-seidel' or 'petsc-gmres'")
+            if method != "fmem" and linear_solver != "native-gauss-seidel":
+                raise ValueError("linear_solver='petsc-gmres' applies only to method='fmem'")
+            if petsc_restart is not None:
+                if linear_solver != "petsc-gmres":
+                    raise ValueError("petsc_restart applies only to linear_solver='petsc-gmres'")
+                if (
+                    isinstance(petsc_restart, (bool, np.bool_))
+                    or not isinstance(petsc_restart, Integral)
+                    or petsc_restart < 1
+                ):
+                    raise ValueError("petsc_restart must be a positive integer")
             if (
                 isinstance(smoothing_iterations, bool)
                 or not isinstance(smoothing_iterations, int)
@@ -82,10 +104,15 @@ class CFL3DMeshAdapter:
 
         self.parameters = self._checked(prepare)
         self.method, self.sweeps = method, smoothing_iterations
+        self.linear_solver = linear_solver
+        self.petsc_restart = 30 if petsc_restart is None else int(petsc_restart)
+        self._petsc = None
         self.axes = self._checked(lambda: self._axes(control_mode, control_stride, control_indices))
         self.control_mode = control_mode
         settings = (
             method,
+            linear_solver,
+            self.petsc_restart,
             control_mode,
             tuple(tuple(a) for a in self.axes),
             tuple(self.parameters),
@@ -94,6 +121,10 @@ class CFL3DMeshAdapter:
         )
         if comm is not None and len(set(comm.allgather(settings))) != 1:
             raise ValueError("Mesh adapter settings/topology differ between ranks")
+        if linear_solver == "petsc-gmres":
+            from ._petsc_warp import load_petsc
+
+            self._petsc = self._checked(load_petsc)
         parts = [self.layout.owned] if comm is None else comm.allgather(self.layout.owned)
         self.owners = {g: r for r, part in enumerate(parts) for g in part}
         if len(self.owners) != len(mesh.zones) or sum(map(len, parts)) != len(self.owners):
@@ -324,6 +355,121 @@ class CFL3DMeshAdapter:
         np.add.at(local, self.inverse, values)
         return self.shared.sum(local)
 
+    def _native_controls(self, points, fixed, prescribed):
+        """Gather only the coarse system and call the original FMEM/GS driver.
+
+        Ordering is block, i, k, j (j fastest), as in native setslave. Full volume
+        grids and TFI buffers remain on zone owners. This explicitly chosen
+        compatibility backend trades root control-system memory for native GS.
+        """
+        local = {
+            g: (points[idx], fixed[idx], prescribed[idx], self.canonical[idx], self.graphs[g])
+            for g, idx in self.zone_nodes.items()
+        }
+        parts = [local] if self.comm is None else self.comm.gather(local, root=0)
+
+        def native():
+            if self.rank != 0:
+                return None
+            from .. import _native
+            from ..solver import _NATIVE_LOCK
+
+            blocks = {g: data for part in parts for g, data in part.items()}
+            xyz, u, graphs, ids, slices, permutations = [], [], [], [], {}, {}
+            offset = 0
+            lookups = {}
+            for g in range(len(self.mesh.zones)):
+                p, f, displacement, canonical, graph = blocks[g]
+                axes = self.axes[g]
+                positions = list(product(*axes))
+                order = np.array(
+                    sorted(range(len(positions)), key=lambda n: (positions[n][0], positions[n][2], positions[n][1]))
+                )
+                inverse = np.empty_like(order)
+                inverse[order] = np.arange(len(order))
+                q = graph[order].copy()
+                q[:, 1:7] = inverse[q[:, 1:7] - 1] + offset + 1
+                q[:, 7] = (~f[order]).astype(int)
+                q[:, 8] = g + 1
+                q[f[order], 9] = 0
+                lookups[g] = {positions[old]: offset + i for i, old in enumerate(order)}
+                xyz.append(p[order])
+                u.append(displacement[order])
+                ids.extend(canonical[order])
+                graphs.append(q)
+                slices[g] = slice(offset, offset + len(order))
+                permutations[g] = inverse
+                offset += len(order)
+            if offset > np.iinfo(np.int32).max // 245:
+                raise ValueError("Global native control system exceeds int32 workspace indexing; use petsc-gmres")
+            graph = np.concatenate(graphs)
+            # Native setslave connects the outward stencil slot to the next
+            # control point inside the donor block, not to the coincident point.
+            # This also determines sparse row capacity at block interfaces.
+            slots = ((5, 6), (1, 2), (3, 4))  # i-/+, j-/+, k-/+ (zero-based columns)
+            for g, links in enumerate(self.topology.links):
+                for target, lo, hi, start, donor, transform in links:
+                    normals = [
+                        a for a in range(3) if lo[a] == hi[a] and lo[a] in (0, self.mesh.zones[g].dimensions[a] - 1)
+                    ]
+                    if len(normals) != 1:
+                        raise ValueError("Native GS requires rectangular block-boundary interfaces")
+                    axis = normals[0]
+                    side = int(lo[axis] != 0)
+                    daxis = abs(transform[axis]) - 1
+                    for position, row in lookups[g].items():
+                        if not all(lo[a] <= position[a] <= hi[a] for a in range(3)):
+                            continue
+                        q = [0, 0, 0]
+                        for a, t in enumerate(transform):
+                            q[abs(t) - 1] = int(donor[abs(t) - 1] + np.sign(t) * (position[a] - start[a]))
+                        donor_axis = self.axes[target][daxis]
+                        if q[daxis] == donor_axis[0]:
+                            q[daxis] = donor_axis[1]
+                        elif q[daxis] == donor_axis[-1]:
+                            q[daxis] = donor_axis[-2]
+                        else:
+                            raise ValueError("Native GS interface must terminate on a donor boundary")
+                        graph[row, slots[axis][side]] = lookups[target][tuple(q)] + 1
+            for row in range(offset):
+                neighbours = (
+                    np.prod([1 + int(graph[row, a] != row + 1) + int(graph[row, b] != row + 1) for a, b in slots]) - 1
+                )
+                graph[row, 9] = 3 * neighbours + 2 if graph[row, 7] else 0
+            groups = {}
+            for i, node in enumerate(ids):
+                groups.setdefault(int(node), []).append(i)
+            for group in groups.values():
+                if len(group) > 10:
+                    raise ValueError("Native GS supports at most 10 coincident controls; use petsc-gmres")
+                for i in group:
+                    others = [j + 1 for j in group if j != i]
+                    graph[i, 10] = len(group)
+                    graph[i, 11 : 11 + len(others)] = others
+            if not _NATIVE_LOCK.acquire(blocking=False):
+                raise RuntimeError("Native solver is busy")
+            try:
+                result, status = _native.py_warp_controls(
+                    np.concatenate(xyz),
+                    graph,
+                    np.concatenate(u),
+                    1,
+                    self.parameters,
+                    self.sweeps,
+                    len(self.mesh.zones) + 1,
+                )
+            finally:
+                _NATIVE_LOCK.release()
+            if status:
+                raise ValueError(f"Native FMEM/Gauss-Seidel failed ({status}); refine controls or inspect geometry")
+            return [
+                {g: result[slices[g]][permutations[g]] for g in range(len(self.mesh.zones)) if self.owners[g] == rank}
+                for rank in range(self.size)
+            ]
+
+        outgoing = self._checked(native)
+        return outgoing[0] if self.comm is None else self.comm.scatter(outgoing, root=0)
+
     def _controls(self, targets):
         from .. import _native
         from ..solver import _NATIVE_LOCK
@@ -346,6 +492,8 @@ class CFL3DMeshAdapter:
         no_unknowns = scalar(self.comm, int(np.count_nonzero(~fixed))) == 0
         if no_motion or no_unknowns:
             return {g: prescribed[idx] for g, idx in self.zone_nodes.items()}
+        if self.method == "fmem" and self.linear_solver == "native-gauss-seidel":
+            return self._native_controls(points, fixed, prescribed)
         if self.method == "exponential":
             distance, displacement = nearest(self, points, points[fixed], prescribed[fixed], self.canonical[fixed])
             distance[fixed] = 0
@@ -443,7 +591,9 @@ class CFL3DMeshAdapter:
             boundary[~fixed_unique] = 0
             rhs = -matvec(boundary)
             rhs[fixed_unique] = 0
-            result = solve(self.shared, matvec, rhs, diagonal) + boundary
+            from ._petsc_warp import solve_petsc
+
+            result = solve_petsc(self._petsc, self.shared, matvec, rhs, diagonal, self.petsc_restart) + boundary
             result[fixed_unique] = boundary[fixed_unique]
             u = result[self.inverse]
         return {g: u[idx] for g, idx in self.zone_nodes.items()}

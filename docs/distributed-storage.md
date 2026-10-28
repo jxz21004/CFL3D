@@ -490,19 +490,27 @@ not an interface guarantee; existing array names and values remain compatible.
 
 ## Optional native mesh deformation (API 22)
 
-`CFL3DMeshAdapter` returns candidate owned volume coordinates for the existing
-resident geometry-update interface. Exponential and FMEM control operations are
-now partitioned by zone; root no longer gathers or solves the control system.
-Native block-local stiffness assembly and distributed GMRES exchange shared-node
-contributions and values. Canonical owners route prescribed surface targets only
-to requesting zone owners. Nearest-boundary queries consume batches of at most
-256 source points, retaining no global coordinate array. Scalar/small reductions
-provide distance extrema and solver norms. A host with no zones stores no matrix.
+`CFL3DMeshAdapter` returns candidate owned volume coordinates for resident
+geometry updates. All methods retain zone-local TFI and route prescribed surface
+targets to canonical owners and requesting zone owners. Exponential decay uses
+local controls and bounded nearest-boundary batches.
 
-TFI runs on each zone owner with temporary zone-sized workspace. The adapter
-retains no x0 and does not change resident flow until a candidate is submitted.
-Whole-zone partitioning, replicated topology metadata, distance-search traffic
-and Krylov synchronization remain limitations; production scaling is unmeasured.
-Both native extensions must be rebuilt for API 22 and Python restarted. This is
-steady fixed-topology deformation, not an unsteady ALE interface. See
-[adapter usage](python-wrapper.md#native-cfl3d-deformation-adapter-api-22-experimental).
+FMEM backend selection is explicit:
+
+- `native-gauss-seidel` (default) gathers the coarse control system on root,
+  calls original native assembly/GS, and distributes control displacements.
+  Full volume grids remain on owners. This deliberately restores original
+  control-solving behaviour, with root coarse-matrix memory as a tradeoff.
+- `petsc-gmres` uses native local stiffness assembly and PETSc KSP GMRES/Jacobi.
+  Shared-node contributions/values are exchanged; no complete coarse matrix or
+  vector is gathered. PETSc vectors store canonical owned nodes; a host owning
+  no zones has zero local degrees of freedom. Krylov storage depends on
+  `petsc_restart` (default 30), and solving requires reductions/synchronization.
+
+There is no handwritten GMRES and no automatic dependency-based switching or
+failure fallback. Neither backend retains x0 or changes resident flow until a
+candidate is submitted. Whole-zone partitioning, replicated topology metadata,
+distance-search traffic and production scaling remain limitations. Both native
+extensions must support API 22. PETSc is optional and loaded only on request;
+its build must use a compatible MPI runtime. See the
+[backend reference](python-wrapper.md#fmem-linear-solver-backends).
