@@ -2,7 +2,7 @@
 
 The caller supplies an existing USMesh on the same communicator and from the
 same CGNS zone order as the CFL3D mesh. This layer returns staged coordinates;
-it cannot yet install them into a resident CFL3D calculation.
+install them with solver.setVolumeCoordinates() followed by solve().
 """
 import numpy as np
 from .volume_layout import VolumeMeshLayout

@@ -1,6 +1,6 @@
 # Python interface reference
 
-This document describes Python package **0.3.1**, native interface version **20**.
+This document describes Python package **0.3.1**, native interface version **21**.
 Sections marked "after 0.2.0" are included in 0.3.0 but absent from the `v0.2.0`
 tag. Experimental features retain their documented limitations.
 For the project motivation, requirements, and build commands, see the
@@ -1436,6 +1436,69 @@ PYTHONPATH=tests/python python tests/python/validate_idwarp_exchange.py
 PYTHONPATH=tests/python mpirun -np 3 python tests/python/validate_idwarp_exchange.py
 ```
 
+
+### Native CFL3D deformation adapter (API 21, experimental)
+
+`CFL3DMeshAdapter` provides two original CFL3D control-point methods followed by
+native arc-length edge, face and volume TFI. It does not require IDWarp:
+
+```python
+from cfl3d.mesh import CFL3DMeshAdapter
+
+# Create after the first resident solve establishes zone ownership.
+surface = solver.getSurfaceMesh()
+adapter = CFL3DMeshAdapter(
+    solver.mesh, surface, comm=solver.comm,
+    method="fmem",             # "fmem" or "exponential"
+    control_stride=4,
+    beta1=5.0, alpha1=0.5,       # FMEM material decay and relaxation
+    beta2=5.0, alpha2=0.1,       # exponential decay and inner moving region
+    smoothing_iterations=0,   # exponential spring-smoothing sweeps
+)
+surface["coordinates"] += displacement
+candidate = adapter.warp(surface)
+solver.setVolumeCoordinates(candidate)
+result = solver.solve(final=False)
+```
+
+Both methods return absolute owned coordinates in `VolumeMeshLayout` order.
+`warp()` neither modifies the mesh nor advances/reinitializes CFD. Applying a
+candidate still requires `setVolumeCoordinates()` and native geometry checks at
+`solve()`. Coordinates are based on the **current accepted mesh** on each call;
+reference coordinates, if needed, belong to the caller. Do not repeatedly add a
+total displacement to the already deformed surface.
+
+The exponential path calls native `expdecay` and coincidence enforcement. FMEM
+calls native `deform_el` (material properties, stiffness assembly and iterative
+solution). Both then call `arclen`, `tfiedge`, `tfiface`, and `tfivol`. COMMON
+controls are restored after these isolated calls. FMEM's adapter-only failure
+path returns an error instead of its legacy nonconvergence `STOP`; normal native
+solver behavior is unchanged. A failed adapter raises collectively before any
+candidate is installed. It does not return the CFD `SolveFailure` type.
+
+Current boundaries and costs:
+
+- Fixed-topology point-matched structured zones; all dimensions need at least
+  two vertices. This is a steady warper, not a time-accurate ALE/structural solver.
+- Provided surface coordinates are prescribed exactly. Physical boundary points
+  omitted from the surface are fixed, including symmetry boundaries. Native
+  sliding/free-symmetry and arbitrary original motion-table semantics are not
+  exposed. Shared interface identities come from topology, never nearest points.
+- `control_stride` is a maximum initial spacing. Patch endpoints and matching
+  interface indices are inserted automatically. FMEM uses at least five indices
+  per axis where available to resolve material-distance layers. Extremely coarse
+  or degenerate systems can fail; no fallback silently changes the method.
+- Native TFI supports at most 500 control indices per axis; native coincident
+  control groups support at most ten vertices. Overset, nonmatching and periodic
+  transforms are outside this interface's supported contract.
+- Surface targets are replicated, and coarse control coordinates are gathered
+  for a root control solve; control topology is replicated. This is not a fully
+  distributed deformation solver. Full volume interpolation remains zone-local,
+  with temporary workspace comparable to native TFI. Dense control lattices can
+  be expensive, especially FMEM; production memory/performance is unmeasured.
+- The **serial native extension is required on every rank**, even when CFD uses
+  the MPI extension. Rebuild both extensions for API 21. Constructing no adapter
+  adds no deformation work or persistent reference-grid copy to ordinary CFD.
 
 ### Resident coordinate updates (experimental, native API 18)
 

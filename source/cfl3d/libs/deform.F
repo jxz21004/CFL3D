@@ -410,6 +410,9 @@ c
 c
       SUBROUTINE gaussseidel(nc,n,b,x,sa,ija,tol,itmax,err,
      .                       xt,myid,myhost)
+#ifdef PYTHON_API
+      use cfl3d_python_state, only: py_warp_active,py_warp_error
+#endif
       parameter(EPS=1.d-12)
       INTEGER iter,itmax,itol,n
       INTEGER j
@@ -450,6 +453,12 @@ c
         if(errold.lt.err) then
           it1 = it1 + 1
           if(it1.gt.itmx1) then
+#ifdef PYTHON_API
+             if (py_warp_active) then
+                py_warp_error=err
+                return
+             end if
+#endif
              write(1000,21022)
              stop
           end if
@@ -460,6 +469,12 @@ c
         end if
       enddo
 2000  continue
+#ifdef PYTHON_API
+      if (py_warp_active) then
+         py_warp_error=err
+         return
+      end if
+#endif
       if(myid.eq.myhost) write(1000+myid,31029) it,err
 
       return

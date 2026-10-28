@@ -31,6 +31,8 @@ module cfl3d_python_state
   logical :: py_resident_output_changed=.false.
   ! Staged owned coordinates exist only between an explicit update and resume.
   logical :: py_geometry_pending=.false.
+  logical :: py_warp_active=.false.
+  real(8) :: py_warp_error=0.d0
   integer :: py_geometry_updates=0,py_geometry_failed=0
   integer, allocatable :: py_geometry_offsets(:)
   real(8), allocatable :: py_geometry_xyz(:,:)
@@ -355,7 +357,7 @@ end module
 subroutine py_api_version(version)
   implicit none
   integer, intent(out) :: version
-  version=20
+  version=21
 end subroutine
 
 subroutine py_set_restart_controls(override_alpha)
@@ -818,4 +820,170 @@ subroutine py_geometry_info(updates)
   implicit none
   integer, intent(out) :: updates
   updates=py_geometry_updates
+end subroutine
+
+! Standalone mesh kernels. These operate exclusively on adapter-owned arrays.
+! COMMON controls are saved/restored, so a paused CFD context is not modified.
+subroutine py_warp_controls(points,graph,displacement,method,parameters,sweeps,n,maxbl,result,status)
+  use cfl3d_python_state, only: py_warp_active,py_warp_error
+  use, intrinsic :: ieee_arithmetic, only: ieee_is_finite
+  implicit none
+  integer,intent(in) :: n,maxbl,method,sweeps,graph(n,21)
+  real(8),intent(in) :: points(n,3),displacement(n,3),parameters(4)
+  real(8),intent(out) :: result(n,3)
+  integer,intent(out) :: status
+  integer,allocatable :: slave(:,:,:),owners(:),blocks(:,:)
+  real(8),allocatable :: u(:),tmp(:),r(:),ripm(:,:)
+  integer :: i,c,scratch(20)
+  real(8) :: saved_real(6)
+  integer :: saved_int(8)
+  real(8) :: beta1,beta2,alpha1,alpha2,rmin,rmax
+  integer :: isktyp,negvol,meshdef,nsprgit,ndgrd,ndwrt,iexp,i2d
+  common /deformz/ beta1,beta2,alpha1,alpha2,isktyp,negvol,meshdef,nsprgit,ndgrd,ndwrt
+  common /zero/ iexp
+  common /twod/ i2d
+  common /sgminmax/ rmin,rmax
+  status=1; result=displacement
+  if (n<1.or.maxbl<1.or.method<0.or.method>1.or.sweeps<0) return
+  if (.not.all(ieee_is_finite(points)).or..not.all(ieee_is_finite(displacement))) return
+  if (any(graph(:,2:7)<1).or.any(graph(:,2:7)>n)) return
+  if (.not.any(graph(:,8)==0)) return
+  if (any(graph(:,9)<1).or.any(graph(:,9)>maxbl)) return
+  if (any(graph(:,11)<1).or.any(graph(:,11)>10)) return
+  do i=1,n
+    if (any(graph(i,12:10+graph(i,11))<1).or.any(graph(i,12:10+graph(i,11))>n)) return
+  end do
+  allocate(slave(n,21,5),owners(maxbl),blocks(maxbl,2),u(3*n),tmp(3*n),r(n),ripm(7,n))
+  saved_real=[beta1,beta2,alpha1,alpha2,rmin,rmax]
+  saved_int=[isktyp,negvol,meshdef,nsprgit,ndgrd,ndwrt,iexp,i2d]
+  beta1=parameters(1); alpha1=parameters(2); beta2=parameters(3); alpha2=parameters(4)
+  isktyp=method; meshdef=0; nsprgit=sweeps; iexp=15; i2d=0
+  slave=0; slave(:,:,1)=graph; owners=0; blocks=0
+  do i=1,n
+    do c=1,3
+      u(3*(i-1)+c)=displacement(i,c)
+    end do
+  end do
+  py_warp_active=.true.; py_warp_error=0.d0
+  if (method==0) then
+    ! Call directly: the legacy deform_el exponential branch does not set ndim.
+    call expdecay(points(:,1),points(:,2),points(:,3),u,tmp,r,ripm,1.d-13, &
+                  slave,n,21,3*n,1,1,0,0,0,owners,maxbl,1)
+    call coincdef(tmp,u,slave,n,21,1,scratch)
+  else
+    call deform_el(slave,n,21,u,points(:,1),points(:,2),points(:,3),1,0,0,0,1,owners,blocks,maxbl,1)
+  end if
+  py_warp_active=.false.
+  do i=1,n
+    do c=1,3
+      result(i,c)=u(3*(i-1)+c)
+    end do
+  end do
+  beta1=saved_real(1); beta2=saved_real(2); alpha1=saved_real(3); alpha2=saved_real(4)
+  rmin=saved_real(5); rmax=saved_real(6)
+  isktyp=saved_int(1); negvol=saved_int(2); meshdef=saved_int(3); nsprgit=saved_int(4)
+  ndgrd=saved_int(5); ndwrt=saved_int(6); iexp=saved_int(7); i2d=saved_int(8)
+  status=0
+  if (.not.all(ieee_is_finite(result))) status=2
+  if (.not.ieee_is_finite(py_warp_error).or.py_warp_error>=1.d-6) status=3
+end subroutine
+
+subroutine py_warp_tfi(xyz,delta,fixed,ii,jj,kk,ni,nj,nk,ci,cj,ck,result,status)
+  use, intrinsic :: ieee_arithmetic, only: ieee_is_finite
+  implicit none
+  integer,intent(in) :: ni,nj,nk,ci,cj,ck,ii(ci),jj(cj),kk(ck),fixed(nj,nk,ni)
+  real(8),intent(in) :: xyz(nj,nk,ni,3),delta(nj,nk,ni,3)
+  real(8),intent(out) :: result(nj,nk,ni,3)
+  integer,intent(out) :: status
+  real(8),allocatable :: d(:,:,:,:),a(:,:,:,:),w(:,:,:,:,:)
+  integer :: iskip(1,500),jskip(1,500),kskip(1,500),counts(3),nou(1)
+  integer :: i,j,k,c,iexp,isklton,oldexp,oldsk
+  character(120) :: bou(4,1)
+  common /zero/ iexp
+  common /sklton/ isklton
+  status=1; result=xyz
+  if (min(ni,nj,nk)<2.or.min(ci,cj,ck)<2.or.max(ci,cj,ck)>500) return
+  if (ii(1)/=1.or.ii(ci)/=ni.or.jj(1)/=1.or.jj(cj)/=nj.or.kk(1)/=1.or.kk(ck)/=nk) return
+  if (any(ii(2:)<=ii(:ci-1)).or.any(jj(2:)<=jj(:cj-1)).or.any(kk(2:)<=kk(:ck-1))) return
+  if (.not.all(ieee_is_finite(xyz)).or..not.all(ieee_is_finite(delta))) return
+  allocate(d(nj,nk,ni,3),a(nj,nk,ni,3),w(nj,nk,ni,3,7))
+  oldexp=iexp; oldsk=isklton; iexp=15; isklton=0; nou=0; bou=' '
+  d=delta; w=0.d0
+  call arclen(ni,nj,nk,a(:,:,:,1),a(:,:,:,2),a(:,:,:,3),xyz(:,:,:,1),xyz(:,:,:,2), &
+              xyz(:,:,:,3),1,nou,bou,1,4,0)
+  ! Native edge and face interpolation on the control lattice.
+  do i=1,ci
+    do j=1,cj
+      do k=1,ck-1
+        call edge(ii(i),ii(i),jj(j),jj(j),kk(k),kk(k+1))
+      end do
+    end do
+  end do
+  do i=1,ci
+    do k=1,ck
+      do j=1,cj-1
+        call edge(ii(i),ii(i),jj(j),jj(j+1),kk(k),kk(k))
+      end do
+    end do
+  end do
+  do j=1,cj
+    do k=1,ck
+      do i=1,ci-1
+        call edge(ii(i),ii(i+1),jj(j),jj(j),kk(k),kk(k))
+      end do
+    end do
+  end do
+  call enforce()
+  do i=1,ci
+    do j=1,cj-1
+      do k=1,ck-1
+        call face(ii(i),ii(i),jj(j),jj(j+1),kk(k),kk(k+1))
+      end do
+    end do
+  end do
+  do j=1,cj
+    do i=1,ci-1
+      do k=1,ck-1
+        call face(ii(i),ii(i+1),jj(j),jj(j),kk(k),kk(k+1))
+      end do
+    end do
+  end do
+  do k=1,ck
+    do i=1,ci-1
+      do j=1,cj-1
+        call face(ii(i),ii(i+1),jj(j),jj(j+1),kk(k),kk(k))
+      end do
+    end do
+  end do
+  call enforce()
+  iskip=0; jskip=0; kskip=0
+  iskip(1,:ci)=ii; jskip(1,:cj)=jj; kskip(1,:ck)=kk; counts=[ci,cj,ck]
+  call tfivol(ni,nj,nk,1,1,1,counts(1:1),counts(2:2),counts(3:3),iskip,jskip,kskip,2, &
+    d(:,:,:,1),d(:,:,:,2),d(:,:,:,3), &
+    w(:,:,:,1,1),w(:,:,:,2,1),w(:,:,:,3,1),w(:,:,:,1,2),w(:,:,:,2,2),w(:,:,:,3,2), &
+    w(:,:,:,1,3),w(:,:,:,2,3),w(:,:,:,3,3),w(:,:,:,1,4),w(:,:,:,2,4),w(:,:,:,3,4), &
+    w(:,:,:,1,5),w(:,:,:,2,5),w(:,:,:,3,5),w(:,:,:,1,6),w(:,:,:,2,6),w(:,:,:,3,6), &
+    w(:,:,:,1,7),w(:,:,:,2,7),w(:,:,:,3,7),a(:,:,:,1),a(:,:,:,2),a(:,:,:,3),nou,bou,1,4,0,1,1)
+  call enforce()
+  result=xyz+d; iexp=oldexp; isklton=oldsk
+  status=0
+  if (.not.all(ieee_is_finite(result))) status=2
+contains
+  subroutine enforce()
+    integer :: m
+    do m=1,3
+      where(fixed/=0) d(:,:,:,m)=delta(:,:,:,m)
+    end do
+  end subroutine
+  subroutine edge(i1,i2,j1,j2,k1,k2)
+    integer,intent(in) :: i1,i2,j1,j2,k1,k2
+    call tfiedge(ni,nj,nk,d(:,:,:,1),d(:,:,:,2),d(:,:,:,3),i1,i2,j1,j2,k1,k2, &
+                 a(:,:,:,1),a(:,:,:,2),a(:,:,:,3),nou,bou,1,4,0,1)
+  end subroutine
+  subroutine face(i1,i2,j1,j2,k1,k2)
+    integer,intent(in) :: i1,i2,j1,j2,k1,k2
+    call tfiface(ni,nj,nk,d(:,:,:,1),d(:,:,:,2),d(:,:,:,3), &
+      w(:,:,:,1,1),w(:,:,:,2,1),w(:,:,:,3,1),w(:,:,:,1,2),w(:,:,:,2,2),w(:,:,:,3,2), &
+      a(:,:,:,1),a(:,:,:,2),a(:,:,:,3),i1,i2,j1,j2,k1,k2,nou,bou,1,4,0)
+  end subroutine
 end subroutine

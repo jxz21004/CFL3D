@@ -148,3 +148,14 @@ longer accumulates histories across calls in either solve mode;
 diagnostics append to native text files. A single very large call still reserves
 its history in memory, and caller-retained results retain their own arrays.
 Low-level `open_ended=1` remains the cumulative compatibility/test interface.
+
+### Native deformation adapter (API 21)
+
+`CFL3DMeshAdapter` exposes exponential and finite macro-element deformation with
+native TFI for fixed-topology point-matched structured meshes. Omitted physical
+boundaries remain fixed (including symmetry); original moving-boundary tables,
+free/sliding symmetry and ALE time integration are not exposed. Surface targets
+are replicated and the coarse control system is solved on root. Full volume
+interpolation is local; production scaling is not established. The serial native
+extension is required on every MPI rank. Native FMEM nonconvergence/nonfinite
+output becomes an adapter error, not an installed grid or CFD result.

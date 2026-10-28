@@ -1013,3 +1013,40 @@ Renamed the public layout to `cfl3d.mesh.VolumeMeshLayout` in
 `IDWarpAdapter`), and internal checks to `_interface_validation.py`. Updated
 imports, tests and interface documentation; numerical behavior is unchanged.
 Existing callers importing `VolumeLayout` should use `VolumeMeshLayout`.
+
+
+## 2026-10-28: Native deformation adapter (working-tree API 21)
+
+Added `CFL3DMeshAdapter` with both exponential-decay and finite macro-element
+(FMEM) control displacement followed by original arc-length TFI kernels. The
+adapter produces candidate owned volume coordinates for the existing resident
+geometry-update interface, retains no x0, and restores native COMMON controls.
+FMEM nonconvergence returns through an adapter-only guard instead of STOP.
+Coarse controls are gathered on root, surface targets replicated, and volume
+interpolation performed on zone owners. This is a steady fixed-topology adapter;
+sliding symmetry, overset, periodic transforms and unsteady ALE are not exposed.
+
+Validation:
+
+- Serial and MPI Intel builds pass; both extensions now require API 21.
+- Full Python suite: 124 tests, 121 passed and 3 optional HDF5 skips. Log:
+  `/tmp/cfl3d-warper-suite.log`.
+- Both methods preserve prescribed surface coordinates and block interfaces,
+  return unchanged grids for zero motion, and leave input coordinates untouched.
+  Generating and discarding a candidate leaves subsequent resident histories and
+  fields bit-for-bit equal to uninterrupted continuation. Two accepted updates
+  retain one native initialization.
+- Three-rank MPI and four-rank split-communicator tests pass both methods,
+  repeated deformation/continuation and collective invalid-surface rejection.
+  Candidate coordinates match serial within 5e-15 absolute tolerance; histories,
+  fields and wall forces match with rtol=2e-12, atol=5e-14. The initial exact
+  history comparison differed by approximately 2e-15. Logs:
+  `/tmp/cfl3d-warper-mpi-test.log`, `/tmp/cfl3d-warper-split-test.log`.
+- Preprocessed legacy `deform.F` statements are unchanged without `PYTHON_API`,
+  checked with and without `DIST_MPI`.
+
+These small point-matched fixtures do not establish production warping cost,
+all transformed-interface combinations, or equivalence to every standalone
+CFL3D motion-table configuration. Root FMEM and zone-local TFI temporary storage
+remain scalability limitations. Usage and boundary policies are documented in
+`docs/python-wrapper.md`.

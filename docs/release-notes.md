@@ -1,5 +1,13 @@
 # Release notes
 
+## Unreleased — native mesh deformation adapters
+
+Native API 21 adds experimental `CFL3DMeshAdapter` with original exponential
+decay and finite macro-element control solvers plus native TFI. Both paths stage
+coordinates for existing steady resident updates; they do not add unsteady ALE.
+See the [adapter contract](python-wrapper.md#native-cfl3d-deformation-adapter-api-21-experimental)
+for boundary constraints, root control-system storage and rebuild requirements.
+
 ## 0.3.1 — bounded histories and geometry retry
 
 Release date: 2026-10-28. Native interface version: **20**.

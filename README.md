@@ -4,7 +4,7 @@ A Python interface to the NASA CFL3D V6 structured-grid CFD solver, using NumPy
 f2py to call the Fortran core in the same process. The package supports serial
 execution and the native MPI host/worker path.
 
-Python package version: **0.3.1**. Native interface version: **20**.
+Python package version: **0.3.1**. Working-tree native interface version: **21**.
 
 Version 0.3.1 bounds resident history storage across calls and allows retrying
 expected geometry failures while retaining flow. It builds on the surface
@@ -116,7 +116,7 @@ python -c "from cfl3d import _native; print('native API:', _native.py_api_versio
 python -c "from cfl3d._cgns_native import library; print('CGNS has HDF5:', library().has_hdf5)"
 ```
 
-The native API should be `20` for version 0.3.1 (0.3.0 uses `18`; 0.2.0 uses `15`). A `False` HDF5 result still permits CGNS/ADF input;
+The current source checkout requires native API `21` (tagged 0.3.1 uses `20`; 0.3.0 uses `18`; 0.2.0 uses `15`). A `False` HDF5 result still permits CGNS/ADF input;
 CGNS/HDF5 input requires a capable libcgns or h5py.
 
 ### Additional Fortran compiler flags

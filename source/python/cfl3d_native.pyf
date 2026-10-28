@@ -1,5 +1,27 @@
 python module _native
     interface
+        subroutine py_warp_controls(points,graph,displacement,method,parameters,sweeps,n,maxbl,result,status)
+            integer intent(hide),depend(points) :: n=shape(points,0)
+            integer intent(in) :: maxbl,method,sweeps
+            real(kind=8) intent(in),dimension(n,3) :: points,displacement
+            integer intent(in),dimension(n,21) :: graph
+            real(kind=8) intent(in),dimension(4) :: parameters
+            real(kind=8) intent(out),dimension(n,3) :: result
+            integer intent(out) :: status
+        end subroutine py_warp_controls
+        subroutine py_warp_tfi(xyz,delta,fixed,ii,jj,kk,ni,nj,nk,ci,cj,ck,result,status)
+            integer intent(hide),depend(xyz) :: nj=shape(xyz,0),nk=shape(xyz,1),ni=shape(xyz,2)
+            integer intent(hide),depend(ii) :: ci=shape(ii,0)
+            integer intent(hide),depend(jj) :: cj=shape(jj,0)
+            integer intent(hide),depend(kk) :: ck=shape(kk,0)
+            integer intent(in),dimension(ci) :: ii
+            integer intent(in),dimension(cj) :: jj
+            integer intent(in),dimension(ck) :: kk
+            integer intent(in),dimension(nj,nk,ni) :: fixed
+            real(kind=8) intent(in),dimension(nj,nk,ni,3) :: xyz,delta
+            real(kind=8) intent(out),dimension(nj,nk,ni,3) :: result
+            integer intent(out) :: status
+        end subroutine py_warp_tfi
         ! open_ended: 0 bounded, 1 cumulative compatibility, 2 chunk history (public).
         subroutine py_start_resident(cycles,open_ended,status)
             integer intent(in) :: cycles

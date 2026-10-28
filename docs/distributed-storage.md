@@ -487,3 +487,19 @@ PYTHONPATH=tests/python mpirun -np 3 python tests/python/validate_distributed_mp
 The checkpoint/output-streaming stage kept native API 12. The resident prototype
 now requires rebuilding for API 16 as described above. Result NPZ member order is
 not an interface guarantee; existing array names and values remain compatible.
+
+## Optional native mesh deformation (API 21)
+
+`CFL3DMeshAdapter` provides exponential decay and finite macro-element (FMEM)
+control displacement, followed by native arc-length TFI. It returns candidate
+owned volume coordinates; `setVolumeCoordinates()` and `solve()` perform the
+existing geometry refresh and validity checks. Calling the adapter does not
+advance or overwrite the resident flow. It retains no reference volume grid.
+
+This opt-in adapter gathers coarse controls on root and replicates prescribed
+surface coordinates. TFI runs on each zone owner with temporary zone-sized
+workspace; full volume coordinates are not gathered. The coarse FMEM system is
+currently serial and can limit scalability. Both native extensions must be built
+for MPI usage because deformation kernels use the serial extension on each rank.
+This is steady fixed-topology deformation, not an unsteady ALE interface. See
+[adapter usage and restrictions](python-wrapper.md#native-cfl3d-deformation-adapter-api-21-experimental).
