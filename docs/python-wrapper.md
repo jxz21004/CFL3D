@@ -1,6 +1,6 @@
 # Python interface reference
 
-This document describes Python package **0.3.1**, native interface version **21**.
+This document describes Python package **0.3.2**, native interface version **21**.
 Sections marked "after 0.2.0" are included in 0.3.0 but absent from the `v0.2.0`
 tag. Experimental features retain their documented limitations.
 For the project motivation, requirements, and build commands, see the

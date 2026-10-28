@@ -4,12 +4,15 @@ A Python interface to the NASA CFL3D V6 structured-grid CFD solver, using NumPy
 f2py to call the Fortran core in the same process. The package supports serial
 execution and the native MPI host/worker path.
 
-Python package version: **0.3.1**. Working-tree native interface version: **21**.
+Python package version: **0.3.2**. Native interface version: **21**.
 
-Version 0.3.1 bounds resident history storage across calls and allows retrying
-expected geometry failures while retaining flow. It builds on the surface
-coupling, IDWarp exchange and experimental resident geometry updates in 0.3.0. See the [release notes](docs/release-notes.md) for its
-scope, validation evidence, and known limitations.
+Version 0.3.2 adds an experimental native mesh deformation adapter alongside
+IDWarp: exponential decay and finite macro-element (FMEM) methods with native
+TFI. Both return candidate volume coordinates for steady resident geometry
+updates while retaining the flow. Reference coordinates (`x0`) remain optional
+and caller-managed. See the [adapter examples](docs/python-wrapper.md#native-cfl3d-deformation-adapter-api-21-experimental)
+and [release notes](docs/release-notes.md) for usage, validation and limitations.
+Rebuild both native extensions when upgrading and restart Python/MPI processes.
 
 ## Why modernize the CFL3D interface?
 
@@ -116,7 +119,7 @@ python -c "from cfl3d import _native; print('native API:', _native.py_api_versio
 python -c "from cfl3d._cgns_native import library; print('CGNS has HDF5:', library().has_hdf5)"
 ```
 
-The current source checkout requires native API `21` (tagged 0.3.1 uses `20`; 0.3.0 uses `18`; 0.2.0 uses `15`). A `False` HDF5 result still permits CGNS/ADF input;
+Version 0.3.2 requires native API `21` (0.3.1 uses `20`; 0.3.0 uses `18`; 0.2.0 uses `15`). A `False` HDF5 result still permits CGNS/ADF input;
 CGNS/HDF5 input requires a capable libcgns or h5py.
 
 ### Additional Fortran compiler flags

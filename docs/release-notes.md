@@ -1,12 +1,44 @@
 # Release notes
 
-## Unreleased — native mesh deformation adapters
+## 0.3.2 — native mesh deformation adapters
 
-Native API 21 adds experimental `CFL3DMeshAdapter` with original exponential
-decay and finite macro-element control solvers plus native TFI. Both paths stage
-coordinates for existing steady resident updates; they do not add unsteady ALE.
-See the [adapter contract](python-wrapper.md#native-cfl3d-deformation-adapter-api-21-experimental)
-for boundary constraints, root control-system storage and rebuild requirements.
+Release date: 2026-10-28. Native interface version: **21**.
+
+- Added experimental `CFL3DMeshAdapter` with both exponential decay and finite
+  macro-element (FMEM) control solvers, followed by original arc-length TFI.
+  IDWarp is not required for these methods.
+- `warp(surface)` returns candidate owned volume coordinates without changing
+  the accepted mesh or resident flow. Apply them with `setVolumeCoordinates()`
+  and `solve()` to run the existing geometry refresh and validity checks.
+  No reference volume grid is retained automatically.
+- Native adapter calls restore shared control settings. Handled FMEM
+  nonconvergence returns an adapter error collectively instead of invoking the
+  legacy STOP. The ordinary CFD iteration path is unchanged.
+- Mesh modules now use `volume_layout.py`, `adapter_idwarp.py` and
+  `adapter_cfl3d.py`. **Import change:** use `VolumeMeshLayout` instead of
+  `VolumeLayout`; IDWarp's class remains `IDWarpAdapter`.
+
+This release supports steady fixed-topology, point-matched deformation. It does
+not expose unsteady ALE, sliding symmetry, overset or periodic transforms.
+Unspecified physical surface points remain fixed. Control solving occurs on
+root and surface targets are replicated; TFI is zone-local. Production-scale
+warping performance remains unmeasured. See the
+[adapter contract](python-wrapper.md#native-cfl3d-deformation-adapter-api-21-experimental).
+
+Upgrade: rebuild **both** extensions and restart Python/MPI processes. The serial
+extension is required on every MPI rank for native deformation; API 20 binaries
+are incompatible with this Python interface.
+
+```bash
+python tools/build_python.py --jobs 8
+python tools/build_python.py --mpi --jobs 8
+```
+
+Validation: 124 tests, 121 passing and 3 optional HDF5 skips. Both methods pass
+three-rank and split four-rank MPI checks, repeated deformation and resident
+continuation. Generating and discarding a candidate preserves subsequent flow
+and histories bit for bit. See [MPI_PROGRESS.md](../MPI_PROGRESS.md) for numerical
+tolerances, coverage and remaining limits.
 
 ## 0.3.1 — bounded histories and geometry retry
 

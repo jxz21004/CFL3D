@@ -1050,3 +1050,11 @@ all transformed-interface combinations, or equivalence to every standalone
 CFL3D motion-table configuration. Root FMEM and zone-local TFI temporary storage
 remain scalability limitations. Usage and boundary policies are documented in
 `docs/python-wrapper.md`.
+
+
+## 2026-10-28: Version 0.3.2
+
+Updated package metadata, README, interface reference and release notes to
+0.3.2 / native API 21. Release documentation includes both native deformation
+methods, mesh import changes, rebuild instructions and scalability limits.
+Numerical validation is recorded in the preceding entry.
