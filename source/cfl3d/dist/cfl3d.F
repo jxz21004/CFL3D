@@ -405,11 +405,22 @@ c
 c        These routines have returned, so no live explicit-shape history
 c        dummy still refers to old storage. Grow histories before re-entry;
 c        the native grid/work/hierarchy allocations are never resized here.
-         if (sum(py_stages(1,:)).gt.ncycmax) then
+         py_history_keep=0
+         if (py_history_bounded.and..not.py_resident_closing) then
+            py_history_keep=py_resident_done-py_history_base
+            py_history_first=2
+         end if
+         if ((.not.py_history_bounded.and.
+     .       sum(py_stages(1,:)).gt.ncycmax).or.
+     .       py_history_keep.gt.0) then
             py_old_capacity=ncycmax
             py_capacity=sum(py_stages(1,:))
-            if (ncycmax.le.huge(ncycmax)/2)
+            if (py_history_keep.gt.0)
+     .          py_capacity=py_resident_stop-py_resident_done+1
+            if (.not.py_history_bounded.and.
+     .          ncycmax.le.huge(ncycmax)/2)
      .          py_capacity=max(py_capacity,2*ncycmax)
+            py_capacity=max(py_capacity,ncycmax)
             call py_grow_history(rms,py_capacity)
             call py_grow_history(clw,py_capacity)
             call py_grow_history(cdw,py_capacity)
@@ -437,6 +448,8 @@ c           Update the caller's saved capacity as well as re-entry shapes.
             memuse=memuse+(ncycmax-py_old_capacity)*
      .             (19+2*n_clcd+3*nmds*maxaes)*8
          end if
+         if (py_history_keep.gt.0)
+     .       py_history_base=py_resident_done-1
          go to 9102
       end if
 #endif
@@ -1167,19 +1180,23 @@ c     reduced surface rows here would count them again on MPI ranks.
 #endif
       end do
       py_nhistory = min(ncycmax,sum(py_stages(1,:)))
-      if (py_resident_enabled) py_nhistory=py_resident_done
+      if (py_resident_enabled)
+     .    py_nhistory=py_resident_done-py_history_base
+      py_b=1
+      if (py_history_bounded) py_b=py_history_first
+      py_nhistory=py_nhistory-py_b+1
       if (allocated(py_history)) deallocate(py_history)
       allocate(py_history(py_nhistory,8))
       py_history = 0
       if (myid.eq.myhost) then
-      py_history(:,1) = rms(1:py_nhistory)
-      py_history(:,2) = clw(1:py_nhistory)
-      py_history(:,3) = cdw(1:py_nhistory)
-      py_history(:,4) = cxw(1:py_nhistory)
-      py_history(:,5) = cyw(1:py_nhistory)
-      py_history(:,6) = cmxw(1:py_nhistory)
-      py_history(:,7) = cmyw(1:py_nhistory)
-      py_history(:,8) = cmzw(1:py_nhistory)
+      py_history(:,1) = rms(py_b:py_b+py_nhistory-1)
+      py_history(:,2) = clw(py_b:py_b+py_nhistory-1)
+      py_history(:,3) = cdw(py_b:py_b+py_nhistory-1)
+      py_history(:,4) = cxw(py_b:py_b+py_nhistory-1)
+      py_history(:,5) = cyw(py_b:py_b+py_nhistory-1)
+      py_history(:,6) = cmxw(py_b:py_b+py_nhistory-1)
+      py_history(:,7) = cmyw(py_b:py_b+py_nhistory-1)
+      py_history(:,8) = cmzw(py_b:py_b+py_nhistory-1)
       end if
       call py_collect_results()
       if (py_resident_paused) return

@@ -78,7 +78,7 @@ class ResidentContext:
                         raise RuntimeError(f"Native resident configuration failed ({status})")
                     native.py_set_coordinates(xyz)
                     native.py_set_output_names(stem, int(append), offset)
-                    if native.py_start_resident(requested, 1):
+                    if native.py_start_resident(requested, 2):
                         raise RuntimeError("Native resident start rejected this configuration")
                     self.started = True
                 solver._checked(configure)
@@ -114,14 +114,12 @@ class ResidentContext:
             def check_status():
                 if status:
                     raise RuntimeError(f"CFL3D resident advance failed ({status}); inspect {directory / (stem+'.error')}")
-                if rows != self.cycles+requested:
+                if rows != requested or self.info()["cycles"] != self.cycles+requested:
                     raise RuntimeError("Resident advance stopped before the requested cycle boundary")
             solver._checked(check_status)
-            previous_cycles = self.cycles
-            self.cycles = rows
+            self.cycles += rows
             values = solver._checked(lambda: solver._read_native_result(native, self.arrays, rows))
             values = list(values)
-            values[1] = values[1][previous_cycles:].copy()
             if solver.comm is not None and solver.comm.rank != 0:
                 self._worker_artifacts.add((directory, stem))
             else:

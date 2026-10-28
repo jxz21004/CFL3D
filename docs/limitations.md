@@ -137,3 +137,14 @@ passes. It is recorded here as a resolved regression, not an outstanding defect.
 
 Future findings should record the trigger, affected configuration, reproduction,
 workaround, and verification status before being treated as confirmed defects.
+
+### Resident history storage (native API 19)
+
+Public resident continuation retains the current chunk and one previous row,
+with capacity bounded by the largest chunk or initial startup allocation. Total
+iteration counters, CFL ramp and lift-control state are not reset. Python no
+longer accumulates histories across calls in either solve mode;
+`cumulative_history` is a compatibility alias for current-chunk history. Full
+diagnostics append to native text files. A single very large call still reserves
+its history in memory, and caller-retained results retain their own arrays.
+Low-level `open_ended=1` remains the cumulative compatibility/test interface.

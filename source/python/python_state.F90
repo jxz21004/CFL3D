@@ -35,6 +35,11 @@ module cfl3d_python_state
   integer, allocatable :: py_geometry_offsets(:)
   real(8), allocatable :: py_geometry_xyz(:,:)
   integer :: py_resident_stop=0,py_resident_done=0
+  ! Global cycle counters never change when old diagnostic rows are discarded.
+  ! Array slot = global cycle - base; slot 1 retains the preceding CL for iipv.
+  ! keep is the old last-row slot, consumed by the owning driver on re-entry.
+  integer :: py_history_base=0,py_history_keep=0,py_history_first=1
+  logical :: py_history_bounded=.false.
   integer :: py_resident_written=0
   integer :: py_resident_initializations=0,py_resident_capacity=0
   integer(kind=8) :: py_resident_work_bytes=0
@@ -43,35 +48,42 @@ module cfl3d_python_state
     module procedure py_grow_history_1,py_grow_history_2,py_grow_history_3,py_grow_history_4,py_grow_history_int
   end interface
 contains
+  integer function py_history_index(n) result(i)
+    integer, intent(in) :: n
+    i=n-py_history_base
+  end function
   subroutine py_write_resident_history(capacity,nummem,rms,cl,cd,cx,cy,cz,cmx,cmy,cmz,turres,nneg)
     integer, intent(in) :: capacity,nummem,nneg(capacity,nummem)
     real(8), intent(in) :: rms(capacity),cl(capacity),cd(capacity),cx(capacity),cy(capacity),cz(capacity)
     real(8), intent(in) :: cmx(capacity),cmy(capacity),cmz(capacity),turres(capacity,nummem)
-    integer :: n,l
+    integer :: n,l,i
     ! Standalone histout runs only at final cleanup and can modify zero RMS
     ! entries. Emit completed rows at each resident boundary without changing
     ! authoritative histories or writing them a second time at close.
     write(12,'(a)') '# it log(res) CL CD CX CY CZ Cmx Cmy Cmz'
     write(13,'(a)') '# it log(turbulence residuals...) negative-counts...'
     do n=py_resident_written+1,py_resident_done
-      write(12,'(i12,9es16.8)') n+py_iteration_offset,log10(merge(rms(n),1.d0,rms(n)>0.d0)), &
-                               cl(n),cd(n),cx(n),cy(n),cz(n),cmx(n),cmy(n),cmz(n)
+      i=py_history_index(n)
+      write(12,'(i12,9es16.8)') n+py_iteration_offset,log10(merge(rms(i),1.d0,rms(i)>0.d0)), &
+                               cl(i),cd(i),cx(i),cy(i),cz(i),cmx(i),cmy(i),cmz(i)
       if (maxval(py_blocks(5:7,:)) > 2) then
         write(13,'(i12,*(es16.8,1x))',advance='no') n+py_iteration_offset, &
-                         (log10(merge(turres(n,l),1.d0,turres(n,l)>0.d0)),l=1,nummem)
-        write(13,'(1x,*(i12,1x))') (nneg(n,l),l=1,nummem)
+                         (log10(merge(turres(i,l),1.d0,turres(i,l)>0.d0)),l=1,nummem)
+        write(13,'(1x,*(i12,1x))') (nneg(i,l),l=1,nummem)
       end if
     end do
     py_resident_written=py_resident_done
   end subroutine
 
-  ! Only iteration histories grow. Geometry, native work arrays and the MG
+  ! Histories compact at public call boundaries, growing only for larger chunks.
+  ! Low-level compatibility sessions retain cumulative rows. Geometry and the MG
   ! hierarchy keep their addresses and contents across an extension. Move one
   ! history at a time to bound temporary memory to the largest history array.
   subroutine py_grow_history_1(values,capacity)
     real(8), allocatable, intent(inout) :: values(:)
     integer, intent(in) :: capacity
     real(8), allocatable :: grown(:)
+    if (py_history_keep > 0) values(1)=values(py_history_keep)
     if (size(values) >= capacity) return
     allocate(grown(capacity)); grown=0.d0
     grown(:size(values))=values
@@ -82,6 +94,7 @@ contains
     real(8), allocatable, intent(inout) :: values(:,:)
     integer, intent(in) :: capacity
     real(8), allocatable :: grown(:,:)
+    if (py_history_keep > 0) values(1,:)=values(py_history_keep,:)
     if (size(values,1) >= capacity) return
     allocate(grown(capacity,size(values,2))); grown=0.d0
     grown(:size(values,1),:)=values
@@ -92,6 +105,7 @@ contains
     integer, allocatable, intent(inout) :: values(:,:)
     integer, intent(in) :: capacity
     integer, allocatable :: grown(:,:)
+    if (py_history_keep > 0) values(1,:)=values(py_history_keep,:)
     if (size(values,1) >= capacity) return
     allocate(grown(capacity,size(values,2))); grown=0
     grown(:size(values,1),:)=values
@@ -102,6 +116,7 @@ contains
     real(8), allocatable, intent(inout) :: values(:,:,:)
     integer, intent(in) :: capacity
     real(8), allocatable :: grown(:,:,:)
+    if (py_history_keep > 0) values(:,:,1)=values(:,:,py_history_keep)
     if (size(values,3) >= capacity) return
     allocate(grown(size(values,1),size(values,2),capacity)); grown=0.d0
     grown(:,:,:size(values,3))=values
@@ -112,6 +127,7 @@ contains
     real(8), allocatable, intent(inout) :: values(:,:,:,:)
     integer, intent(in) :: capacity
     real(8), allocatable :: grown(:,:,:,:)
+    if (py_history_keep > 0) values(1,:,:,:)=values(py_history_keep,:,:,:)
     if (size(values,1) >= capacity) return
     allocate(grown(capacity,size(values,2),size(values,3),size(values,4))); grown=0.d0
     grown(:size(values,1),:,:,:)=values
@@ -339,7 +355,7 @@ end module
 subroutine py_api_version(version)
   implicit none
   integer, intent(out) :: version
-  version=18
+  version=19
 end subroutine
 
 subroutine py_set_restart_controls(override_alpha)
@@ -399,10 +415,10 @@ subroutine py_get_force_angles(angles)
 end subroutine
 
 subroutine py_set_output_flags(write_restart)
-  use cfl3d_python_state, only: py_write_restart
+  use cfl3d_python_state, only: py_write_restart, py_history_bounded, py_resident_enabled
   implicit none
   integer, intent(in) :: write_restart
-  py_write_restart=write_restart /= 0
+  py_write_restart=write_restart /= 0 .and. .not.(py_history_bounded .and. py_resident_enabled)
 end subroutine
 
 subroutine py_get_wall_data(values,ncells)
@@ -577,6 +593,8 @@ subroutine py_configure(dims,counts,bcs,bcdata,blocks,connections,flow,reference
     p=p+product(dims(:,g)); c=c+product(dims(:,g)-1)
   end do
   if (p-1 /= npoints .or. c-1 /= ncells) status=2
+  py_history_base=0; py_history_keep=0; py_history_first=1
+  py_history_bounded=.false.
   py_status=0; py_nhistory=0
   py_geometry_failed=0; py_geometry_failed=0
 end subroutine
@@ -633,9 +651,11 @@ subroutine py_start_resident(cycles,open_ended,status)
   if (total > int(huge(cycles),kind=8)) return
   startup=int(total)-py_stages(1,last)
   if (cycles <= startup) return
-  if (open_ended /= 0 .and. open_ended /= 1) return
+  if (open_ended < 0 .or. open_ended > 2) return
   if (open_ended == 0 .and. cycles > int(total)) return
-  py_resident_open_ended=(open_ended == 1)
+  py_resident_open_ended=(open_ended /= 0)
+  py_history_bounded=(open_ended == 2)
+  py_history_base=0; py_history_keep=0; py_history_first=1
   if (py_resident_open_ended) py_stages(1,last)=max(py_stages(1,last),cycles-startup)
   py_resident_enabled=.true.; py_resident_paused=.false.
   py_resident_output_changed=.false.

@@ -83,6 +83,8 @@ def run(comm,root,model,coarse_startup=False):
                     info = solver.getRuntimeInfo()
                     assert (info['cycles'],info['initializations'],info['input_coordinate_values']) == (total+startup,1,0)
                     assert (info['startup_cycles'],info['fine_cycles']) == (startup,total)
+                    assert info['history_capacity'] <= max(startup+2, steps+1, 8)
+                    assert len(result.cumulative_history) == len(result.history)
                     assert solver._resident_context.comm.py2f() == borrowed
                     assert prepare.call_count == 1
                     if comm.size == 3:

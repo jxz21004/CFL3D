@@ -1,3 +1,8 @@
+#ifdef PYTHON_API
+#define HIDX(n) (n-py_history_base)
+#else
+#define HIDX(n) n
+#endif
 c  ---------------------------------------------------------------------------
 c  CFL3D is a structured-grid, cell-centered, upwind-biased, Reynolds-averaged
 c  Navier-Stokes (RANS) code. It can be run in parallel on multiple grid zones
@@ -44,6 +49,7 @@ c
      .                bou,nbuf,ibufdim,ncycmax,maxcs,thetay,iadvance,
      .                idefrm,igridg,nummem)
 #ifdef PYTHON_API
+      use cfl3d_python_state, only: py_history_base
       use cfl3d_python_state, only: py_iteration_offset
 #endif
 #ifdef PYTHON_API
@@ -259,12 +265,12 @@ c
          if (myid.eq.myhost .and. iadvance(nbl).ge.0) then
             rmssum    = 0.
             if(nptsr.gt.0)
-     .      rmssum = rms(ntt)*rms(ntt)*float(nptsr)
+     .      rmssum = rms(HIDX(ntt))*rms(HIDX(ntt))*float(nptsr)
             t1    = float((jdim-1)*(kdim-1)*(idim-1))
             rmst  = sqrt(resd/t1)
             nptsr = nptsr + (jdim-1)*(kdim-1)*(idim-1)
             rmssum       = rmssum + resd
-            rms(ntt)    = sqrt(rmssum/float(nptsr))
+            rms(HIDX(ntt))    = sqrt(rmssum/float(nptsr))
          end if
 c
 c        turbulence residual
@@ -296,13 +302,13 @@ c
                rmstx  = 0.
                if (nptsr.gt.0) then
                   nptsr = nptsr - jdim1*kdim1*idim1
-                  rmstx = rmstr(nres,l)*rmstr(nres,l)*float(nptsr)
+                  rmstx = rmstr(HIDX(nres),l)*rmstr(HIDX(nres),l)*float(nptsr)
                end if
                nptsr        = nptsr + jdim1*kdim1*idim1
                rmstx        = rmstx
      .                      + sumn(l)*sumn(l)*float(jdim1*kdim1*idim1)
-               rmstr(nres,l) = sqrt(  rmstx / float( nptsr) )
-               nneg(nres,l)  = nneg(nres,l) + negn(l)
+               rmstr(HIDX(nres),l) = sqrt(  rmstx / float( nptsr) )
+               nneg(HIDX(nres),l)  = nneg(HIDX(nres),l) + negn(l)
               enddo
             end if
          end if
@@ -397,25 +403,25 @@ c           sum contributions of blocks on global level
 c
             if (myid.eq.myhost) then
                if (level.eq.lglobal) then
-                  chdw(nres)  = chdw(nres)  + chd
-                  swetw(nres) = swetw(nres) + swett(nbl)
-                  clw(nres)   = clw(nres)   + clt(nbl)
-                  cmyw(nres)  = cmyw(nres)  + cmyt(nbl)
-                  cdw(nres)   = cdw(nres)   + cdt(nbl)
-                  cmxw(nres)  = cmxw(nres)  + cmxt(nbl)
-                  cmzw(nres)  = cmzw(nres)  + cmzt(nbl)
-                  czw(nres)   = czw(nres)   + czt(nbl)
-                  cyw(nres)   = cyw(nres)   + cyt(nbl)
-                  cxw(nres)   = cxw(nres)   + cxt(nbl)
-                  cdpw(nres)  = cdpw(nres)  + cdpt(nbl)
-                  cdvw(nres)  = cdvw(nres)  + cdvt(nbl)
+                  chdw(HIDX(nres))  = chdw(HIDX(nres))  + chd
+                  swetw(HIDX(nres)) = swetw(HIDX(nres)) + swett(nbl)
+                  clw(HIDX(nres))   = clw(HIDX(nres))   + clt(nbl)
+                  cmyw(HIDX(nres))  = cmyw(HIDX(nres))  + cmyt(nbl)
+                  cdw(HIDX(nres))   = cdw(HIDX(nres))   + cdt(nbl)
+                  cmxw(HIDX(nres))  = cmxw(HIDX(nres))  + cmxt(nbl)
+                  cmzw(HIDX(nres))  = cmzw(HIDX(nres))  + cmzt(nbl)
+                  czw(HIDX(nres))   = czw(HIDX(nres))   + czt(nbl)
+                  cyw(HIDX(nres))   = cyw(HIDX(nres))   + cyt(nbl)
+                  cxw(HIDX(nres))   = cxw(HIDX(nres))   + cxt(nbl)
+                  cdpw(HIDX(nres))  = cdpw(HIDX(nres))  + cdpt(nbl)
+                  cdvw(HIDX(nres))  = cdvw(HIDX(nres))  + cdvt(nbl)
 
                   if (iclcd .eq. 1 .or. iclcd .eq. 2) then
                      do nb = 1, nblocks_clcd
                         if (igridg(nbl) .eq. blocks_clcd(2,nb)) then
                            nn = blocks_clcd(1,nb)
-                           clcd(1,nn,nres) = clcd(1,nn,nres) + clt(nbl)
-                           clcd(2,nn,nres) = clcd(2,nn,nres) + cdt(nbl)
+                           clcd(1,nn,HIDX(nres)) = clcd(1,nn,HIDX(nres)) + clt(nbl)
+                           clcd(2,nn,HIDX(nres)) = clcd(2,nn,HIDX(nres)) + cdt(nbl)
                         end if
                      end do
                   end if
@@ -636,11 +642,11 @@ c
 c
 c                    store selected totals for convergence history
 c
-                     fmdotw(nres)  = fmdot(ncs+1)
-                     cftmomw(nres) = cftmom(ncs+1)
-                     cftpw(nres)   = cftp(ncs+1)
-                     cftvw(nres)   = cftv(ncs+1)
-                     cfttotw(nres) = cfttot(ncs+1)
+                     fmdotw(HIDX(nres))  = fmdot(ncs+1)
+                     cftmomw(HIDX(nres)) = cftmom(ncs+1)
+                     cftpw(HIDX(nres))   = cftp(ncs+1)
+                     cftvw(HIDX(nres))   = cftv(ncs+1)
+                     cfttotw(HIDX(nres)) = cfttot(ncs+1)
                   end if
                end do
             end if
@@ -672,12 +678,12 @@ c
             if (iflag.gt.0) then
                if (ialph .ne. 0) then
                   write(11,2000) level,nbl,nres+ioffset,real(rmst),
-     .            real(rms(nres)),real(clw(nres)),real(cdw(nres)),
-     .            real(czw(nres))
+     .            real(rms(HIDX(nres))),real(clw(HIDX(nres))),real(cdw(HIDX(nres))),
+     .            real(czw(HIDX(nres)))
                else
                   write(11,2000) level,nbl,nres+ioffset,real(rmst),
-     .            real(rms(nres)),real(clw(nres)),real(cdw(nres)),
-     .            real(cyw(nres))
+     .            real(rms(HIDX(nres))),real(clw(HIDX(nres))),real(cdw(HIDX(nres))),
+     .            real(cyw(HIDX(nres)))
                end if
             end if
          end if
@@ -728,23 +734,23 @@ c
                if (iunst .eq. 0) then
                   if (ialph .ne. 0) then
                      write(11,2000) level,nbl,nres+ioffset,real(rmst),
-     .               real(rms(nres)),real(clw(nres)),real(cdw(nres)),
-     .               real(czw(nres))
+     .               real(rms(HIDX(nres))),real(clw(HIDX(nres))),real(cdw(HIDX(nres))),
+     .               real(czw(HIDX(nres)))
                   else
                      write(11,2000) level,nbl,nres+ioffset,real(rmst),
-     .               real(rms(nres)),real(clw(nres)),real(cdw(nres)),
-     .               real(cyw(nres))
+     .               real(rms(HIDX(nres))),real(clw(HIDX(nres))),real(cdw(HIDX(nres))),
+     .               real(cyw(HIDX(nres)))
                   end if
                else
                   alot = (alpha+thetay(nbl))*radtodeg
                   if (ialph .ne. 0) then
                      write(11,2000) level,nbl,nres+ioffset,real(rmst),
-     .               real(rms(nres)),real(clw(nres)),real(cdw(nres)),
-     .               real(czw(nres)),real(time),real(alot)
+     .               real(rms(HIDX(nres))),real(clw(HIDX(nres))),real(cdw(HIDX(nres))),
+     .               real(czw(HIDX(nres))),real(time),real(alot)
                   else
                      write(11,2000) level,nbl,nres+ioffset,real(rmst),
-     .               real(rms(nres)),real(clw(nres)),real(cdw(nres)),
-     .               real(cyw(nres)),real(time),real(alot)
+     .               real(rms(HIDX(nres))),real(clw(HIDX(nres))),real(cdw(HIDX(nres))),
+     .               real(cyw(HIDX(nres))),real(time),real(alot)
                   end if
                end if
             end if

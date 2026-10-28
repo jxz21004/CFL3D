@@ -1,3 +1,8 @@
+#ifdef PYTHON_API
+#define HIDX(n) (n-py_history_base)
+#else
+#define HIDX(n) n
+#endif
 c  ---------------------------------------------------------------------------
 c  CFL3D is a structured-grid, cell-centered, upwind-biased, Reynolds-averaged
 c  Navier-Stokes (RANS) code. It can be run in parallel on multiple grid zones
@@ -74,6 +79,7 @@ c
      .                zorgae0,icouple,nblelst,iskmax,jskmax,kskmax,ue,
      .                irdrea)
 #ifdef PYTHON_API
+      use cfl3d_python_state, only: py_history_base
       use cfl3d_python_state
 #endif
 #   ifdef CMPLX
@@ -301,6 +307,7 @@ c        Match the caller's grown history capacity before entering mgblk.
          memuse=memuse+(ncycmax-size(rmstr,1))*nummem*12
          call py_grow_history(rmstr,ncycmax)
          call py_grow_history(nneg,ncycmax)
+         py_history_keep=0
          go to 9103
       end if
 #endif
@@ -1115,7 +1122,7 @@ c
                call termn8(myid,-1,ibufdim,nbuf,bou,nou)
             end if
             call yplusout(iseq,lw,lw2,work,nstart,work(nstart+1),nwork,
-     .                    clw(nttuse),maxbl,maxgr,maxseg,nblock,
+     .                    clw(HIDX(nttuse)),maxbl,maxgr,maxseg,nblock,
      .                    lwdat,levelg,igridg,jdimg,kdimg,idimg,
      .                    nbci0,nbcj0,nbck0,nbcidim,nbcjdim,
      .                    nbckdim,bcfilei,bcfilej,bcfilek,

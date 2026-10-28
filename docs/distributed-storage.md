@@ -1,5 +1,10 @@
 # Distributed storage migration
 
+Native API 19 bounds public resident history storage by the largest call/startup
+budget, retaining one preceding row for numerical use. Python results contain
+only the current call's history; full diagnostics remain in native text files.
+Global iteration counters and the multigrid workspace are preserved.
+
 Native API 18 retains coarse-to-fine startup and resident advancement, supports experimental owned-coordinate updates with native geometry refresh, and returns expected update failures collectively. See [resident coordinate updates](python-wrapper.md#resident-coordinate-updates-experimental-native-api-18).
 It builds on API 14's growable histories, API 12's persistent coordinate/wall
 distribution and API 11's mean-flow/restart migration. Default `resident=False`
@@ -218,7 +223,7 @@ startup. The remaining design targets
 above must not be interpreted as completed features. Public usage is described
 in the [interface reference](python-wrapper.md#resident-calculation-chunks).
 
-### Native resident driver (API 16)
+### Native resident driver (API 16; chunk history added in API 19)
 
 `py_start_resident(cycles)` opts into a bounded native session after ordinary
 configuration. The configured stage counts reserve total history capacity. For
@@ -231,6 +236,13 @@ positive value applies a new CFL. `py_close_resident()` releases an unfinished
 context without advancing another cycle. Finishing the reserved schedule also
 performs cleanup. This bounded behavior remains the default.
 
+Public calls now select `py_start_resident(cycles, open_ended=2)`. In this mode,
+returned `nrows` counts only the current call, while `py_resident_info().cycles`
+remains cumulative. History slots are reused at each advance boundary, retaining
+the previous row for numerical boundary conditions; global counters used by trim
+and startup controls are unchanged. Native restart export remains disabled for
+this public mode. The mode-1 description below is retained for compatibility.
+
 `py_start_resident(cycles, open_ended=1)` instead keeps the context paused even at
 the end of the configured schedule. Subsequent advances can exceed that initial
 budget. History capacity grows geometrically when necessary, before re-entering
@@ -241,8 +253,9 @@ metric data and native multigrid work arrays are retained. Cleanup now requires
 an explicit `py_close_resident()`, including after the last desired advance.
 Default-integer cycle overflow is rejected before changing the context.
 
-Histories still store every completed cycle: their memory is O(total cycles), not
-constant. Growth temporarily holds one old and replacement history array at a
+The low-level `open_ended=1` compatibility mode still stores every completed
+cycle: its history memory is O(total cycles). Public `resident=True` uses API 19
+`open_ended=2`, which reuses chunk storage and retains only the preceding row. Growth temporarily holds one old and replacement history array at a
 time, and readout copies retain the existing cumulative-history semantics. This
 removes the need to reserve the final iteration budget; it does not establish
 unlimited memory or production-case RSS scaling. These functions remain low-level
@@ -294,7 +307,8 @@ Current prototype boundaries:
   not yet supported by the resident start entry point.
 - Bounded mode rejects advances beyond its reserved schedule. Open-ended mode
   grows histories and requires explicit close; integer-counter and available-memory
-  limits still apply. History pruning/ring buffers are not implemented.
+  limits still apply. API 19 public calls reuse history storage at call boundaries; the low-level
+  compatibility mode still retains cumulative histories.
 - API 16 exposed only CFL/chunk-length changes. API 18 additionally supports
   explicit fixed-topology coordinate updates and collective geometry failure returns. Fixed-control tests retain startup
   order and CFL-ramp state. Changed-CFL tests currently use disabled ramps; this
@@ -313,7 +327,7 @@ Current prototype boundaries:
   initialize a new context. Arbitrary live updates remain future work.
 - `resident` defaults to False. Updating builds alone does not opt into this path.
 
-Both extensions must be rebuilt for API 18 and existing Python processes restarted:
+Both extensions must be rebuilt for API 19 and existing Python processes restarted:
 
 ```bash
 python tools/build_python.py --jobs 8

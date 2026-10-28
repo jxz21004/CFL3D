@@ -1,3 +1,8 @@
+#ifdef PYTHON_API
+#define HIDX(n) (n-py_history_base)
+#else
+#define HIDX(n) n
+#endif
 c  ---------------------------------------------------------------------------
 c  CFL3D is a structured-grid, cell-centered, upwind-biased, Reynolds-averaged
 c  Navier-Stokes (RANS) code. It can be run in parallel on multiple grid zones
@@ -73,6 +78,7 @@ c
      .                 timekeep,xorgae0,yorgae0,zorgae0,icouple,
      .                 iprnsurf,nblelst,iskmax,jskmax,kskmax,ue,nummem)
 #ifdef PYTHON_API
+      use cfl3d_python_state, only: py_history_base
       use cfl3d_python_state
 #endif
 c
@@ -785,9 +791,9 @@ c
             xorgrb = xorig(nblstag)
             yorgrb = yorig(nblstag)
             zorgrb = zorig(nblstag)
-            call MPI_Bcast(clw(ntt),1,MY_MPI_REAL,myhost,
+            call MPI_Bcast(clw(HIDX(ntt)),1,MY_MPI_REAL,myhost,
      .                     mycomm,ierr)
-            call MPI_Bcast(cmyw(ntt),1,MY_MPI_REAL,myhost,
+            call MPI_Bcast(cmyw(HIDX(ntt)),1,MY_MPI_REAL,myhost,
      .                     mycomm,ierr)
          end if
 #endif
@@ -797,7 +803,7 @@ c    particular processor; all blocks at this level
 c    are assumed to have the same value of thetay.
 c
          call ae_pred(aesrfdat,stm,stmi,gforcn,gforcnm,xs,xxn,
-     .                x0,perturb,cmyw(ntt),clw(ntt),xorgrb,yorgrb,
+     .                x0,perturb,cmyw(HIDX(ntt)),clw(HIDX(ntt)),xorgrb,yorgrb,
      .                zorgrb,nmds,maxaes,irbtrim,maxbl,myid)
 c
 c        rigid body trim predictor step
@@ -1103,27 +1109,27 @@ c
          if ((real(dt).lt.0. .and. nt.eq.1) .or.
      .       (real(dt).ge.0. .and. icyc.eq.ioutsub)) then
             ntt         = ntt + 1
-            rms(ntt)    = 0.
-            clw(ntt)    = 0.
-            cdw(ntt)    = 0.
-            cyw(ntt)    = 0.
-            rmstr(ntt,:) = 0.
-            nneg(ntt,:)  = 0
-            chdw(ntt)   = 0.
-            swetw(ntt)  = 0.
-            cmxw(ntt)   = 0.
-            cmyw(ntt)   = 0.
-            cmzw(ntt)   = 0.
-            clcd(:,:,ntt)= 0.
-            cxw(ntt)    = 0.
-            czw(ntt)    = 0.
-            cdpw(ntt)   = 0.
-            cdvw(ntt)   = 0.
-            fmdotw(ntt) = 0.
-            cfttotw(ntt)= 0.
-            cftmomw(ntt)= 0.
-            cftpw(ntt)  = 0.
-            cftvw(ntt)  = 0.
+            rms(HIDX(ntt))    = 0.
+            clw(HIDX(ntt))    = 0.
+            cdw(HIDX(ntt))    = 0.
+            cyw(HIDX(ntt))    = 0.
+            rmstr(HIDX(ntt),:) = 0.
+            nneg(HIDX(ntt),:)  = 0
+            chdw(HIDX(ntt))   = 0.
+            swetw(HIDX(ntt))  = 0.
+            cmxw(HIDX(ntt))   = 0.
+            cmyw(HIDX(ntt))   = 0.
+            cmzw(HIDX(ntt))   = 0.
+            clcd(:,:,HIDX(ntt))= 0.
+            cxw(HIDX(ntt))    = 0.
+            czw(HIDX(ntt))    = 0.
+            cdpw(HIDX(ntt))   = 0.
+            cdvw(HIDX(ntt))   = 0.
+            fmdotw(HIDX(ntt)) = 0.
+            cfttotw(HIDX(ntt))= 0.
+            cftmomw(HIDX(ntt))= 0.
+            cftpw(HIDX(ntt))  = 0.
+            cftvw(HIDX(ntt))  = 0.
          end if
          do 6010 ntime=1,nit
          nptsr(ntime)   = 0
@@ -1183,7 +1189,7 @@ c
       if (iipv.gt.0) then
          if (level.ge.lglobal .and. ntime.eq.nit) then
             nttuse=max(ntt-1,1)
-            clwuse = clw(nttuse)
+            clwuse = clw(HIDX(nttuse))
 #if defined(DIST_MPI)
             call MPI_Bcast (clwuse,1,MY_MPI_REAL,myhost,
      .                      mycomm,ierr)
@@ -2734,7 +2740,7 @@ c
             do 800 nbl=1,nblock
             time2(nbl) = time2(nbl) + dt
   800       continue
-            timekeep(ntt) = time
+            timekeep(HIDX(ntt)) = time
          end if
       end if
 c
@@ -2754,12 +2760,12 @@ c
       if (irbtrim.ne.0) irigb = 0
       if (irigb.eq.1) then
 #if defined DIST_MPI
-         call MPI_Bcast(clw(ntt),1,MY_MPI_REAL,myhost,
+         call MPI_Bcast(clw(HIDX(ntt)),1,MY_MPI_REAL,myhost,
      .                  mycomm,ierr)
-         call MPI_Bcast(cmyw(ntt),1,MY_MPI_REAL,myhost,
+         call MPI_Bcast(cmyw(HIDX(ntt)),1,MY_MPI_REAL,myhost,
      .                  mycomm,ierr)
 #endif
-         call rb_corr(aesrfdat,clw(ntt),cmyw(ntt),maxaes)
+         call rb_corr(aesrfdat,clw(HIDX(ntt)),cmyw(HIDX(ntt)),maxaes)
       end if
 c
 c

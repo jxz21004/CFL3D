@@ -198,7 +198,7 @@ class ResidentRuntimeTests(unittest.TestCase):
                 for key in ('surface','slices','lift'):
                     self.assertTrue(second.output_paths[key].exists())
                 self.assertFalse(second.output_paths['restart'].exists())
-                self.assertEqual(len(second.cumulative_history),4)
+                self.assertEqual(len(second.cumulative_history),2)
                 saved = second.output_paths['log'].read_bytes()
                 solver.setOptions({'numberSolutions':True,'name':'renamed','writevolumesolution':True})
                 third = solver.solve(output_directory=root/'moved')

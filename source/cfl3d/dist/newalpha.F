@@ -1,3 +1,8 @@
+#ifdef PYTHON_API
+#define HIDX(n) (n-py_history_base)
+#else
+#define HIDX(n) n
+#endif
 c  ---------------------------------------------------------------------------
 c  CFL3D is a structured-grid, cell-centered, upwind-biased, Reynolds-averaged
 c  Navier-Stokes (RANS) code. It can be run in parallel on multiple grid zones
@@ -22,6 +27,7 @@ c  ---------------------------------------------------------------------------
 c
       subroutine newalpha(ncycmax,rms,clw,myid,myhost,mycomm)
 #ifdef PYTHON_API
+      use cfl3d_python_state, only: py_history_base
       use cfl3d_python_state, only: py_final_alpha,py_iteration_offset
 #endif
 c
@@ -85,7 +91,7 @@ c
 c     update alpha based on error in cl;
       if (myid.eq.myhost) then
          rlx    = rlxalph / real(radtodeg)
-         dalpha = -rlx*(clw(ntt) - cltarg)
+         dalpha = -rlx*(clw(HIDX(ntt)) - cltarg)
          if (abs(real(dalpha)) .gt. real(dalim)/real(radtodeg)) then
            sgn    = ccsignrc(1., dalpha)
            dalpha = sgn*(dalim/radtodeg)
@@ -94,8 +100,8 @@ c     update alpha based on error in cl;
 c
 c        output to cfl3d.alpha
          if (ioalph .gt. 0) then
-            write(27,'(3x,i6,4e16.8)') ntt+ioffset,log10(real(rms(ntt))),
-     .                                 real(clw(ntt)),
+            write(27,'(3x,i6,4e16.8)') ntt+ioffset,log10(real(rms(HIDX(ntt)))),
+     .                                 real(clw(HIDX(ntt))),
      .                                 real(alpha)*real(radtodeg),
      .                                 real(dalpha)*real(radtodeg)
          end if

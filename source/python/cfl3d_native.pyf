@@ -1,5 +1,6 @@
 python module _native
     interface
+        ! open_ended: 0 bounded, 1 cumulative compatibility, 2 chunk history (public).
         subroutine py_start_resident(cycles,open_ended,status)
             integer intent(in) :: cycles
             integer optional,intent(in) :: open_ended=0

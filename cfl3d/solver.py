@@ -507,6 +507,7 @@ class SolverResult:
     name: str = "out"
     output_paths: dict[str, Path] = field(default_factory=dict)
     iteration_offset: int = 0
+    # Compatibility name: API 19 returns only this call's rows, without accumulation.
     cumulative_history: np.ndarray | None = None
     start_mode: str = "cold"
     changed_options: tuple[str, ...] = ()
@@ -581,7 +582,7 @@ class CFL3D:
         self._output_chunk_counter = 0
         self._next_output_index = 0
         self._output_session = None
-        self._output_session_history = None
+        self._output_session_iterations = 0
         self._group_definitions = {}
         self._lift_distributions = []
         self._slice_requests = []
@@ -842,7 +843,7 @@ class CFL3D:
             raise ValueError("Finalize or resetFlow() before changing an unfinished calculation/output identity")
         if ((self._solution_pending or not self.options.numberSolutions) and continuing and session is not None
                 and session[0] == identity):
-            return session[1], True, len(self._output_session_history), identity
+            return session[1], True, self._output_session_iterations, identity
         index = self._next_output_index
         while True:
             names = self._numbered_output_names(index)
@@ -1963,7 +1964,7 @@ class CFL3D:
                                + (" --mpi" if self.comm is not None else "")) from exc
         if bool(module.py_build_info()) != (self.comm is not None):
             raise RuntimeError("Native extension MPI mode does not match the solver")
-        if getattr(module, "py_api_version", lambda: 0)() != 18:
+        if getattr(module, "py_api_version", lambda: 0)() != 19:
             raise RuntimeError("Native interface changed; rebuild with python tools/build_python.py"
                                + (" --mpi" if self.comm is not None else "") + " and restart Python")
         return module
@@ -2304,8 +2305,7 @@ class CFL3D:
                               solve_index=solve_index, chunk_index=chunk_index, name=self.name,
                               output_paths={key: output_directory/value for key,value in output_names.items()},
                               iteration_offset=iteration_offset,
-                              cumulative_history=(np.concatenate([self._output_session_history, history])
-                                                  if append_output else history.copy()),
+                              cumulative_history=history,
                               start_mode="restart" if self._continuing else "cold",
                               changed_options=changed_options, reset_reasons=reset_reasons,
                               zone_owners=dict(zip((z.name for z in self.mesh.zones), self._zone_owners)))
@@ -2331,7 +2331,7 @@ class CFL3D:
         self._output_chunk_counter = chunk_index + 1
         self._next_output_index = solve_index + 1
         self._output_session = (output_identity, solve_index)
-        self._output_session_history = result.cumulative_history.copy()
+        self._output_session_iterations = iteration_offset + len(history)
         self._successful_options = dict(self.options)
         if geometry_changed:
             mesh_signature = (self._distributed_mesh_signature() if self.comm is not None

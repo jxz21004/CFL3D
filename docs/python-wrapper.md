@@ -620,8 +620,13 @@ is supported, but no automatic native `_restart.bin` accompanies it.
 
 The first returned history includes coarse startup and fine cycles; later histories
 contain only the requested additional fine cycles. `getRuntimeInfo()` reports
-`startup_cycles`, `fine_cycles`, and their cumulative sum `cycles`. History capacity
-is grown against that total; only the final stage's budget is extended.
+`startup_cycles`, `fine_cycles`, and their cumulative sum `cycles`. Since native API 19, public resident calls reuse history storage: the previous
+row is retained for boundary-condition evaluation and the new chunk occupies the
+remaining rows. Capacity is bounded by the largest requested chunk plus one row
+(or the initial startup allocation), not by total cycles. Native iteration,
+CFL-ramp and lift-control counters remain cumulative. Complete diagnostics append
+to the native `.res`, `.turres` and `.alpha` files; read them when a complete
+history is needed. Retaining old `SolverResult` objects is the caller's choice.
 
 Each solve returns that call's history rows. By default it finalizes the calculation;
 `solve(final=False)` keeps the current output index open for subsequent chunks.
@@ -1026,9 +1031,10 @@ replace previous contents. Displayed iteration numbers continue across chunks;
 parameter summaries and headers may repeat. Flow, wall, slice, lift, restart, and
 NPZ files update to the latest snapshot at that index. `.error` reports the latest
 chunk's status. The returned `history` contains only the current chunk;
-`cumulative_history` contains this output index's combined history, and
-`iteration_offset` is its preceding step count. NPZ `history` is cumulative;
-`chunk_history` contains the current chunk.
+`cumulative_history` is retained as a compatibility alias for the current chunk
+only (no accumulation), and `iteration_offset` is the preceding step count for
+this output index. NPZ `history` and `chunk_history` both contain this chunk.
+Full histories remain in the appended native diagnostic files.
 
 Cold initialization, `resetFlow()`, or an output-identity change starts a new
 number even if numbering is disabled. While a calculation is pending, finalize
@@ -1314,7 +1320,7 @@ PYTHONPATH=tests/python mpirun -np 4 python tests/python/validate_nodal_forces_m
 | `wall_forces[(zone,bc)]` | Owned walls only in MPI; pressure XYZ and viscous XYZ loads divided by q_inf*sref |
 | `final_alpha` | Final native angle, degrees |
 | `name`, `solve_index`, `output_directory`, `output_paths` | Output identity and targets |
-| `iteration_offset`, `cumulative_history` | Previous steps and accumulated history for this index |
+| `iteration_offset`, `cumulative_history` | Previous steps and compatibility alias for current chunk history |
 | `start_mode`, `changed_options`, `reset_reasons` | Initialization decision and configuration changes |
 
 Volume arrays use native nondimensionalization: freestream density=1, sound speed=1,
@@ -1322,7 +1328,7 @@ and pressure=1/gamma. Velocities are returned in input Cartesian axes; grid inde
 remains i,j,k. The residual array stores RMS values, whereas native `.res` files
 print log10(residual). Surface indices follow the two unfixed grid axes.
 
-Automatic result NPZ contains cumulative `history`, `chunk_history`, identity and
+Automatic result NPZ contains current-chunk `history`, `chunk_history`, identity and
 initialization metadata, final_alpha, and the surface names/coefficient table.
 When volume output is enabled it also contains all `zone_<name>` arrays, collected
 temporarily on root. Calling `result.save()` directly writes only that result's

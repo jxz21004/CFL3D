@@ -913,3 +913,45 @@ Package metadata and `cfl3d.__version__` are now 0.3.0; native API remains 18.
 Updated README, interface status and release notes distinguish the released
 coupling foundations from experimental geometry updates and pending framework
 integration. Package/native version checks pass for both local extensions.
+
+
+## 2026-10-28: Bounded public resident histories (native API 19)
+
+Public `resident=True` now uses chunk history storage (`open_ended=2`). Native
+history arrays reuse their allocation between calls and retain the preceding row
+for the far-field CL boundary condition. The allocation is bounded by the largest
+requested chunk plus one row, or the initial startup allocation. A single large
+call still allocates its own history budget. Global iteration, first-order,
+CFL-ramp and lift-control counters remain unchanged. No additional per-cycle MPI
+collectives or filesystem writes were added; diagnostic files continue to append
+at the existing call boundary (trim logging retains its original timing).
+
+Python no longer concatenates or copies an accumulated output-session history in
+either mode. An integer counter preserves output offsets. `history` and the
+compatibility name `cumulative_history` describe the current chunk; NPZ histories
+follow the same convention. Complete histories remain in native text files.
+Callers can explicitly collect returned chunks if needed. Low-level mode 1 keeps
+its cumulative semantics for existing native regression/restart experiments.
+
+Validation:
+
+- Both Intel serial and MPI extensions were rebuilt. A subsequent output-flag
+  guard correction was recompiled in `python_state.F90` and relinked in both
+  extensions using identical flags; module layout/signatures were unchanged.
+- 120 unit tests: 117 passed, 3 optional HDF5 tests skipped. New coverage compares
+  coarse startup plus eight resident chunks to a continuous run, including V/W
+  cycles, trim, first-order startup and CFL ramps, with exact histories, fields
+  and final alpha. Capacity stabilizes while cumulative cycles grow.
+- Three-rank gamma-theta coarse-startup public runtime regression passed; four
+  ranks split into two independent communicators passed with history capacity
+  assertions and complete log numbering checks. Outputs are under
+  `build/native-output-history-bounded-mpi3` and
+  `build/native-output-history-bounded-split`.
+- Three-rank native geometry failure/cleanup/recovery regression passed after
+  history compaction. Logs: `/tmp/cfl3d-bounded-geometry-failure.log`.
+- Without `PYTHON_API`, serial and MPI preprocessing of all five changed legacy
+  drivers yields unchanged Fortran statements compared with HEAD. This check is
+  not a standalone runtime benchmark.
+
+Full unit log: `/tmp/cfl3d-bounded-full-tests.log`. This establishes bounded
+history growth across calls, not a total-memory or production-speed guarantee.

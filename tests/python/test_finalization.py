@@ -30,7 +30,7 @@ class FinalizationTests(unittest.TestCase):
                     self.assertEqual([r.solve_index for r in (first, second, final)], [0, 0, 0])
                     self.assertEqual([r.chunk_index for r in (first, second, final)], [0, 1, 2])
                     self.assertEqual(final.iteration_offset, 4)
-                    self.assertEqual(len(final.cumulative_history), 6)
+                    self.assertEqual(len(final.cumulative_history), 2)
                     self.assertTrue(final.finalized)
                     self.assertFalse(first.finalized)
                     self.assertTrue(final.output_paths['surface'].exists())
