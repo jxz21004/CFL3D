@@ -1209,3 +1209,143 @@ restart=12, native defaults, invalid values/keys and caller-mutation isolation
 backends and exponential decay, and collectively rejects different restart
 values on one rank (/tmp/cfl3d-solver-options-mpi.log). An explicit PETSc-skip
 adapter run also passes (11 tests, 10 passed and 1 skipped).
+
+## 2026-10-29: First MPhys forward aerostructural integration and environment repair
+
+Added optional cfl3d.mphys.CFL3DBuilder with distributed owned surface coordinates,
+IDWarp/native adapter selection, nodal loads, scalar post-processing, sequential
+resident lifecycle, and warning-only derivative placeholders. No Fortran CFD
+algorithm changes. The workspace case_test/mphys_as_2scenario.py now uses CFL3D,
+IDWarp, MELD and TACS on L2; the ADflow original is preserved beside it. Adapted
+old TACS constructor/MPhys connections to installed APIs and explicitly enabled
+TACS coupling_loads=['f_aero_struct']; without that new-version requirement the
+structure would receive only its prescribed gravity load.
+
+Rebuilt both CFL3D extensions in bash -ic with ifort 2024.2 / Intel MPI 2021.13
+and default -O2. Seven resident serial tests pass. The strict MPI-vs-serial
+history equality regression fails on 2/104 entries (maximum difference
+1.05879118e-22); it is not recorded as passing. Logs:
+/tmp/cfl3d-bash-intel-{serial-build,mpi-build,serial-test,mpi-test}.log.
+
+FUNtoFEM import initially failed before importing CFL3D: MPI.Session expected
+40 bytes, runtime supplied 32. Rebuilding alone reproduced it. Its local
+funtofem/mpi-compat.h defined a pointer fallback for MPI_VERSION<4 even though
+Intel MPI's header defines integer MPI_Session and MPI_SESSION_NULL. Added
+native-type/null guards matching mpi4py's compatibility approach, for both
+Session and Message, and rebuilt using CC=mpicc CXX=mpicxx. Updated the existing
+editable FUNtoFEM 0.3.10 installation with --no-deps --no-build-isolation; the
+PIP_BUILD_CONSTRAINT setting had to be unset for this command only. mpi4py 4.1.1,
+NumPy 2.3.5 and Intel MPI were not changed. Existing setup.py/pyproject.toml
+changes in that external repository were preserved. Original header backup:
+/tmp/funtofem-mpi-compat-before.h. This local external dependency fix is not
+included in the CFL3D repository and must be preserved/reapplied if needed.
+
+With the repaired installed FUNtoFEM, real L2 two-scenario short runs pass in
+serial and three-rank MPI, including aerodynamic loads entering TACS, MELD
+displacements, IDWarp and native geometry refresh. Each CFD call uses 3 cycles,
+with a separate initialization call, and each outer solve uses 2 iterations.
+Both explicitly report outer nonconvergence: these are integration checks, not
+validated aeroelastic solutions. Logs /tmp/cfl3d-mphys-serial.log and
+/tmp/cfl3d-mphys-mpi3.log; JSON summaries in case_test/output-cfl3d-mphys and
+case_test/output-cfl3d-mphys-mpi3. Full convergence, gradients and automatic
+resident scenario state switching remain outside this first integration.
+
+## 2026-10-29: L2 100-cycle coupling / 8000-cycle comparison
+
+At the user's request, each CFL3D scenario now ran 80 coupling evaluations of
+100 CFD cycles, using IDWarp/MELD/TACS. Initialization consumes one cycle of the
+first evaluation's budget (1 + 99), rather than adding an unreported extra solve.
+The MPhys interface logs residuals, loads and cumulative cycle counts per call;
+the example's --fixed-budget flag disables early tolerance-based stopping.
+Both scenarios completed exactly 8000 cycles and produced final volume/surface
+output. Python compilation and diff whitespace checks pass.
+
+Ran the user's updated ADflow script unchanged in an isolated directory with
+--level L2, same supplied BDF/callback, on three Intel MPI ranks. ADflow retains
+its ANK and convergence controls; no attempt was made to equate numerical
+algorithms or iteration counts. CFL3D also used three ranks. No changes to
+physical inputs, MELD, TACS or CFD kernels were made for this comparison.
+
+Cruise: CFL3D CL=0.1864371994, CD=0.02412479825; ADflow CL=0.2239722050,
+CD=0.02104637165. Relative differences: -16.7588% lift, +14.6269% drag.
+Maneuver: CFL3D CL=0.3831860550, CD=0.03810800993; ADflow CL=0.4152205223,
+CD=0.03386569889. Relative differences: -7.7150% lift, +12.5269% drag.
+
+These are not established converged-equivalence results. CFL3D final outer
+relative norms are 4.81271826e-6 and 5.3971028e-6; fixed budget completes with
+nonconvergence reported. Last ten 100-cycle samples span CL/CD ranges
+3.5461e-5/6.6814e-6 (cruise), 4.0417e-5/6.9085e-6 (maneuver). Native final
+residuals are 4.9945e-7 and 7.9555e-7. ADflow cruise meets the requested outer
+tolerance at iteration 25; maneuver ends at 25 with relative norm 3.1880e-14,
+slightly above its requested 1e-14, and explicitly reports nonconvergence.
+The force differences cannot be attributed to a cause by this test alone.
+
+Artifacts: case_test/comparison-8000/{adflow,cfl3d}/run.log and summary.json;
+per-scenario CFL3D coupling-history.jsonl; comparison.md, comparison.json,
+convergence.png and compare.py. Script/module snapshots preserve the run setup.
+
+## 2026-10-29: Undeformed L2 SA comparison isolates the aerodynamic path
+
+User deferred SST testing to compare pure CFD first. Ran the unchanged L2 input
+mesh on three Intel MPI ranks, without MPhys, IDWarp, MELD or TACS. Both solvers
+used SA, Mach 0.85, alpha 2/5 degrees, Sref 45.5 m² and chord 3.25 m. Checked
+AeroProblem T/P/rho/mu/V/Re-per-metre against the existing CFL3D atmosphere
+record at rtol=1e-12. Mesh SHA256 matches for both runs. ADflow controls were
+extracted from the user's updated script; only paths and explicit SA selection
+were supplied. Both ADflow cases finish with solveFailed/fatalFail false.
+
+CFL3D used CFL=1.5, one grid level, resident 100-cycle chunks, exactly 8000
+cycles and one initialization for each case. Final nodal force sums match native
+Cartesian integrals at rtol=1e-11/atol=1e-7 N. Final output includes both volume
+and surface solutions; no mesh coordinate updates occur in this test.
+
+Cruise: CFL3D CL=0.3451512304, CD=0.03370589343; ADflow CL=0.4202142778,
+CD=0.03318834891. Differences -17.8630% lift, +1.5594% drag.
+Maneuver: CFL3D CL=0.6065493225, CD=0.07008587917; ADflow CL=0.5935063234,
+CD=0.06541751480. Differences +2.1976% lift, +7.1363% drag.
+CFL3D final residuals are 3.3019e-7 / 2.9382e-7. Last ten sampled CL/CD
+ranges are 4.7161e-5/6.1589e-6 and 1.7093e-4/1.7926e-5. Completion of the
+fixed budget is not a convergence guarantee. Different SA implementations,
+discretizations and detailed BC settings have not yet been reconciled.
+
+The cruise lift discrepancy already exists on the undeformed grid, independently
+of load transfer or structural deformation. This rules out attributing the whole
+difference to MPhys/MELD, but does not identify the aerodynamic cause or prove
+that the coupling layer is otherwise error-free. No numerical algorithm was
+changed for this comparison.
+Artifacts: case_test/rigid-L2-comparison/run_rigid.py, compare.py, solver logs,
+per-case configurations/history/output, summary.json files, comparison.md/json
+and convergence.png.
+
+## 2026-10-29: Undeformed L2 SST sensitivity check
+
+Repeated the preceding pure CFD test with only CFL3D turbulence changed from
+SA to SST. Native logs confirm k-omega SST (Menter). Same mesh, conditions,
+CFL=1.5, three ranks, 100-cycle chunks, 8000 cycles/case and one initialization.
+No geometry updates or coupling components. Existing SA outputs were preserved
+and ADflow was not rerun; its reference remains SA. Nodal/integral force checks
+pass and both cases complete with finite results.
+
+SST cruise: CL=0.3545203777, CD=0.03327875993, L=216188.551 N,
+D=20293.578 N. Relative to ADflow-SA: -15.6334% lift, +0.2724% drag.
+SST maneuver: CL=0.6103619824, CD=0.06929818759, L=372202.223 N,
+D=42258.431 N. Relative to ADflow-SA: +2.8400% lift, +5.9322% drag.
+Final residuals 3.2645e-7/3.4132e-7. Last ten 100-cycle samples span CL/CD
+ranges 2.2902e-4/1.9399e-5 and 4.5175e-4/4.5105e-5. These are fixed-budget
+results, not proof of convergence. Switching to SST does not eliminate the
+cruise lift discrepancy. This is a cross-model sensitivity comparison; it does
+not establish equivalence of the underlying turbulence implementations.
+Artifacts under case_test/rigid-L2-comparison: cfl3d-sst.log, cfl3d-sst outputs,
+compare_sst.py, comparison-sst.md/json and convergence-sst.png. run_rigid.py
+now accepts --turbulence sst for CFL3D and keeps separate output directories.
+
+## 2026-10-29: L2 force-comparison investigation closed for this task
+
+User assessment: the L2 mesh is too coarse, producing a substantial difference
+in predicted shock location, with CFL3D's shock farther forward. The user accepts
+this explanation for the observed force differences and requests no further
+investigation in this task. Retain the comparison runs as test evidence; do not
+classify this case-specific difference as an MPhys interface limitation or add
+it to user documentation/limitations. Continue interface development separately.
+This records the user's assessment and scope decision, not a new mesh-refinement
+validation performed by the agent.

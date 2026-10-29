@@ -1830,3 +1830,87 @@ faults are not converted to `SolveFailure`. Finite coordinates and matching
 interfaces do not constitute a mesh-quality guarantee.
 The first validation covers small SA/SST and MPI gamma-theta fixtures; production-scale deformation
 and all model/override combinations are not yet established.
+
+## MPhys static aeroelastic analysis (experimental, forward only)
+
+`cfl3d.mphys.CFL3DBuilder` supplies the distributed surface mesh, aerodynamic
+nodal loads, and `cl`, `cd`, `lift`, `drag` post-processing components required by
+`ScenarioAeroStructural`. Install MPhys/OpenMDAO and the desired mesh warper;
+TACS and FUNtoFEM/MELD are separate optional dependencies. Importing `cfl3d`
+does not import these packages.
+
+```python
+from cfl3d.mphys import CFL3DBuilder
+
+builder = CFL3DBuilder(
+    options={
+        "input_grid": "wing_vol_L2.cgns",
+        "output_directory": "output",
+        "resident": True,
+        "mach": 0.85,
+        "temperature": 223.25209264797854,
+        "freestream_pressure": 26499.89786492552,
+        "reynolds": 7223294.8822458545,  # per metre
+        "sref": 45.5,
+        "cref": 3.25,
+        "iterations": 1000,  # cycles for each coupling evaluation
+    },
+    scenario_options={"cruise": {"alpha": 2.0}, "maneuver": {"alpha": 5.0}},
+    warper="idwarp",
+    mesh_options={},  # USMesh options; gridFile defaults to input_grid
+)
+builder.initialize(comm)
+# Use the builder in ScenarioAeroStructural and connect its mesh component.
+# Always call builder.close() collectively in the application's finally block.
+```
+
+`options` and `scenario_options` use CFL3D names. They do not accept ADflow's
+ANK controls, AeroProblem objects or ADflow convergence options. The promoted
+`aoa` input is in degrees. Other flow conditions are specified in the options.
+The solver advances a fixed `iterations` budget on each evaluation; completing
+that budget is not a claim of aerodynamic convergence. The outer MPhys nonlinear
+solver must also be checked for convergence.
+
+`warper="idwarp"` uses `USMesh` and the existing `IDWarpAdapter`. An explicit
+`warper="cfl3d"` uses `CFL3DMeshAdapter` options instead. Surface vectors contain
+owned unique nodes in metres; `f_aero` contains integrated nodal forces in N,
+suitable for MELD, not tractions. `group_name=None` uses all wall boundaries.
+Reference surface coordinates are retained in Python for `x_aero0_mesh`. Volume
+reference storage required by IDWarp is owned by IDWarp, not added to the Fortran
+solver. Stable node ownership keeps OpenMDAO vector sizes fixed after the native
+block partition changes.
+
+The first evaluation spends one cycle on the input grid because
+`setVolumeCoordinates()` currently requires an initialized resident context.
+It then warps to the supplied absolute surface and spends the remaining
+`iterations - 1` cycles on the updated mesh. Initialization is included in the
+first evaluation budget; that budget must be at least two cycles.
+Subsequent coupling evaluations retain the flow and refresh geometry only when
+coordinates change. Geometry failures raise OpenMDAO `AnalysisError`. Changes to
+alpha during an active session are rejected; set it before entering the scenario.
+
+Scenarios run sequentially on a communicator. The post component finalizes the
+latest solution and closes the native workspace before the next scenario starts.
+A later `run_model()` starts each scenario from its input grid/freestream again;
+there is no implicit resident flow swapping or scenario restart cache. Interleaving
+unfinished scenarios on the same processes is rejected. Use `builder.close()`
+for cleanup after exceptions as well as successful runs.
+
+Gradient callbacks currently emit `RuntimeWarning` and skip contributions, as
+requested for the first integration. Such derivatives are incomplete and must
+not be used for optimization or sensitivity analysis. Complex-step inputs are
+rejected. Only forward `run_model()` analysis is supported.
+
+The workspace example `case_test/mphys_as_2scenario.py` uses the supplied L2 grid,
+`wingbox.bdf`, original structural callback, IDWarp and MELD. Its `--smoke` mode
+uses three CFD cycles per call and two outer coupling iterations; this is a
+connection/deformation check, not a converged static aeroelastic solution. The
+original ADflow example is preserved as `mphys_as_2scenario_adflow.py`.
+
+Each evaluation records cumulative CFD cycles, residual and loads in
+`coupling-history.jsonl` in its scenario output directory.
+`builder.get_iteration_history(scenario_name)` returns these small records.
+The example accepts `--cfd-iterations 100 --coupling-iterations 80 --fixed-budget`
+to request 8000 CFD cycles per scenario, updating the coupling every 100 cycles.
+Fixed-budget mode disables early tolerance-based termination and reports outer
+nonconvergence rather than raising; it does not imply convergence.
