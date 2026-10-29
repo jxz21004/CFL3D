@@ -4,15 +4,15 @@ A Python interface to the NASA CFL3D V6 structured-grid CFD solver, using NumPy
 f2py to call the Fortran core in the same process. The package supports serial
 execution and the native MPI host/worker path.
 
-Python package version: **0.3.2**. Working-tree native interface version: **22**.
+Python package version: **0.3.3**. Native interface version: **22**.
 
-Version 0.3.2 adds an experimental native mesh deformation adapter alongside
-IDWarp: exponential decay and finite macro-element (FMEM) methods with native
-TFI. Both return candidate volume coordinates for steady resident geometry
-updates while retaining the flow. Reference coordinates (`x0`) remain optional
-and caller-managed. See the [adapter examples](docs/python-wrapper.md#native-cfl3d-deformation-adapter-api-22-experimental)
-the [control-point selection guide](docs/python-wrapper.md#control-point-selection),
-and [release notes](docs/release-notes.md) for usage, validation and limitations.
+Version 0.3.3 adds forward-only MPhys aeroelastic coupling and a reproducible
+L2 example using IDWarp or CFL3D mesh deformation. It also updates control-point
+selection, native boundary constraints and FMEM solver options. See the
+[aeroelastic example](examples/python/mphys_aerostructural/README.md),
+[adapter reference](docs/python-wrapper.md#native-cfl3d-deformation-adapter-api-22-experimental),
+[control-point selection guide](docs/python-wrapper.md#control-point-selection),
+and [release notes](docs/release-notes.md) for validation and limitations.
 Rebuild both native extensions when upgrading and restart Python/MPI processes.
 FMEM defaults to original native Gauss-Seidel. PETSc GMRES is available only via
 explicit `linear_solver="petsc-gmres"`; see [backend selection and memory costs](docs/python-wrapper.md#fmem-linear-solver-backends).
@@ -122,7 +122,7 @@ python -c "from cfl3d import _native; print('native API:', _native.py_api_versio
 python -c "from cfl3d._cgns_native import library; print('CGNS has HDF5:', library().has_hdf5)"
 ```
 
-The current source requires native API `22` (0.3.2 release uses `21`; 0.3.1 uses `20`; 0.3.0 uses `18`; 0.2.0 uses `15`). A `False` HDF5 result still permits CGNS/ADF input;
+Version 0.3.3 requires native API `22` (0.3.2 release uses `21`; 0.3.1 uses `20`; 0.3.0 uses `18`; 0.2.0 uses `15`). A `False` HDF5 result still permits CGNS/ADF input;
 CGNS/HDF5 input requires a capable libcgns or h5py.
 
 ### Additional Fortran compiler flags

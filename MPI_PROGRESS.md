@@ -1604,3 +1604,34 @@ default adapter settings are unchanged. Successful run evidence and snapshots:
 case_test/mphys-mg-comparison/native-refined-tangents, adjacent .log, saved
 control-indices.json and comparison-idwarp.json. Python compilation,
 comparison utility and git diff --check passed. No commit requested.
+
+## 2026-10-29: FMEM retest with the successful exponential lattice
+
+Tested native FMEM/Gauss-Seidel with the same explicit 8505-control tangential
+lattice used by the successful exponential run. Three Intel MPI ranks,
+original L2, SA, 2 mm shells, unchanged structural loads/coupling controls,
+100 fine cycles per exchange and requested 80 exchanges per scenario.
+FMEM retained default beta1=5 and alpha1=0.5; no PETSc or fallback was used.
+The explicit control-indices file overrides the recorded default stride field.
+
+The first cruise evaluation completed 100 fine cycles. On the second evaluation,
+native geometry refresh returned SolveFailure with status 41 (Invalid updated
+grid metrics), and OpenMDAO propagated AnalysisError; process exit status was 1.
+Native logs report FATAL si grid-normal direction changes. No final summary or
+maneuver result was produced. This is a geometry rejection after deformation,
+not a reported linear-solver failure; no new signed-volume audit was performed.
+Thus the successful exponential lattice alone does not resolve FMEM's failure.
+
+Evidence: case_test/mphys-mg-comparison/native-fmem-refined-tangents and adjacent
+.log, with saved configuration, exact control-indices file, driver/callback
+snapshots, partial history and native logs. Production algorithms unchanged.
+
+## 2026-10-29: Package release 0.3.3
+
+Updated pyproject.toml and cfl3d.__version__ to 0.3.3; native API remains 22.
+Promoted the unreleased deformation changes into 0.3.3 release notes and added
+MPhys coupling, successful L2 exponential validation and the explicit FMEM
+failure result. README and interface reference identify the same release.
+Historical 0.3.2/API 21 notes remain unchanged. Version consistency and
+whitespace checks passed; no new numerical changes or native rebuild required
+by this metadata-only bump. Users upgrading from API 21 must rebuild extensions.

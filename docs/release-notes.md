@@ -1,6 +1,30 @@
 # Release notes
 
-## Unreleased — distributed mesh deformation (native API 22)
+## 0.3.3 — MPhys coupling and mesh deformation controls
+
+Release date: 2026-10-29. Native interface version: **22**.
+
+- Added experimental forward-only `CFL3DBuilder` for MPhys/MELD/TACS coupling,
+  resident CFD chunks and rank-local nodal loads. Derivative callbacks warn and
+  skip contributions; gradients are not valid for optimization.
+- Added a two-scenario aeroelastic example with IDWarp/native warper selection,
+  multigrid configuration, explicit control indices, shell thickness, collective
+  cleanup and immediate propagation of geometry errors. Histories expose fine,
+  startup and total cycles plus native initialization counts.
+- Matched adapter boundary-control classification to native `setslave`, including
+  free symmetry controls, 2-D exceptions and solver boundary overrides.
+- The supplied L2 exponential configuration with 8505 tangentially refined
+  controls completed two 8000-cycle coupled runs; corresponding IDWarp comparisons
+  are documented. These are fixed-budget results, not convergence certificates.
+  L2 itself supports only one grid level; multigrid needs a compatible mesh.
+- FMEM/native GS with the same 8505-control lattice still fails the L2 native
+  metric check after 100 cruise cycles. No fallback or relaxed geometry check
+  hides this failure. See the [example](../examples/python/mphys_aerostructural/README.md).
+
+Both native extensions must be rebuilt when upgrading from 0.3.2 (API 21),
+and existing Python/MPI processes restarted. This package version bump does not
+change the already implemented API 22 ABI.
+
 
 Linear solver tuning is grouped in `linear_solver_options`; the former top-level
 `petsc_restart` keyword is replaced by the dictionary's `restart` key. Backend

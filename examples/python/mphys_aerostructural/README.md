@@ -114,7 +114,8 @@ scenarios. Native exponential and FMEM with default controls both failed the
 native metric check on the second cruise evaluation (after 100 successful
 cycles). Native logs reported grid-normal direction changes. Those default-stride configurations reproduce a deformation failure.
 The explicit tangential controls described above subsequently completed the
-full exponential run. The FMEM failure remains unresolved; these successful
+full exponential run. FMEM was also retested with the 8505-control lattice and still failed native
+metric checks on the second cruise evaluation after 100 cycles; these successful
 results apply to exponential with the explicit L2 lattice. No deformation
 kernel or geometry criterion was changed to obtain the successful run.
 Detailed run evidence is recorded in `MPI_PROGRESS.md`.
