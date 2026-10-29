@@ -88,7 +88,10 @@ class _Session:
                 self.adapter = IDWarpAdapter(warper, self.solver.mesh, surface, self.solver.comm)
             else:
                 from ..mesh import CFL3DMeshAdapter
-                self.adapter = CFL3DMeshAdapter(self.solver.mesh, surface, self.solver.comm, **b.mesh_options)
+                self.adapter = CFL3DMeshAdapter(
+                    self.solver.mesh, surface, self.solver.comm,
+                    boundary_overrides=b.boundary_overrides, **b.mesh_options,
+                )
         elif alpha != self.alpha:
             raise om.AnalysisError("Changing alpha within an active CFL3D coupling session is unsupported; finish it first")
 
@@ -120,6 +123,10 @@ class _Session:
                           (("cl", "CL"), ("cd", "CD"), ("lift", "L"), ("drag", "D"))}
         record = dict(coupling_evaluation=len(self.history)+1, cfd_cycles=self.cycles,
                       residual=float(result.history[-1, 0]), **self.functions)
+        runtime = self.solver.getRuntimeInfo()
+        record.update(startup_cycles=int(runtime["startup_cycles"]),
+                      total_cycles=int(runtime["cycles"]),
+                      initializations=int(runtime["initializations"]))
         self.history.append(record)
         def write_history():
             if self.solver.comm is None or self.solver.comm.rank == 0:

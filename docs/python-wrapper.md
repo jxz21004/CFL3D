@@ -1577,10 +1577,15 @@ Current boundaries and costs:
 
 - Fixed-topology point-matched structured zones; all dimensions need at least
   two vertices. This is a steady warper, not a time-accurate ALE/structural solver.
-- Provided surface coordinates are prescribed exactly. Physical boundary points
-  omitted from the surface are fixed, including symmetry boundaries. Native
-  sliding/free-symmetry and arbitrary original motion-table semantics are not
-  exposed. Shared interface identities come from topology, never nearest points.
+- Provided surface coordinates are prescribed exactly. Other control constraints
+  follow native `setslave.F` BC classification: wall/farfield controls in the
+  native constrained list remain fixed, while symmetry code 1001 is free to
+  deform. `boundary_overrides={(zone, boundary): (code, data)}` uses the same
+  mapping as the CFD solver; MPhys passes its overrides to the native adapter.
+  No additional normal projection or curved-surface sliding model is applied;
+  this is the native control classification, not a general geometric constraint
+  solver. Arbitrary original motion tables are not exposed. Shared interface
+  identities come from topology, never nearest points.
 - Control selection supports `minimal`, `auto_stride`, `stride` and `indices`.
   The default is `stride` with spacing 4. Physical/interface endpoints are added
   and matching indices propagated. There is no forced minimum of five indices
@@ -1880,11 +1885,14 @@ reference storage required by IDWarp is owned by IDWarp, not added to the Fortra
 solver. Stable node ownership keeps OpenMDAO vector sizes fixed after the native
 block partition changes.
 
-The first evaluation spends one cycle on the input grid because
+The first evaluation runs any configured coarse-grid startup and spends one
+fine-grid cycle on the input grid because
 `setVolumeCoordinates()` currently requires an initialized resident context.
 It then warps to the supplied absolute surface and spends the remaining
 `iterations - 1` cycles on the updated mesh. Initialization is included in the
-first evaluation budget; that budget must be at least two cycles.
+first evaluation's fine-grid budget; that budget must be at least two cycles.
+Coarse startup is additional and runs once per scenario. Subsequent chunks
+continue the configured multigrid correction without repeating startup.
 Subsequent coupling evaluations retain the flow and refresh geometry only when
 coordinates change. Geometry failures raise OpenMDAO `AnalysisError`. Changes to
 alpha during an active session are rejected; set it before entering the scenario.
@@ -1907,7 +1915,14 @@ uses three CFD cycles per call and two outer coupling iterations; this is a
 connection/deformation check, not a converged static aeroelastic solution. The
 original ADflow example is preserved as `mphys_as_2scenario_adflow.py`.
 
-Each evaluation records cumulative CFD cycles, residual and loads in
+The repository [aerostructural example](../examples/python/mphys_aerostructural/README.md)
+selects native exponential/FMEM or IDWarp and exposes one-time multigrid startup.
+The supplied L2 requires a single level; use a compatible mesh for multigrid.
+The example propagates child `AnalysisError` immediately through its outer
+nonlinear solver and checks native cycle/initialization counters.
+
+Each evaluation records cumulative fine-grid CFD cycles (`cfd_cycles`),
+`startup_cycles`, native `total_cycles`, `initializations`, residual and loads in
 `coupling-history.jsonl` in its scenario output directory.
 `builder.get_iteration_history(scenario_name)` returns these small records.
 The example accepts `--cfd-iterations 100 --coupling-iterations 80 --fixed-budget`

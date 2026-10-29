@@ -56,6 +56,35 @@ class NativeMeshAdapterTests(unittest.TestCase):
                     )
                     np.testing.assert_array_equal(result, adapter.warp(target))
 
+    def test_symmetry_controls_follow_native_classification(self):
+        mesh = mesh3d()
+        with CFL3D(mesh, comm=None) as solver:
+            surface = solver.getSurfaceMesh()
+            target = deepcopy(surface)
+            target["coordinates"][:, 2] += 0.001 * np.sin(np.pi * target["coordinates"][:, 0] / 2)
+            adapter = CFL3DMeshAdapter(mesh, surface, control_stride=2)
+            self.assertFalse(adapter._physical(0, (0, 4, 4)))
+            self.assertTrue(adapter._physical(0, (8, 4, 4)))
+            zones = adapter.layout.unpack(adapter.warp(target))
+            # y=0 symmetry-plane nodes follow tangential bending instead of
+            # being pinned beside the moving wall. No normal input displacement.
+            self.assertGreater(abs(zones["zone0"][0, 4, 1, 2] - mesh.zones[0].coordinates[0, 4, 1, 2]), 1e-8)
+            np.testing.assert_allclose(zones["zone0"][0, :, :, 1], 0., atol=1e-14)
+            pinned = CFL3DMeshAdapter(mesh, surface, control_stride=2,
+                                     boundary_overrides={(z.name, "face00"): (1003, ()) for z in mesh.zones})
+            self.assertTrue(pinned._physical(0, (0, 4, 4)))
+            pinned_zones = pinned.layout.unpack(pinned.warp(target))
+            np.testing.assert_array_equal(pinned_zones["zone0"][0, 4, 1], mesh.zones[0].coordinates[0, 4, 1])
+
+    def test_native_two_dimensional_face_classification(self):
+        mesh = box_mesh()
+        next(b for b in mesh.zones[0].boundaries if b.name == "face20").bc_type = "BCWallViscous"
+        with CFL3D(mesh, comm=None) as solver:
+            adapter = CFL3DMeshAdapter(mesh, solver.getSurfaceMesh(),
+                                     boundary_overrides={("zone0", "face10"): (1013, ())})
+            self.assertFalse(adapter._physical(0, (1, 4, 4)))
+            self.assertTrue(adapter._physical(0, (1, 0, 4)))
+
     def test_warp_does_not_change_resident_flow_or_counters(self):
         config = dict(
             resident=True,

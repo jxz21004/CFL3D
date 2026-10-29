@@ -1349,3 +1349,258 @@ classify this case-specific difference as an MPhys interface limitation or add
 it to user documentation/limitations. Continue interface development separately.
 This records the user's assessment and scope decision, not a new mesh-refinement
 validation performed by the agent.
+
+## 2026-10-29: Repository MPhys warper/multigrid example and L2 checks
+
+Added examples/python/mphys_aerostructural with a standalone two-scenario driver,
+the equivalent used isotropic shell/gravity callback, instructions and a completed-
+run comparison utility. Both warpers use identical SA/Mach 0.85 inputs, 2/5-degree
+scenarios, 2 mm shell design variables, MELD and Aitken outer iterations. Added
+native startup/total-cycle/initialization counters to the MPhys history. No CFD
+discretization, mesh coordinates, structural load or deformation kernel was changed.
+
+Original L2 cannot support the proposed multigrid run: blocks with three nodes
+cannot satisfy three-level divisibility, and two-level setup fails in global.F
+because coarse JDIM becomes two (two ghost BC requirement). The initial claim
+that divisibility alone allowed two levels was incorrect. The example now checks
+both divisibility and coarse J/K dimensions before native setup. User chose to
+retain L2 for single-level comparison and supply a compatible mesh later, instead
+of authorizing refinement. Multigrid example validation therefore remains pending.
+
+Three-rank Intel MPI single-level IDWarp completed 80 exchanges of 100 cycles
+per scenario: cruise CL=0.18643719942133904, CD=0.02412479824507;
+maneuver CL=0.38318605497297104, CD=0.03810800993439153. Every history row
+reported one initialization, zero startup cycles and total cycles equal to fine
+cycles. This reproduces the earlier IDWarp results. It is a fixed-budget run,
+not convergence certification (maneuver outer relative residual 5.3971028e-6).
+
+Native exponential+TFI and native FMEM/GS (control stride 4, defaults) each
+completed the first 100-cycle cruise evaluation, then failed native geometry
+refresh on the second evaluation with status 41, Invalid updated grid metrics.
+The native logs include FATAL sj grid-normal direction changes. No final native
+forces are available for comparison. The first unmodified outer NLBGS swallowed
+child AnalysisError and repeated failed updates before post-processing refused
+to publish results. The example now sets reraise_child_analysiserror=True;
+FMEM and a repeat exponential run verify immediate failure propagation. No
+fallback warper or weakened geometry check was introduced. Deformation diagnosis
+and a successful native aeroelastic run remain outstanding.
+
+Evidence: case_test/mphys-mg-comparison/{native,idwarp} for rejected MG3,
+{native-mg2,idwarp-mg2} for native MG2 rejection, idwarp-mg1 for the completed
+single-level run, native-mg1 for the initial repeated-error run, native-fmem-mg1
+and native-failfast-mg1 for immediate failure checks. Console logs are retained
+alongside these run directories. Multigrid startup and geometry-update algorithms
+were not modified to force this case to pass.
+
+## 2026-10-29: More expensive native deformation parameter trials
+
+At the user's request, tested configurations favoring dense controls and broad
+motion propagation, without changing L2, structural loads, surface targets,
+CFD controls, coupling relaxation or geometry acceptance criteria. Added
+--beta2, --alpha2 and --smoothing-iterations to the example (original defaults
+preserved). Three Intel MPI ranks; requested 80 exchanges of 100 fine cycles:
+
+| Method | Control stride | beta2 | alpha2 | Smoothing sweeps | Outcome |
+| --- | --- | --- | --- | --- | --- |
+| exponential | 1 | 1 | 0.5 | 50 | Geometry status 41 at second cruise evaluation |
+| exponential | 1 | 0.1 | 0.9 | 0 | Geometry status 41 at second cruise evaluation |
+| FMEM/native GS | 1 | 5 (unused) | 0.1 (unused) | 0 | Geometry status 41 at second cruise evaluation |
+
+Each run completed only the first 100 fine cycles. All failed on grid metric
+checks and none produced a completed summary. FMEM retained beta1=5, alpha1=0.5.
+These were fresh coupled runs, not replay of a saved identical surface target;
+first-evaluation forces agreed to floating-point roundoff. The trials do not
+establish inability of the native method to handle this case. Further work
+should inspect boundary constraints, displacement propagation and near-wall
+cells before continuing blind parameter changes. No kernel changes or fallback
+were made. Python compilation and git diff --check passed.
+
+Evidence in case_test/mphys-mg-comparison: native-dense-smooth,
+native-dense-wide, native-fmem-dense, corresponding .log files,
+parameter-trials.json and run-parameter-trials.py. These are failed validation
+attempts, not successful 8000-cycle native aeroelastic runs.
+
+## 2026-10-29: Restore native boundary-control classification
+
+CFL3DMeshAdapter previously treated every physical BC patch as a prescribed
+zero-displacement boundary unless supplied in the moving surface. Replaced
+that rule with the constraint-code list in native dist/setslave.F (both control
+selection branches). Code 1001 is not constrained by that list. Prescribed
+surface targets still override control displacement; wall/farfield codes in
+the native list remain constrained. The native 2-D I-face skip and J/K code
+1013 exception are retained. No extra normal projection, curved-surface slide
+algorithm, kernel change or relaxed metric criterion was introduced.
+
+Added optional boundary_overrides with the solver's (zone, BC)->(code, data)
+convention; MPhys forwards its mapping. Unknown CGNS types require an override.
+Effective constraint ranges participate in MPI configuration agreement, and
+are prepared once per adapter instead of rebuilding BC ranges for each node.
+
+Validation: 13 serial adapter unit tests pass, including tangential motion on
+a y=0 symmetry plane, unchanged normal coordinates for that prescribed
+exponential test, explicit pinning through BC override, and 2-D classification.
+Existing three-rank MPI regression passes exponential and native FMEM/GS,
+including interfaces and resident continuation; optional PETSc cases were
+explicitly skipped. git diff --check passes. The normal-coordinate check is
+for this test, not a general proof of symmetry preservation for arbitrary
+motion or FMEM.
+
+L2 retests remain unsuccessful: default exponential and stride-1 FMEM both
+complete 100 cruise cycles then fail metric refresh on evaluation 2 (status 41).
+Thus the overconstraint was a confirmed implementation discrepancy but is not
+established as the sole cause of this L2 failure. No successful native final
+force comparison is claimed. Evidence: case_test/mphys-mg-comparison/
+native-boundary-fix and native-boundary-fmem, plus corresponding .log files.
+Next diagnosis must localize failing cells and compare control/TFI displacement
+against the same prescribed surface target.
+
+## 2026-10-29: Double shell thickness to 4 mm
+
+At the user's request, changed the example's uniform shell design thickness
+from 0.002 to 0.004 m through the TACS dv_struct input. Added --thickness with
+original 0.002 m default and validation against the existing [0.002, 0.05] m
+shell bounds. Comparison rejects different thicknesses (older configurations
+without this key use their original 0.002 m). Gravity acceleration/load factor
+were unchanged; shell mass and hence inertial load change with thickness.
+
+Three-rank Intel MPI retests on original L2, SA and the corrected native BC
+classification: default exponential (stride 4) and native FMEM/GS (stride 1)
+both completed 100 cruise fine cycles, then failed geometry refresh on the
+second coupling evaluation with native status 41, Invalid updated grid metrics.
+No final summary or maneuver solution was produced. Doubling thickness alone
+did not resolve the native deformation failure; no conclusion about actual
+maximum displacement reduction is drawn from the incomplete results.
+
+Evidence: case_test/mphys-mg-comparison/native-thickness4mm and
+native-fmem-thickness4mm, corresponding .log files, run-thickness-trials.py.
+Python compilation and git diff --check passed. No geometry criteria, CFD
+settings or coupling relaxation were changed.
+
+## 2026-10-29: Localize first L2 failure using the same surface target
+
+Stopped parameter sweeps and captured the corrected adapter's default
+exponential/stride-4 candidate before native geometry installation, on each
+zone owner. Replayed exactly the saved surface target through IDWarp in a
+separate three-rank process. The native case repeats status 41 after 100 cruise
+cycles; this is the 2 mm shell case. No production algorithm was modified.
+
+At zone 1 node (i,j,k)=(0,1,0), first-layer spacing is 2.34350e-5 m, while native
+first-layer minus wall z displacement is +2.16025e-4 m. IDWarp receives the same
+wall displacement (-0.00213342569 m) but gives a relative z displacement of
+-5.14417e-8 m. Sparse j=0,4 control interpolation exactly accounts for the
+interior k=4 displacement (+0.000997309 m); the wall's exact j=1 displacement
+is -0.002133426 m. The 3.12994 mm fine surface/coarse interpolation mismatch is
+absorbed across a very thin near-wall control layer. This localizes one failure
+mechanism to propagation of prescribed surface detail through the coarse
+control lattice/TFI, rather than global displacement magnitude or a claim that
+native TFI algebra itself is wrong.
+
+An independent trilinear-hex signed-volume quadrature finds 1479 cells reversed
+relative to the accepted grid in the native candidate, versus zero for IDWarp.
+Zone 1 cell (0,0,0) volume ratios are -2.40598436 and +0.99862062 respectively.
+This establishes folding for this candidate, not just face-normal warnings.
+Other configurations (especially dense FMEM) still need separate stage-by-stage
+analysis; this does not establish equivalence with the original standalone
+CFL3D deformation driver. IDWarp uses the original grid reference, differing
+from the captured accepted grid only by the first roundoff-scale warp.
+
+Evidence: case_test/warp-diagnosis/{capture.py,replay_idwarp.py,analyze.py},
+rank-local NPZ captures, native-capture2.log, idwarp.log, analysis.json/txt and
+README.md. Earlier diagnostic initialization/ownership errors are retained in
+logs and are not counted as successful test evidence.
+
+## 2026-10-29: Audit original deformation staging
+
+Compared updatedg -> deform_surf/bc_delt -> deform_el -> deform against the
+current py_warp_tfi hook. Original deform performs directional edge/face
+staging, reinstalls full prescribed surface deltas between stages, and skips
+solid-wall boundary face interpolation. The hook performs all edges then all
+faces, restoring its fixed mask between phases and after tfivol. The low-level
+TFI kernels are shared, but the drivers are not identical.
+
+Important qualification to the prior diagnosis: the inspected native path also
+uses coarse controls plus exact surface deltas and TFI; it contains no separate
+fine-surface mismatch propagation or boundary-layer protection correction.
+The captured local mismatch therefore does not establish a missing native
+correction, nor does the source-order difference alone establish the failure
+cause. A fixed-input numerical stage comparison remains necessary before
+changing production sequencing. No new algorithm or kernel edit was made.
+Audit evidence: case_test/warp-diagnosis/native-source-comparison.md, with
+source locations, call order, and explicit limits of the conclusions.
+
+## 2026-10-29: Replay captured failure through original deform driver
+
+Implemented a diagnostic-only harness in case_test/warp-diagnosis/
+replay_native_order.py. It calls the already compiled original Fortran deform_
+symbol, rather than reimplementing its staging. Each rank replays owned zones
+using captured control indices/displacements, full prescribed wall deltas and
+native BC segment arrays. Explicit-index isktyp=2; irst=1 suppresses grid-speed
+updates. No production code or numerical algorithm was changed.
+
+Zero-displacement replay is exactly unchanged. Reconstructed current-hook
+inputs reproduce all nine captured candidate blocks exactly. Original deform_
+then produces exactly the same coordinates in all nine blocks (max difference
+0). Independent signed-volume quadrature confirms 1479 reversed cells for both
+current and original-order candidates, versus zero for the same-target IDWarp
+candidate. Original ordering alone therefore does not fix this captured failure.
+The deform flag is not treated as a successful metric check.
+
+Scope: control solving and surface-motion generation were held fixed; this is
+not a complete standalone original CFL3D replay or a proof that its complete
+workflow fails. Further diagnosis should compare upstream control selection
+and displacement generation, not change TFI order without evidence. Evidence:
+original-order.log, original-order-rank*.npz/json and updated analysis.json/txt
+in case_test/warp-diagnosis. git diff --check passed.
+
+## 2026-10-29: Compare original upstream exponential controls
+
+Diagnostic compare_controls.py reconstructs all 980 saved controls; the Python
+path reproduces captured controls exactly. Original expdecay through the native
+hook differs by at most 6.938893903907228e-18 m (zones 1-4 exact). Passing those
+original-kernel controls through original deform changes final coordinates by
+at most 4.440892098500626e-16 m and retains 1479 reversed cells. Thus the captured
+zero-smoothing failure is reproduced by original control + TFI kernels for the
+same effective lattice and prescribed surface displacement.
+
+Limits: the native hook freshly initializes distance normalization (nt=1);
+original automatic lattice selection, full setslave execution, motion-table
+input and historical COMMON state were not replayed. Graph assembly still uses
+the adapter helper. Source differences remain in automatic/default lattice
+selection, nearest-point tie policy, distance-normalization lifetime and
+nonzero-smoothing cross-block stencils. Dense FMEM is not covered by this test.
+No production algorithm was changed. Detailed evidence and source references
+are in case_test/warp-diagnosis/upstream-controls.md and rank-local replay
+artifacts. git diff --check passed.
+
+## 2026-10-29: Tangential control refinement passes L2 coupling
+
+Fixed-target three-rank trials used corrected BC classification and unchanged
+exponential parameters (beta2=5, alpha2=0.1, no smoothing). Baseline: 980 controls,
+1479 reversed cells, minimum volume ratio -290.60018. Adding zone-1 j=1,2,3
+(zero based) plus automatic interface propagation: 1316 controls, 1287 reversed
+cells. Densifying failed-cell bounding ranges in wall tangential directions:
+8505 controls, zero reversed cells, minimum ratio 0.80545533. On this topology
+interface propagation makes this identical to all-wall-tangent refinement.
+Full density: 30375 controls, zero reversed cells, minimum ratio 0.84978204.
+All fixed-target candidates passed interface validation and preserved prescribed
+surface coordinates to <1e-12 m. Volume checks are independent trilinear-hex
+quadrature. Evidence: case_test/warp-diagnosis/test_lattices.py,
+lattice-trials.json/log/md, rank-local candidate NPZ files and explicit indices.
+
+The 8505-control lattice then completed the actual L2 MPhys run: cruise and
+maneuver each 80 exchanges / 8000 fine cycles, all native metric updates accepted,
+one initialization each, original 2 mm shell thickness. No load scaling,
+geometry-check relaxation, change to CFD settings or deformation kernels.
+Native cruise CL/CD = 0.1866468222882157 / 0.02411246223795829;
+native maneuver CL/CD = 0.38381582407880654 / 0.0381530326466947.
+IDWarp reference: cruise 0.18643719942133904 / 0.02412479824507;
+maneuver 0.38318605497297104 / 0.03810800993439153. These are fixed-budget
+comparisons, not convergence certification. Dense FMEM remains a separate
+unresolved failure. Earlier dense exponential failures preceded the boundary
+classification correction and are not equivalent to this new fixed-target test.
+
+Example now accepts --control-indices and includes l2-tangential-controls.json;
+default adapter settings are unchanged. Successful run evidence and snapshots:
+case_test/mphys-mg-comparison/native-refined-tangents, adjacent .log, saved
+control-indices.json and comparison-idwarp.json. Python compilation,
+comparison utility and git diff --check passed. No commit requested.

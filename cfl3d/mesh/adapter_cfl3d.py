@@ -30,7 +30,9 @@ class CFL3DMeshAdapter:
     Physical/interface endpoints and matching indices are inserted automatically;
     inspect the effective lattice with ``getControlIndices()``. Sparse FMEM
     lattices can be degenerate and require explicit refinement. Smaller strides
-    cost more. Physical boundary points absent from ``surface`` are held fixed.
+    cost more. Boundary controls follow native ``setslave`` classification: symmetry
+    planes are free, while prescribed wall/farfield controls remain constrained.
+    No additional plane projection is applied by this adapter.
     FMEM defaults to ``linear_solver='native-gauss-seidel'`` (original control
     assembly/GS on root). Explicit ``'petsc-gmres'`` requires petsc4py and uses
     distributed GMRES/Jacobi with ``linear_solver_options={"restart": 30}``. ``alpha1``
@@ -47,6 +49,7 @@ class CFL3DMeshAdapter:
         surface,
         comm=None,
         *,
+        boundary_overrides=None,
         method="exponential",
         linear_solver="native-gauss-seidel",
         linear_solver_options=None,
@@ -100,6 +103,31 @@ class CFL3DMeshAdapter:
                 or not 0 <= alpha2 < 1
             ):
                 raise ValueError("Require positive beta1/beta2, 0<alpha1<=1 and 0<=alpha2<1")
+            from ..solver import _BC_TYPES
+            overrides = {} if boundary_overrides is None else dict(boundary_overrides)
+            # Native setslave.F uses this list, not membership in any BC patch.
+            fixed_codes = {1000, 1002, 1003, 1005, 1006, 1008, 2003, 2004,
+                           2006, 2007, 2008, 2014, 2016, 2024, 2034, 2102, 2103}
+            is_2d = all(z.dimensions[0] == 2 for z in mesh.zones)
+            self._fixed_ranges = {}
+            for g, zone in enumerate(mesh.zones):
+                ranges = []
+                for bc in zone.boundaries:
+                    key = (zone.name, bc.name)
+                    entry = overrides.get(key, _BC_TYPES.get(bc.bc_type))
+                    if entry is None:
+                        raise ValueError(f"{key}: unknown BC needs boundary_overrides")
+                    code = entry[0]
+                    if isinstance(code, bool) or not isinstance(code, Integral):
+                        raise ValueError(f"{key}: boundary code must be an integer")
+                    q = np.asarray(bc.point_range) - 1
+                    axis = int(np.flatnonzero(q[:, 0] == q[:, 1])[0])
+                    # setslave skips I-face constraints for a 2-D mesh.
+                    if is_2d and axis == 0:
+                        continue
+                    if code in fixed_codes or (code == 1013 and axis != 0 and zone.dimensions[0] == 2):
+                        ranges.append((q.min(axis=1), q.max(axis=1)))
+                self._fixed_ranges[g] = ranges
             self.layout = VolumeMeshLayout(mesh)
             self.topology = SurfaceTopology(mesh)
             if any(min(z.dimensions) < 2 for z in mesh.zones):
@@ -121,6 +149,8 @@ class CFL3DMeshAdapter:
             tuple(sorted(self.linear_solver_options.items())),
             control_mode,
             tuple(tuple(a) for a in self.axes),
+            tuple(tuple((tuple(lo), tuple(hi)) for lo, hi in self._fixed_ranges[g])
+                  for g in range(len(mesh.zones))),
             tuple(self.parameters),
             smoothing_iterations,
             self.topology.signature,
@@ -327,11 +357,8 @@ class CFL3DMeshAdapter:
         return [[tuple(sorted(a)) for a in axes] for axes in sets]
 
     def _physical(self, g, p):
-        for bc in self.mesh.zones[g].boundaries:
-            q = np.asarray(bc.point_range) - 1
-            if np.all(np.array(p) >= q.min(axis=1)) and np.all(np.array(p) <= q.max(axis=1)):
-                return True
-        return False
+        return any(np.all(np.asarray(p) >= lo) and np.all(np.asarray(p) <= hi)
+                   for lo, hi in self._fixed_ranges[g])
 
     def _build_graph(self, g, nodes):
         n = len(nodes)
