@@ -1168,7 +1168,7 @@ x_local = surface["coordinates"]      # (N,3), metres; uniquely owned nodes only
 node_ids = surface["node_ids"]         # (N,), int64; sorted global identities
 faces = surface["connectivity"]        # (M,4), int64; GLOBAL node IDs
 
-# A future MPhys mesh component can use x_local.reshape(-1) as its local vector.
+# A coupling mesh component can use x_local.reshape(-1) as its local vector.
 local_node_count = len(node_ids)
 ```
 
@@ -1223,8 +1223,9 @@ Before a successful solve, this method uses the current input mesh. Afterwards,
 it uses the last solved geometry snapshot, consistent with cached force queries;
 editing `solver.mesh` does not reinterpret an older solution. Returned arrays
 are independent copies. The method does not add periodic/nonconforming support,
-construct a zipper mesh, calculate nodal loads, update native geometry, or provide
-an MPhys Builder. Those are separate coupling-development steps.
+construct a zipper mesh or calculate nodal loads itself. For coupling, see
+[nodal forces](#nodal-surface-forces-after-020) and the
+[MPhys interface](#mphys-static-aeroelastic-analysis-experimental-forward-only).
 
 Validation covers analytical planar area/connectivity, disconnected coincident
 patches, shared corners, signed/permuted mappings, reversed endpoint declarations,
@@ -1494,6 +1495,14 @@ candidate still requires `setVolumeCoordinates()` and native geometry checks at
 reference coordinates, if needed, belong to the caller. Do not repeatedly add a
 total displacement to the already deformed surface.
 
+Exponential deformation calls original Fortran `expdecay` (including its spring
+smoothing) and `coincdef`. Coarse controls are collected on communicator root in
+native block/i/k/j order; cross-block smoothing uses the native connected graph.
+Volume coordinates and TFI remain on zone owners. This replaces the Python
+exponential implementation; nearest-point ties and nonzero smoothing can change
+results to follow native behavior. Each call uses the current accepted mesh and
+fresh distance normalization, not a legacy time-dependent motion history.
+
 #### FMEM linear solver backends
 
 The default is `linear_solver="native-gauss-seidel"`. It gathers **only the coarse
@@ -1596,8 +1605,8 @@ Current boundaries and costs:
 - Native TFI supports at most 500 control indices per axis. Overset, nonmatching
   and periodic transforms are outside this interface's supported contract.
 - Global zone/connectivity metadata and axis index lists remain replicated.
-  Default native GS temporarily stores the complete coarse control system on
-  root and supports at most ten coincident controls per group. PETSc keeps the
+  Exponential and default native GS temporarily store the coarse control system on
+  root and support at most ten coincident controls per group. PETSc keeps the
   system distributed but adds Krylov storage and synchronization. Neither gathers
   full volume grids; TFI uses temporary zone-sized workspace.
 - The partition is still by whole zones: a single large zone is not split among
@@ -1858,7 +1867,7 @@ builder = CFL3DBuilder(
         "reynolds": 7223294.8822458545,  # per metre
         "sref": 45.5,
         "cref": 3.25,
-        "iterations": 1000,  # cycles for each coupling evaluation
+        "iterations": 100,  # cycles for each coupling evaluation
     },
     scenario_options={"cruise": {"alpha": 2.0}, "maneuver": {"alpha": 5.0}},
     warper="idwarp",
@@ -1909,23 +1918,79 @@ requested for the first integration. Such derivatives are incomplete and must
 not be used for optimization or sensitivity analysis. Complex-step inputs are
 rejected. Only forward `run_model()` analysis is supported.
 
-The workspace example `case_test/mphys_as_2scenario.py` uses the supplied L2 grid,
-`wingbox.bdf`, original structural callback, IDWarp and MELD. Its `--smoke` mode
-uses three CFD cycles per call and two outer coupling iterations; this is a
-connection/deformation check, not a converged static aeroelastic solution. The
-original ADflow example is preserved as `mphys_as_2scenario_adflow.py`.
+### Running the aeroelastic example
 
-The repository [aerostructural example](../examples/python/mphys_aerostructural/README.md)
-selects native exponential/FMEM or IDWarp and exposes one-time multigrid startup.
-The supplied L2 requires a single level; use a compatible mesh for multigrid.
-The example propagates child `AnalysisError` immediately through its outer
-nonlinear solver and checks native cycle/initialization counters.
+The repository example in `examples/python/mphys_aerostructural` runs cruise
+(2 degrees) and maneuver (5 degrees) sequentially with SA, Mach 0.85, MELD and
+TACS. Use compatible MPI builds of CFL3D (serial and MPI extensions), mpi4py,
+TACS and FUNtoFEM/MELD, plus OpenMDAO/MPhys. IDWarp is needed only when selected;
+the native methods do not require PETSc.
 
-Each evaluation records cumulative fine-grid CFD cycles (`cfd_cycles`),
-`startup_cycles`, native `total_cycles`, `initializations`, residual and loads in
-`coupling-history.jsonl` in its scenario output directory.
-`builder.get_iteration_history(scenario_name)` returns these small records.
-The example accepts `--cfd-iterations 100 --coupling-iterations 80 --fixed-budget`
-to request 8000 CFD cycles per scenario, updating the coupling every 100 cycles.
-Fixed-budget mode disables early tolerance-based termination and reports outer
-nonconvergence rather than raising; it does not imply convergence.
+Run from the example directory with CFL3D importable. Default inputs are
+`case_test/wing_vol_L2.cgns` and `case_test/wingbox.bdf` next to the repository;
+these files are not bundled. Supply other paths with `--grid` and `--struct-mesh`.
+Use a fresh output directory for each run.
+
+```bash
+mpirun -np 3 python run.py --warper cfl3d --method exponential --control-indices l2-tangential-controls.json --fixed-budget --output output-native
+mpirun -np 3 python run.py --warper idwarp --fixed-budget --output output-idwarp
+python compare.py output-native output-idwarp
+```
+
+Both runs use 100 CFD cycles per exchange and 80 exchanges per scenario (8000
+fine-grid cycles). Override these with `--cfd-iterations` and
+`--coupling-iterations`. `--fixed-budget` disables early tolerance-based stopping
+and reports outer nonconvergence without raising; budget completion does not
+establish convergence. Without it, the example uses 1e-14 outer tolerances and
+raises on nonconvergence. `--smoke` uses two exchanges of three cycles for an
+interface check. Geometry errors propagate immediately; no warper fallback or
+reduction of prescribed displacement is applied.
+
+The supplied L2 requires **one grid level**, the default: some blocks have only
+three J nodes and fail native coarse-grid dimension checks. For native
+exponential, use the supplied `l2-tangential-controls.json`. It selects 8505
+controls, resolving wall tangential directions while retaining coarse normal
+spacing, and overrides `--control-stride` (default 4). The file is specific to
+this L2 topology. This configuration completed both 8000-cycle scenarios with
+original `expdecay`; default coarse controls and FMEM did not pass the tested L2
+updates. Detailed diagnostics and numerical comparisons are in `MPI_PROGRESS.md`.
+
+Additional case controls:
+
+| Argument | Default | Meaning |
+| --- | --- | --- |
+| `--thickness` | `0.002` | All shell thicknesses in metres; changing it changes stiffness and mass, including gravity loads. |
+| `--method` | `exponential` | Native adapter method: `exponential` or `fmem`. |
+| `--control-indices` | None | JSON mapping zone names to zero-based i/j/k control lists; matching interface indices are propagated. |
+| `--control-stride` | `4` | Control spacing when explicit indices are absent. |
+| `--beta2` / `--alpha2` | `5.0` / `0.1` | Native exponential parameters. |
+| `--smoothing-iterations` | `0` | Original exponential spring-smoothing sweeps. |
+
+See the [adapter options](#native-cfl3d-deformation-adapter-api-22-experimental)
+for parameter semantics and [control selection](#control-point-selection) for
+other meshes. These settings do not guarantee valid cells.
+
+### Multigrid and output
+
+For a compatible mesh of the same wing, units and boundaries:
+
+```bash
+mpirun -np 3 python run.py --grid /path/to/compatible.cgns --levels 3 --coarse-iterations 100 --warper cfl3d --fixed-budget --output output-native-mg3
+```
+
+Three levels require cell dimensions divisible by four and at least three J/K
+nodes on the coarsest level; other native checks still apply. The example does
+not refine the mesh automatically. Two coarse startup stages of 100 cycles run
+once, followed by 8000 fine cycles: 8200 total. Two levels give 8100 total.
+Later chunks retain multilevel W-cycle correction and refresh geometry on all
+levels after coordinate updates. The example checks that initialization occurs
+once and `total_cycles == cfd_cycles + startup_cycles`. This example's multigrid
+configuration still requires validation on a compatible replacement mesh.
+
+`configuration.json` records settings; each scenario writes
+`coupling-history.jsonl` with cumulative fine cycles, startup/total cycles,
+initialization count, residual and loads. These records are also available from
+`builder.get_iteration_history(scenario_name)`. Completed runs write
+`summary.json` and final flow/surface files. A missing summary indicates an
+incomplete run; partial histories are not final results. `compare.py` compares
+native and IDWarp outputs only after checking matching inputs and budgets.

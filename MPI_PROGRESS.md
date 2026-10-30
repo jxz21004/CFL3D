@@ -1635,3 +1635,40 @@ failure result. README and interface reference identify the same release.
 Historical 0.3.2/API 21 notes remain unchanged. Version consistency and
 whitespace checks passed; no new numerical changes or native rebuild required
 by this metadata-only bump. Users upgrading from API 21 must rebuild extensions.
+
+## Original exponential control kernel (2026-10-30)
+
+Replaced independent Python exponential decay and spring smoothing in
+CFL3DMeshAdapter with existing py_warp_controls(method=0), calling original
+expdecay and coincdef. Reuses native block/i/k/j control order and connected
+graph, gathering coarse controls on root as for native FMEM. Volume TFI remains
+owned. This changes exponential control-stage distribution and may change ties
+or nonzero smoothing results; no new deformation algorithm or API version is
+introduced. Current-coordinate/fresh-normalization semantics remain unchanged.
+
+Validation: 13 adapter unit tests pass, including exact original-kernel
+comparison with two smoothing sweeps. Three-rank native exponential/FMEM
+regression passes, including collective failure handling and ownership checks;
+optional PETSc tests explicitly skipped. MPI guard updated to permit only
+coarse control collection for native exponential, retaining payload checks.
+L2 fixed-target replay with 8505 controls has zero inverted volume cells and
+minimum signed volume ratio 0.8054553344964848. Maximum difference from saved
+Python exponential controls/coordinates is 6.938893903907228e-18. Full 8000-cycle
+coupling was not repeated. Evidence in case_test/warp-diagnosis/native-exp-*.
+
+## L2 original exponential full coupling validation (2026-10-30)
+
+Three Intel MPI ranks completed both cruise (2 degrees) and maneuver (5 degrees)
+with original expdecay/coincdef, the same 8505-control lattice, 2 mm structure,
+SA and one grid level. Each completed 80 coupling evaluations / 8000 fine
+cycles, with one native initialization and all geometry updates accepted.
+The run exited 0 and emitted CFL3D_MPHYS_PASS. No algorithm/configuration
+changes were made during this validation.
+
+- cruise: CL=0.18664682228821633, CD=0.024112462237958543; delta from previous Python exponential CL=6.38378e-16, CD=2.5327e-16.
+- maneuver: CL=0.38381582407889842, CD=0.038153032646678298; delta from previous Python exponential CL=9.1871e-14, CD=-1.64035e-14.
+
+Fixed-budget completion is not a convergence certificate. Evidence: case_test/
+mphys-mg-comparison/native-exp-original-8000, adjacent log, summary.json,
+comparison-previous-exponential.json and per-scenario histories. Run scripts,
+control indices and adapter source snapshot/hash are saved with the results.

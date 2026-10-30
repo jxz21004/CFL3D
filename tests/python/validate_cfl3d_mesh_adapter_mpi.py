@@ -92,7 +92,7 @@ def run(comm, root):
         with CFL3D(mesh3d(), config, comm=comm) as solver:
             solver.solve(output_directory=root / (method + "-mpi"))
             surface = solver.getSurfaceMesh()
-            partition = comm if backend == "petsc-gmres" else PartitionComm(comm, native=method == "fmem")
+            partition = comm if backend == "petsc-gmres" else PartitionComm(comm, native=True)
             adapter = CFL3DMeshAdapter(
                 solver.mesh, surface, comm=partition, method=method, control_stride=2, **backend_options
             )
@@ -175,7 +175,7 @@ def run(comm, root):
                 pass
             else:
                 raise AssertionError("Expected collective invalid-input error")
-            if method == "fmem":
+            if method in ("exponential", "fmem"):
                 from cfl3d import _native
 
                 function = "py_warp_matrix" if backend == "petsc-gmres" else "py_warp_controls"

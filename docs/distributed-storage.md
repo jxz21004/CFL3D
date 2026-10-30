@@ -492,8 +492,10 @@ not an interface guarantee; existing array names and values remain compatible.
 
 `CFL3DMeshAdapter` returns candidate owned volume coordinates for resident
 geometry updates. All methods retain zone-local TFI and route prescribed surface
-targets to canonical owners and requesting zone owners. Exponential decay uses
-local controls and bounded nearest-boundary batches.
+targets to canonical owners and requesting zone owners. Exponential decay gathers
+coarse controls on root and calls original `expdecay`/spring smoothing and
+`coincdef`, then distributes control displacements. Full volume grids remain
+on owners. This replaces the independent Python exponential implementation.
 
 FMEM backend selection is explicit:
 

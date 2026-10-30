@@ -1,7 +1,7 @@
 """Native CFL3D exponential/FMEM control displacement and arc-length TFI.
 
 Opt-in steady mesh deformation, separate from the resident flow workspace.
-Default FMEM gathers only coarse controls for original native Gauss-Seidel;
+Exponential and default FMEM gather coarse controls for original native kernels;
 explicit petsc-gmres keeps control assembly/solving distributed. Volume TFI stays
 on zone owners for both backends. No x0 is retained:
 absolute targets are applied relative to the mesh's current accepted coordinates.
@@ -38,7 +38,8 @@ class CFL3DMeshAdapter:
     distributed GMRES/Jacobi with ``linear_solver_options={"restart": 30}``. ``alpha1``
     controls native GS relaxation only. No backend is selected by availability,
     and failures never trigger automatic fallback. Exponential decay needs no
-    linear solver; selecting petsc-gmres with it is rejected.
+    linear solver; selecting petsc-gmres with it is rejected. Its coarse controls
+    use original expdecay/spring smoothing on root; volume TFI remains local.
     The serial native extension is required, including in MPI jobs. CFD
     installation/metric checks remain a separate setVolumeCoordinates/solve step.
     """
@@ -389,7 +390,7 @@ class CFL3DMeshAdapter:
         return self.shared.sum(local)
 
     def _native_controls(self, points, fixed, prescribed):
-        """Gather only the coarse system and call the original FMEM/GS driver.
+        """Gather coarse controls and call original expdecay or FMEM/GS.
 
         Ordering is block, i, k, j (j fastest), as in native setslave. Full volume
         grids and TFI buffers remain on zone owners. This explicitly chosen
@@ -486,7 +487,7 @@ class CFL3DMeshAdapter:
                     np.concatenate(xyz),
                     graph,
                     np.concatenate(u),
-                    1,
+                    0 if self.method == "exponential" else 1,
                     self.parameters,
                     self.sweeps,
                     len(self.mesh.zones) + 1,
@@ -494,7 +495,7 @@ class CFL3DMeshAdapter:
             finally:
                 _NATIVE_LOCK.release()
             if status:
-                raise ValueError(f"Native FMEM/Gauss-Seidel failed ({status}); refine controls or inspect geometry")
+                raise ValueError(f"Native {self.method} control deformation failed ({status}); refine controls or inspect geometry")
             return [
                 {g: result[slices[g]][permutations[g]] for g in range(len(self.mesh.zones)) if self.owners[g] == rank}
                 for rank in range(self.size)
@@ -525,113 +526,88 @@ class CFL3DMeshAdapter:
         no_unknowns = scalar(self.comm, int(np.count_nonzero(~fixed))) == 0
         if no_motion or no_unknowns:
             return {g: prescribed[idx] for g, idx in self.zone_nodes.items()}
-        if self.method == "fmem" and self.linear_solver == "native-gauss-seidel":
+        if self.method == "exponential" or self.linear_solver == "native-gauss-seidel":
             return self._native_controls(points, fixed, prescribed)
-        if self.method == "exponential":
-            distance, displacement = nearest(self, points, points[fixed], prescribed[fixed], self.canonical[fixed])
-            distance[fixed] = 0
-            rmax = scalar(self.comm, float(np.max(distance, initial=0)), "max")
-            rmin = scalar(self.comm, float(np.min(distance[distance > 1e-13], initial=1e30)), "min")
-            u = (
-                displacement
-                * np.exp(np.minimum(0.0, -self.parameters[2] * (distance / max(rmax, 1e-30) - self.parameters[3])))[
-                    :, None
-                ]
-            )
-            u[fixed] = prescribed[fixed]
-            # Original spring smoothing is simultaneous within each block.
-            for _ in range(self.sweeps):
-                new = u.copy()
+        # Native hookefe measures element-centre distance to fixed control
+        # points and eligible fixed face centres, including remote blocks.
+        centres, samples, cells = [], [points[fixed]], []
+        for g, idx in self.zone_nodes.items():
+            graph = self.graphs[g]
+            plus = graph[:, [2, 4, 6]] - 1
+            for n, (j, k, i) in enumerate(plus):
+                corners = np.array([n, j, k, plus[j, 1], i, plus[k, 2], plus[j, 2], plus[plus[j, 2], 1]])
+                if n != j and n != k and n != i:
+                    centres.append(points[idx[corners]].mean(axis=0))
+                    cells.append(int(idx[n]))
+                if fixed[idx[n]]:
+                    for a, b, c in ((1, 2, 3), (2, 4, 5), (1, 4, 6)):
+                        if fixed[idx[corners[a]]] and fixed[idx[corners[b]]]:
+                            samples.append(points[idx[corners[[0, a, b, c]]]].mean(axis=0)[None, :])
+        distances, _ = nearest(self, np.array(centres).reshape(-1, 3), np.concatenate(samples))
+        rmax = scalar(self.comm, float(np.max(distances, initial=0)), "max")
+        rmin = scalar(self.comm, float(np.min(distances[distances > 1e-13], initial=1e30)), "min")
+        beta = self.parameters[0]
+        logarithm = np.log(1.0 - 10.0 / 500000.0)
+        r0 = (rmax * logarithm + beta * rmin) / (logarithm + beta)
+        if not np.isfinite(r0) or abs(rmax - r0) < 1e-30:
+            raise ValueError("Degenerate FMEM material-distance range")
+        modulus = np.zeros(len(points))
+        modulus[cells] = 10.0 / np.maximum(1e-13, 1.0 - np.exp(-beta * (distances - r0) / (rmax - r0)))
+
+        def assemble():
+            matrices = []
+            if not _NATIVE_LOCK.acquire(blocking=False):
+                raise RuntimeError("Native solver is busy")
+            try:
                 for g, idx in self.zone_nodes.items():
-                    neighbours = self.graphs[g][:, 1:7] - 1
-                    d = np.sqrt(np.sum((points[idx, None, :] - points[idx[neighbours]]) ** 2, axis=2) + rmin / 10000.0)
-                    d[neighbours == np.arange(len(idx))[:, None]] = 1e30
-                    weights = 1 / d
-                    new[idx] = np.sum(u[idx[neighbours]] * weights[:, :, None], axis=1) / weights.sum(axis=1)[:, None]
-                u = new
-                u[fixed] = prescribed[fixed]
-            u = (self._sum(u) / count[:, None])[self.inverse]
-        else:
-            # Native hookefe measures element-centre distance to fixed control
-            # points and eligible fixed face centres, including remote blocks.
-            centres, samples, cells = [], [points[fixed]], []
-            for g, idx in self.zone_nodes.items():
-                graph = self.graphs[g]
-                plus = graph[:, [2, 4, 6]] - 1
-                for n, (j, k, i) in enumerate(plus):
-                    corners = np.array([n, j, k, plus[j, 1], i, plus[k, 2], plus[j, 2], plus[plus[j, 2], 1]])
-                    if n != j and n != k and n != i:
-                        centres.append(points[idx[corners]].mean(axis=0))
-                        cells.append(int(idx[n]))
-                    if fixed[idx[n]]:
-                        for a, b, c in ((1, 2, 3), (2, 4, 5), (1, 4, 6)):
-                            if fixed[idx[corners[a]]] and fixed[idx[corners[b]]]:
-                                samples.append(points[idx[corners[[0, a, b, c]]]].mean(axis=0)[None, :])
-            distances, _ = nearest(self, np.array(centres).reshape(-1, 3), np.concatenate(samples))
-            rmax = scalar(self.comm, float(np.max(distances, initial=0)), "max")
-            rmin = scalar(self.comm, float(np.min(distances[distances > 1e-13], initial=1e30)), "min")
-            beta = self.parameters[0]
-            logarithm = np.log(1.0 - 10.0 / 500000.0)
-            r0 = (rmax * logarithm + beta * rmin) / (logarithm + beta)
-            if not np.isfinite(r0) or abs(rmax - r0) < 1e-30:
-                raise ValueError("Degenerate FMEM material-distance range")
-            modulus = np.zeros(len(points))
-            modulus[cells] = 10.0 / np.maximum(1e-13, 1.0 - np.exp(-beta * (distances - r0) / (rmax - r0)))
+                    graph = self.graphs[g].copy()
+                    graph[:, 7] = (~fixed[idx]).astype(int)
+                    graph[fixed[idx], 9] = 0
+                    sa, ija, status = _native.py_warp_matrix(points[idx], graph, modulus[idx])
+                    if status:
+                        raise ValueError(f"Native local FMEM assembly failed ({status})")
+                    ndof = 3 * len(idx)
+                    rows = np.repeat(np.arange(ndof), np.diff(ija[: ndof + 1]))
+                    start, end = int(ija[0] - 1), int(ija[ndof] - 1)
+                    cols = ija[start:end] - 1
+                    values = sa[start:end]
+                    valid = cols >= 0
+                    matrices.append((idx, sa[:ndof].copy(), rows[valid], cols[valid], values[valid]))
+            finally:
+                _NATIVE_LOCK.release()
+            return matrices
 
-            def assemble():
-                matrices = []
-                if not _NATIVE_LOCK.acquire(blocking=False):
-                    raise RuntimeError("Native solver is busy")
-                try:
-                    for g, idx in self.zone_nodes.items():
-                        graph = self.graphs[g].copy()
-                        graph[:, 7] = (~fixed[idx]).astype(int)
-                        graph[fixed[idx], 9] = 0
-                        sa, ija, status = _native.py_warp_matrix(points[idx], graph, modulus[idx])
-                        if status:
-                            raise ValueError(f"Native local FMEM assembly failed ({status})")
-                        ndof = 3 * len(idx)
-                        rows = np.repeat(np.arange(ndof), np.diff(ija[: ndof + 1]))
-                        start, end = int(ija[0] - 1), int(ija[ndof] - 1)
-                        cols = ija[start:end] - 1
-                        values = sa[start:end]
-                        valid = cols >= 0
-                        matrices.append((idx, sa[:ndof].copy(), rows[valid], cols[valid], values[valid]))
-                finally:
-                    _NATIVE_LOCK.release()
-                return matrices
+        matrices = self._checked(assemble)
+        fixed_unique = self._sum(fixed.astype(int)) > 0
 
-            matrices = self._checked(assemble)
-            fixed_unique = self._sum(fixed.astype(int)) > 0
+        def matvec(vector):
+            local = vector[self.inverse]
+            output = np.zeros_like(local)
+            for idx, diagonal, rows, cols, values in matrices:
+                v = local[idx].ravel()
+                out = diagonal * v + np.bincount(rows, weights=values * v[cols], minlength=len(v))
+                output[idx] = out.reshape(-1, 3)
+            result = self._sum(output)
+            result[fixed_unique] = vector[fixed_unique]
+            return result
 
-            def matvec(vector):
-                local = vector[self.inverse]
-                output = np.zeros_like(local)
-                for idx, diagonal, rows, cols, values in matrices:
-                    v = local[idx].ravel()
-                    out = diagonal * v + np.bincount(rows, weights=values * v[cols], minlength=len(v))
-                    output[idx] = out.reshape(-1, 3)
-                result = self._sum(output)
-                result[fixed_unique] = vector[fixed_unique]
-                return result
+        diagonal = np.zeros_like(points)
+        for idx, d, _, _, _ in matrices:
+            diagonal[idx] = d.reshape(-1, 3)
+        diagonal = self._sum(diagonal)
+        diagonal[fixed_unique] = 1
+        boundary = prescribed_unique.copy()
+        boundary[~fixed_unique] = 0
+        rhs = -matvec(boundary)
+        rhs[fixed_unique] = 0
+        from ._petsc_warp import solve_petsc
 
-            diagonal = np.zeros_like(points)
-            for idx, d, _, _, _ in matrices:
-                diagonal[idx] = d.reshape(-1, 3)
-            diagonal = self._sum(diagonal)
-            diagonal[fixed_unique] = 1
-            boundary = prescribed_unique.copy()
-            boundary[~fixed_unique] = 0
-            rhs = -matvec(boundary)
-            rhs[fixed_unique] = 0
-            from ._petsc_warp import solve_petsc
-
-            result = (
-                solve_petsc(self._petsc, self.shared, matvec, rhs, diagonal, self.linear_solver_options["restart"])
-                + boundary
-            )
-            result[fixed_unique] = boundary[fixed_unique]
-            u = result[self.inverse]
+        result = (
+            solve_petsc(self._petsc, self.shared, matvec, rhs, diagonal, self.linear_solver_options["restart"])
+            + boundary
+        )
+        result[fixed_unique] = boundary[fixed_unique]
+        u = result[self.inverse]
         return {g: u[idx] for g, idx in self.zone_nodes.items()}
 
     def warp(self, surface):

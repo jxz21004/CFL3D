@@ -144,7 +144,7 @@ class NativeMeshAdapterTests(unittest.TestCase):
     def test_single_zone_control_solution_against_original_kernel(self):
         from cfl3d import _native
 
-        # The default FMEM path must reproduce a direct native call with the
+        # Both default paths must reproduce a direct native call with the
         # original j-fastest control ordering, not just a loose approximation.
         for method in ("exponential", "fmem"):
             mesh = mesh3d(False)
@@ -161,26 +161,22 @@ class NativeMeshAdapterTests(unittest.TestCase):
                         graph[i, 7] = 0
                         prescribed[i] = targets[int(node)] - points[i]
                 graph[graph[:, 7] == 0, 9] = 0
-                if method == "fmem":
-                    order = np.array(
-                        sorted(
-                            range(len(adapter.nodes)),
-                            key=lambda i: (adapter.nodes[i][1][0], adapter.nodes[i][1][2], adapter.nodes[i][1][1]),
-                        )
+                order = np.array(
+                    sorted(
+                        range(len(adapter.nodes)),
+                        key=lambda i: (adapter.nodes[i][1][0], adapter.nodes[i][1][2], adapter.nodes[i][1][1]),
                     )
-                    inverse = np.empty_like(order)
-                    inverse[order] = np.arange(len(order))
-                    graph = graph[order].copy()
-                    graph[:, 1:7] = inverse[graph[:, 1:7] - 1] + 1
-                    points, prescribed = points[order], prescribed[order]
+                )
+                inverse = np.empty_like(order)
+                inverse[order] = np.arange(len(order))
+                graph = graph[order].copy()
+                graph[:, 1:7] = inverse[graph[:, 1:7] - 1] + 1
+                points, prescribed = points[order], prescribed[order]
                 expected, status = _native.py_warp_controls(
                     points, graph, prescribed, int(method == "fmem"), adapter.parameters, adapter.sweeps, 1
                 )
                 self.assertEqual(status, 0)
-                if method == "fmem":
-                    np.testing.assert_array_equal(actual, expected[inverse])
-                else:
-                    np.testing.assert_allclose(actual, expected, rtol=0, atol=1e-15)
+                np.testing.assert_array_equal(actual, expected[inverse])
 
     def test_control_storage_is_owned_only(self):
         mesh = mesh3d()

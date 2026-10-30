@@ -9,7 +9,7 @@ Python package version: **0.3.3**. Native interface version: **22**.
 Version 0.3.3 adds forward-only MPhys aeroelastic coupling and a reproducible
 L2 example using IDWarp or CFL3D mesh deformation. It also updates control-point
 selection, native boundary constraints and FMEM solver options. See the
-[aeroelastic example](examples/python/mphys_aerostructural/README.md),
+[MPhys interface and example](docs/python-wrapper.md#mphys-static-aeroelastic-analysis-experimental-forward-only),
 [adapter reference](docs/python-wrapper.md#native-cfl3d-deformation-adapter-api-22-experimental),
 [control-point selection guide](docs/python-wrapper.md#control-point-selection),
 and [release notes](docs/release-notes.md) for validation and limitations.
