@@ -60,6 +60,7 @@ docs/*.*
 __pycache__/
 *.py[cod]
 *.so
+*.so.build.json
 *.mod
 *.egg-info/
 build/python-native*/
@@ -68,5 +69,6 @@ build/mpi-*/
 build/cgns-validation*/
 build/serial-smoke/
 build/native-output-*
+build/performance-audit/
 core
 core.*

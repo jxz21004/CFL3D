@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Build serial/MPI real-valued f2py extensions independently of legacy makefiles."""
 import argparse
+import json
 from concurrent.futures import ThreadPoolExecutor
 import os
 from pathlib import Path
@@ -34,6 +35,9 @@ def main():
     parser.add_argument("--debug", action="store_true")
     parser.add_argument("--standalone", action="store_true", help="Build a serial executable for parity testing")
     parser.add_argument("--extra-fflags", default="", help="Additional Fortran compile flags, for controlled compiler comparisons")
+    parser.add_argument("--extra-ldflags", default="", help="Additional final linker flags, for controlled comparisons")
+    parser.add_argument("--build-dir", type=Path, help="Isolated build directory for compiler/performance comparisons")
+    parser.add_argument("--no-install", action="store_true", help="Leave the extension in the build directory without replacing the installed module")
     args = parser.parse_args()
     args.fc = args.fc or (("mpiifort" if args.mpi else "ifort") if args.compiler_family == "intel"
                           else ("mpif90" if args.mpi else "gfortran"))
@@ -42,6 +46,8 @@ def main():
     suffix = "-mpi" if args.mpi else ""
     module = "_native_mpi" if args.mpi else "_native"
     build = ROOT / (("build/python-standalone" if args.standalone else "build/python-native") + suffix)
+    if args.build_dir is not None:
+        build = args.build_dir.resolve()
     build.mkdir(parents=True, exist_ok=True)
     flags = ["-DPYTHON_API", "-DDBLE_PRECSN", "-fPIC", "-I", str(build)]
     if args.compiler_family == "gnu":
@@ -56,6 +62,27 @@ def main():
     if args.standalone:
         flags.remove("-DPYTHON_API")
     flags.extend(shlex.split(args.extra_fflags))
+    linker_flags = shlex.split(args.extra_ldflags)
+    manifest = {
+        "compiler": shutil.which(args.fc),
+        "compiler_version": subprocess.run([args.fc, "--version"], capture_output=True, text=True, check=True).stdout,
+        "fortran_flags": flags,
+        "extra_linker_flags": linker_flags,
+        "mpi": args.mpi, "standalone": args.standalone,
+        "backend": args.backend, "python": sys.version,
+        "status": "building",
+    }
+    manifest_path = build / "build-manifest.json"
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+
+    def completed(target):
+        manifest.update(status="complete", artifact=str(target))
+        manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+
+    def link(command):
+        manifest["link_command"] = command
+        manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+        subprocess.run(command, check=True)
 
     def compile_file(path):
         output = build / (path.stem + ".o")
@@ -77,7 +104,8 @@ def main():
         objects.extend(pool.map(compile_file, pending))
     if args.standalone:
         target = build / ("cfl3d_mpi" if args.mpi else "cfl3d_seq")
-        subprocess.run([args.fc, *flags, "-o", str(target), *map(str, objects)], check=True)
+        link([args.fc, *flags, "-o", str(target), *map(str, objects), *linker_flags])
+        completed(target)
         print(f"Built {target}")
         return
     guard = build / "python_guard.o"
@@ -90,7 +118,8 @@ def main():
     if args.backend == "meson":
         subprocess.run([sys.executable, "-m", "numpy.f2py", "-c", "--backend", "meson",
                         str(signature), "-L" + str(build), "-lcfl3d_python"], cwd=build, check=True,
-                       env={**os.environ, "FC": args.fc})
+                       env={**os.environ, "FC": args.fc,
+                            "LDFLAGS": shlex.join([*shlex.split(os.environ.get("LDFLAGS", "")), *linker_flags])})
         extensions = list(build.glob(module + "*.so"))
         if len(extensions) != 1:
             raise RuntimeError("Expected one generated f2py extension")
@@ -113,9 +142,15 @@ def main():
             if source.stat().st_size:
                 shim_objects.append(compile_file(source))
         extension = build / (module + sysconfig.get_config_var("EXT_SUFFIX"))
-        subprocess.run([args.fc, "-shared", "-o", str(extension), *map(str, shim_objects), str(archive)], check=True)
+        link([args.fc, "-shared", "-o", str(extension), *map(str, shim_objects), str(archive), *linker_flags])
+    if args.no_install:
+        completed(extension)
+        print(f"Built {extension} (not installed)")
+        return
     target = ROOT / "cfl3d" / extension.name
     shutil.copy2(extension, target)
+    completed(target)
+    shutil.copy2(manifest_path, target.with_suffix(target.suffix + ".build.json"))
     print(f"Built {target}")
 
 

@@ -1672,3 +1672,57 @@ Fixed-budget completion is not a convergence certificate. Evidence: case_test/
 mphys-mg-comparison/native-exp-original-8000, adjacent log, summary.json,
 comparison-previous-exponential.json and per-scenario histories. Run scripts,
 control indices and adapter source snapshot/hash are saved with the results.
+
+## Default-path iteration performance audit (2026-10-30)
+
+User reports approximately half standalone throughput on an older Intel/PBS
+system with hyperthreading and confirms default resident=False. Old executable
+compiler logs are unavailable. This machine is virtualized AMD Ryzen 7 6800H,
+not that production system. No production-case bottleneck is established here.
+
+Audited mgblk/resp/force/histout Python guards: no per-cycle Python callback,
+full-state export, geometry rebuild or added global result reduction was found
+in the inspected steady iteration path. Wall capture is gated to the final
+fine cycle. The per-cycle resident branch is inactive in the default mode.
+Repeated nonresident solve calls still rebuild state between chunks; this does
+not explain a slowdown inside a continuous native iteration segment.
+
+Build defaults are GNU/-O2 unless Intel is explicitly selected; Intel default
+is also -O2 without -xHost. Initial ELF .comment inspection showed GCC but ldd
+confirmed installed serial extension links Intel Fortran runtime: the C shim
+marker is not evidence of a GNU Fortran core. The preliminary GNU-standalone
+versus installed-Intel comparison is not a matched compiler result and is
+excluded from the conclusions below. Prior 2026-10-23 xHost slowdown evidence
+on this AMD host remains machine-specific.
+
+Rebuilt standalone with local ifort 2021.13.2 -O2; compared with existing Intel
+-O2 extension baseline (documented in earlier build records). SA NASA flatplate,
+three grid stages, 100 versus 500 cycles per stage, three repetitions, alternating
+standalone/Python order, CPU 2 affinity and single-thread settings. Python timing
+wraps py_solve only; standalone timing includes process/setup/output. Difference
+of long/short timings removes approximately fixed costs. Reported slope is per
+added cycle at EACH of three stages, not per finest-grid iteration. All runs
+passed final mean-flow parity (rtol 1e-12, atol 1e-14).
+
+| Configuration | Standalone slope (s) | Python slope (s) | Python / standalone |
+| --- | ---: | ---: | ---: |
+| intel-default | 0.01446349 | 0.01432350 | 0.9903 |
+| intel-symbolic | 0.01468018 | 0.01410839 | 0.9610 |
+| intel-o3 | 0.01447605 | 0.01447825 | 1.0002 |
+
+Symbolic experiment only relinks the existing archive with -Wl,-Bsymbolic.
+The O3 experiment completely rebuilt an isolated Intel extension with -O3.
+Neither establishes a robust useful speedup relative to timing variation; no
+linker/optimization default or numerical algorithm was changed. Existing serial
+and MPI extensions were not replaced. Small serial results do not establish
+MPI/PBS/hyperthread performance or dismiss the reported production slowdown.
+
+A temporary serial native-call/standalone timing tool checked slopes and
+numerical parity; it was removed at the user's request after the investigation.
+Added --build-dir/--no-install
+and --extra-ldflags for isolated experiments plus compiler/flag build manifests,
+so future builds retain evidence even when terminal logs are lost. The isolated
+O3 build and full 12-run benchmark completed successfully. Evidence lives under
+build/performance-audit (ignored), including per-run logs/fields/timings,
+comparison.json and the O3 build manifest. Further production attribution needs
+a same-machine run and actual MPI worker mapping; no claimed factor-two fix.

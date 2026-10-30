@@ -141,8 +141,12 @@ Use `=` between the argument and its value, and quote multiple flags. A single
 option can be passed as `--extra-fflags="-xHost"`. The same argument is available
 for serial builds; choose flags supported by the selected compiler.
 
-Each invocation fully recompiles and replaces the selected extension. Finish
-active calculations before rebuilding, then start fresh Python/MPI processes.
+Each invocation fully recompiles. By default it replaces the selected extension;
+finish active calculations first and start fresh Python/MPI processes afterward.
+For isolated experiments, use `--build-dir build/performance-audit/candidate --no-install`. `--extra-ldflags="..."` supplies final linker
+options separately. Builds write `build-manifest.json` with the compiler version,
+Fortran flags and completion status; installed extensions also receive a
+`*.so.build.json` sidecar.
 To restore the default flags, rerun the build command without `--extra-fflags`.
 
 `-xHost` targets the compilation machine's instruction set, which must also be
