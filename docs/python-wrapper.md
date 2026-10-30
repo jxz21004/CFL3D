@@ -1920,6 +1920,51 @@ rejected. Only forward `run_model()` analysis is supported.
 
 ### Running the aeroelastic example
 
+`examples/python/mphys_aerostructural/run.py` is a single-condition forward
+static-aeroelastic example using IDWarp, MELD and TACS. Edit `aero_options` in
+`main()` for your flight condition and reference dimensions. The angle of attack
+is read from this same dictionary by the coupling input; there is no second
+scenario-specific value to update. `aero_options.update({...})` adds the runtime
+settings selected on the command line.
+
+Run from the example directory with compatible MPI builds of CFL3D, mpi4py,
+IDWarp, FUNtoFEM/MELD and TACS, plus MPhys/OpenMDAO:
+
+```bash
+mpirun -np 3 python run.py --grid /path/to/grid.cgns --struct-mesh /path/to/wingbox.bdf --levels 3 --output output-static-aeroelastic
+```
+
+`--levels` accepts 1, 2 or 3 (default 3). Each coarse startup stage runs 500
+cycles once: three levels mean 500 + 500 startup cycles, then fine-grid coupling;
+two levels mean 500 startup cycles; one level skips coarse startup. Later
+exchanges retain the configured multigrid W-cycle corrections. By default each
+exchange advances 100 fine cycles, with at most 80 exchanges. Use
+`--cfd-iterations` and `--coupling-iterations` to change these budgets.
+`--fixed-budget` disables convergence-based stopping; completing that budget
+is not evidence of convergence. Otherwise outer tolerances are 1e-6 relative and
+1e-8 absolute, with an error on nonconvergence. Geometry errors always propagate.
+
+The original L2 requires `--levels 1`; it cannot support coarse startup. Use a
+compatible grid for multiple levels. The example does not refine input grids.
+Edit `structure.py` for your structural material, elements and gravity loads;
+the supplied model is an isotropic CQUAD4 shell with 1g for the `cruise` scenario.
+`--thickness` defaults to 0.002 m. MELD uses y symmetry (`isym=1`), which must
+also match your production model.
+
+On successful completion, `out.json` contains `total` (all-wall force integrals)
+and `components` (named group integrals), together with settings and cycle counts.
+`L`/`D` are lift/drag, `Fx`/`Fy`/`Fz` are force components, and `Mx`/`My`/`Mz`
+are moments; each record includes its units. Dimensional forces require the
+freestream pressure supplied in `aero_options`. Optional `--groups groups.json`
+accepts mappings such as `{"Wing": ["WingUpper", "WingLower"]}`. Groups may
+overlap, so the total is evaluated independently rather than summed from groups.
+Use a fresh output directory to avoid confusing old results with a failed run.
+The builder exposes these cached integrals through
+`get_force_summary(scenario_name)` after scenario finalization, including after
+native workspace cleanup. This is a result cache, not a restart snapshot.
+
+### Native/IDWarp comparison example
+
 The repository example in `examples/python/mphys_aerostructural` runs cruise
 (2 degrees) and maneuver (5 degrees) sequentially with SA, Mach 0.85, MELD and
 TACS. Use compatible MPI builds of CFL3D (serial and MPI extensions), mpi4py,
@@ -1932,8 +1977,8 @@ these files are not bundled. Supply other paths with `--grid` and `--struct-mesh
 Use a fresh output directory for each run.
 
 ```bash
-mpirun -np 3 python run.py --warper cfl3d --method exponential --control-indices l2-tangential-controls.json --fixed-budget --output output-native
-mpirun -np 3 python run.py --warper idwarp --fixed-budget --output output-idwarp
+mpirun -np 3 python run_comparison.py --warper cfl3d --method exponential --control-indices l2-tangential-controls.json --fixed-budget --output output-native
+mpirun -np 3 python run_comparison.py --warper idwarp --fixed-budget --output output-idwarp
 python compare.py output-native output-idwarp
 ```
 
@@ -1975,7 +2020,7 @@ other meshes. These settings do not guarantee valid cells.
 For a compatible mesh of the same wing, units and boundaries:
 
 ```bash
-mpirun -np 3 python run.py --grid /path/to/compatible.cgns --levels 3 --coarse-iterations 100 --warper cfl3d --fixed-budget --output output-native-mg3
+mpirun -np 3 python run_comparison.py --grid /path/to/compatible.cgns --levels 3 --coarse-iterations 100 --warper cfl3d --fixed-budget --output output-native-mg3
 ```
 
 Three levels require cell dimensions divisible by four and at least three J/K

@@ -1726,3 +1726,24 @@ O3 build and full 12-run benchmark completed successfully. Evidence lives under
 build/performance-audit (ignored), including per-run logs/fields/timings,
 comparison.json and the O3 build manifest. Further production attribution needs
 a same-machine run and actual MPI worker mapping; no claimed factor-two fix.
+
+## Single-condition IDWarp production example
+
+Made examples/python/mphys_aerostructural/run.py the single-condition IDWarp
+entry point; retained the prior two-scenario warper comparison as
+run_comparison.py. Flight conditions live in aero_options in main(), with
+runtime values added through update(). Angle of attack uses that same value
+for the MPhys input. No numerical method was changed. Levels 1/2/3 select
+zero/one/two 500-cycle coarse startup stages, followed by fine-grid coupling.
+Added cached builder force summaries for component and independent all-wall
+integrals, exposed after native cleanup and written to out.json.
+
+Validation: 12 force-summary/coarse-stage unit tests passed. Three-rank original
+L2 IDWarp/MELD/TACS smoke completed two exchanges of three fine cycles, producing
+component/total forces with units and recorded aero_options. This deliberately
+short fixed-budget run is not convergence evidence. Evidence:
+build/native-output-idwarp-single-example/out.json. A separate serial native
+three-level fixture verified 500+500 coarse cycles once, then fine chunks 2+2,
+with one initialization (build/native-output-mphys-coarse500). Full coupled
+multigrid validation still requires a compatible production grid; original L2
+cannot support coarse startup.

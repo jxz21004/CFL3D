@@ -46,6 +46,7 @@ class _Session:
         self.adapter = None
         self.loads = None
         self.functions = None
+        self.force_summary = None
         self.alpha = None
         self.history = []
         self.cycles = 0
@@ -57,6 +58,7 @@ class _Session:
     def advance(self, coordinates, alpha):
         b = self.builder
         self.loads = self.functions = None
+        self.force_summary = None
         initialized_cycles = 0
         # Native COMMON state permits one resident owner per process. Scenarios
         # finish/close in post-processing; interleaving unfinished ones is an error.
@@ -142,6 +144,19 @@ class _Session:
             raise om.AnalysisError("CFL3D post-processing requires a successful coupling solve")
         if self.solver is not None:
             self.solver.finalizeSolution()
+            # Preserve small force summaries before closing the native session.
+            # Groups can overlap; total must come from the all-wall integral.
+            components = {}
+            for name in self.solver.getGroupNames():
+                values = self.solver.getSolution(name)
+                prefix = name + "_"
+                components[name] = {
+                    key.removeprefix(prefix): value for key, value in values.items() if key != "units"
+                }
+                components[name]["units"] = {
+                    key.removeprefix(prefix): value for key, value in values["units"].items()
+                }
+            self.force_summary = dict(total=self.solver.getSolution(), components=components)
             self.close()
         return self.functions
 
@@ -262,6 +277,18 @@ class CFL3DBuilder(Builder):
     def get_iteration_history(self, scenario_name=None):
         """Small per-evaluation convergence/load records for the latest session."""
         return deepcopy(self._session(scenario_name).history)
+
+    def get_force_summary(self, scenario_name=None):
+        """Final all-wall and component loads, available after scenario post-processing.
+
+        Local query returning independent copies. Components follow getGroupNames()
+        and may overlap; total is integrated independently over all walls.
+        Forces are N, moments N*m when freestream pressure is provided.
+        """
+        summary = self._session(scenario_name).force_summary
+        if summary is None:
+            raise RuntimeError("Force summary requires successful scenario post-processing")
+        return deepcopy(summary)
 
     def get_mesh_coordinate_subsystem(self, scenario_name=None):
         return _Mesh(coordinates=self.surface["coordinates"].copy())

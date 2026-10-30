@@ -1,7 +1,10 @@
 # CFL3D / MELD / TACS static aeroelastic example
 
-`run.py` runs two forward aeroelastic scenarios with native CFL3D deformation
-or IDWarp. `structure.py` defines the TACS model; `compare.py` compares completed
+`run.py` is the single-condition IDWarp example. Edit `aero_options` in
+`main()` for your case; select 1/2/3 grid levels with `--levels`. Each coarse
+startup stage runs 500 cycles. Final component and total loads go to `out.json`.
+
+`run_comparison.py` retains the two-scenario native CFL3D/IDWarp comparison. `structure.py` defines the TACS model; `compare.py` compares completed
 native/IDWarp runs. `l2-tangential-controls.json` supplies control indices for the
 external L2 mesh.
 
