@@ -97,6 +97,8 @@ def _is_hdf5(path):
 class CGNSMesh:
     zones: list[Zone]
     source: str | None = None
+    # Child name -> original name/dimensions/global vertex offset/start/stop.
+    split_sources: dict = field(default_factory=dict, repr=False)
 
     @classmethod
     def from_file(cls, filename, *, base=None, backend="auto", coordinate_zones=None):

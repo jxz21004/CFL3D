@@ -1747,3 +1747,43 @@ three-level fixture verified 500+500 coarse cycles once, then fine chunks 2+2,
 with one initialization (build/native-output-mphys-coarse500). Full coupled
 multigrid validation still requires a compatible production grid; original L2
 cannot support coarse startup.
+
+## Automatic native block splitting: validation (2026-11-02)
+
+Added an isolated metadata planner and in-memory bridge to unchanged SPLITTER
+kernels. The solver enters it only when workers exceed input zones. Coordinates
+are sliced on original owners; original IDWarp file indices and group aliases
+are preserved. Existing iteration kernels are unchanged.
+
+Validation completed:
+- 23 unit regressions: native repeated cuts, cell count and physical boundary
+  area conservation, swapped/reversed interfaces checked against coordinates,
+  metadata/owned topology signatures, existing surface/mesh exchange/coarse
+  startup tests. All passed.
+- Eight ranks, six 2D blocks -> seven: file and explicit mesh inputs, two-level
+  resident startup and continued advancement, coordinate refresh, original wall
+  selector and wetted area, collective refusal of an illegal higher-level cut.
+- Three ranks, one 3D block -> two: three-level resident startup, continuation
+  and the same geometry/group checks.
+- Three ranks, default resident=False: automatic splitting and restart-based
+  continuation passed for file and explicit mesh inputs.
+- Real IDWarp, four ranks, two original blocks -> three: zero-motion coordinates
+  match within 1e-12 and nonzero surface motion produces volume displacement,
+  while leaving the solver mesh untouched until explicit installation.
+
+IDWarp initially exposed a rank-dependent topology signature: metadata dimensions
+were NumPy integers while coordinate shapes were Python integers. Normalizing
+child dimensions to Python integers fixed it; a unit regression covers it.
+Initial harness failures involved absent h5py, incomplete writer options and
+an inconsistent output directory across chunks; these were fixed in the test
+harness before the successful runs. Small fixtures do not establish production
+scaling, converged-solution equivalence or full aeroelastic convergence.
+
+Commands (PYTHONPATH=tests/python; MPI uses the existing Intel MPI environment):
+python -m unittest test_block_split test_mesh_exchange test_surface_mesh test_coarse_grid_stages -v
+mpirun -np 8 python tests/python/validate_block_split_mpi.py
+mpirun -np 3 python tests/python/validate_block_split_mpi.py --3d
+mpirun -np 3 python tests/python/validate_block_split_mpi.py --legacy
+mpirun -np 4 python tests/python/validate_idwarp_exchange.py
+Evidence: build/native-output-auto-split-8, build/native-output-auto-split-3,
+build/native-output-auto-split-3-legacy; logs under /tmp/cfl3d-split-*.log.

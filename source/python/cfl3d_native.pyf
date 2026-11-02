@@ -1,5 +1,18 @@
 python module _native
     interface
+        subroutine py_split_topology(dims,segments,owners,peers,block,axis,index,nb,ns,capacity,result,result_owners,result_peers,bounds,count,status)
+            integer intent(hide),depend(dims) :: nb=shape(dims,1)
+            integer intent(hide),depend(segments) :: ns=shape(segments,1)
+            integer intent(hide),depend(ns) :: capacity=8*ns+32
+            integer intent(in) :: block,axis,index
+            integer dimension(3,nb),intent(in) :: dims
+            integer dimension(24,ns),intent(in) :: segments
+            integer dimension(ns),intent(in) :: owners,peers
+            integer dimension(24,capacity),intent(out) :: result
+            integer dimension(capacity),intent(out) :: result_owners,result_peers
+            integer dimension(6,nb+1),intent(out) :: bounds
+            integer intent(out) :: count,status
+        end subroutine py_split_topology
         subroutine py_warp_matrix(points,graph,modulus,n,sa,ija,status)
             integer intent(hide),depend(points) :: n=shape(points,0)
             real*8 dimension(n,3),intent(in) :: points

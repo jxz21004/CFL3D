@@ -708,13 +708,11 @@ class CFL3D:
         # storage on the host during installation/output preparation.
         zones = [deepcopy(replace(z, coordinates=None, coordinate_dimensions=tuple(z.dimensions)))
                  for z in mesh.zones]
-        return CGNSMesh(zones, mesh.source)
+        return CGNSMesh(zones, mesh.source, deepcopy(mesh.split_sources))
 
     def _install_distributed_mesh(self, complete):
         metadata = self._checked(lambda: self._mesh_metadata(complete) if self.comm.rank == 0 else None)
         self.mesh = self.comm.bcast(metadata, root=0)
-        if self.comm.size-1 > len(self.mesh.zones):
-            raise ValueError("This MPI interface requires at least one zone per worker")
         # Input placement is temporary. After the first native solve, coordinates
         # move to the actual load-balancer owners, without a global broadcast.
         owners = tuple(1+i % (self.comm.size-1) for i in range(len(self.mesh.zones)))
@@ -737,6 +735,9 @@ class CFL3D:
             zone.coordinates = local.get(zone.name)
         self._mesh_owners = owners
         self._zone_owners = None
+        if self.comm.size-1 > len(self.mesh.zones):
+            from .mesh._block_split import install_split
+            install_split(self)
 
     def _redistribute_coordinates(self, owners):
         if self.comm is None or tuple(owners) == self._mesh_owners:
@@ -1318,6 +1319,10 @@ class CFL3D:
                 if path in qualified:
                     raise ValueError(f"Duplicate CGNS boundary path {path}")
                 qualified[path] = {key}
+                if zone.name in self.mesh.split_sources:
+                    original = self.mesh.split_sources[zone.name][0]
+                    qualified.setdefault(f"{original}/{boundary.name}", set()).add(key)
+                    zones.setdefault(original, set()).add(key)
                 zones.setdefault(zone.name, set()).add(key)
                 boundaries.setdefault(boundary.name, set()).add(key)
                 stem, separator, suffix = boundary.name.rpartition("_")

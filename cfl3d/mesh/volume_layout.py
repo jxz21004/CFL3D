@@ -12,6 +12,7 @@ class VolumeMeshLayout:
     """
 
     def __init__(self, mesh):
+        self._split_sources = mesh.split_sources
         self.topology = tuple((z.name, tuple(z.dimensions)) for z in mesh.zones)
         self.owned = tuple(i for i, z in enumerate(mesh.zones) if z.coordinates is not None)
         counts = [int(np.prod(d)) for _, d in self.topology]
@@ -29,8 +30,16 @@ class VolumeMeshLayout:
 
     def component_indices(self):
         """Zero-based common CGNS coordinate DOFs required by IDWarp."""
-        arrays = [np.arange(3*self.offsets[i], 3*self.offsets[i+1], dtype=np.int64)
-                  for i in self.owned]
+        arrays = []
+        for i in self.owned:
+            name, dims = self.topology[i]
+            if name not in self._split_sources:
+                arrays.append(np.arange(3*self.offsets[i], 3*self.offsets[i+1], dtype=np.int64))
+                continue
+            _, original_dims, offset, lo, hi = self._split_sources[name]
+            ii, jj, kk = np.ogrid[lo[0]:hi[0], lo[1]:hi[1], lo[2]:hi[2]]
+            vertices = (offset + ii + original_dims[0]*(jj + original_dims[1]*kk)).ravel(order="F")
+            arrays.append((3*vertices[:, None] + np.arange(3)).ravel())
         return np.concatenate(arrays) if arrays else np.empty(0, dtype=np.int64)
 
     def unpack(self, coordinates):

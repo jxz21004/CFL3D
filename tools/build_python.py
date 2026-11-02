@@ -99,6 +99,11 @@ def main():
     pending = [libs / name for name in sources(ROOT / "build/cfl/libs/makefile", "FSRC_LIBS", "FSRC_SPEC")]
     pending += [dist / name for name in sources(ROOT / f"build/cfl/{'mpi' if args.mpi else 'seq'}/makefile", "FSRC_DIST")]
     pending += [dist / "main.F", dist / "development.F"]
+    if not args.standalone:
+        pending.append(ROOT / "source/python/python_splitter.F90")
+        pending.extend(ROOT / "source/splitter" / (name + ".F") for name in
+                       ("mapsplt", "movseg", "renmbr", "spltsg", "splt2",
+                        "mkintr", "ipfix", "ipadd", "mkseg", "iprvsg"))
     pending = list(dict.fromkeys(pending))
     with ThreadPoolExecutor(max_workers=args.jobs) as pool:
         objects.extend(pool.map(compile_file, pending))

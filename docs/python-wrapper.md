@@ -682,6 +682,36 @@ regression evidence.
 
 ## MPI
 
+### Automatic block splitting at initialization
+
+When MPI workers (`comm.size - 1`, excluding the native host) outnumber input
+zones, initialization splits the largest legally splittable blocks until every
+worker can receive a block. For example, six input blocks with eight MPI ranks
+become seven blocks. If the existing block count is sufficient, this step is
+skipped; it is not a general load-balancing optimizer.
+
+Splitting uses the original NASA SPLITTER topology kernels through an in-memory
+bridge. Only topology is processed on root; original owners slice and exchange
+coordinates. No intermediate XYZ file is written. This does not remove the
+existing later native-setup geometry gather. Requested multigrid levels are
+preserved, including boundary/interface alignment and minimum coarse dimensions.
+An impossible plan fails collectively rather than reducing the level count.
+
+Original family/group names and original `zone/boundary` selectors remain
+available. New child names appear in `solver.mesh.zones` and `result.zone_owners`.
+IDWarp can continue using the original input file: `VolumeMeshLayout` maps each
+child coordinate back to its original file index, including duplicated interface
+vertices. The topology stays fixed during resident advancement and deformation.
+
+The serial extension must be rebuilt to expose `py_split_topology`, even when
+running an MPI solve. Use the normal build commands with your existing compiler
+selection. This initial implementation supports the wrapper's rectangular,
+point-matched interfaces and scalar BC datasets. Spatially varying BC datasets
+are rejected when splitting is needed. An initial `restartFile` cannot be
+repartitioned by this path; use a matching topology/worker configuration.
+Ordinary restart-based continuation within an automatically split calculation
+remains supported.
+
 ### Local storage and explicit collection (since native API 12)
 
 Coordinates, `result.fields`, detailed wall results, and cached restart records
