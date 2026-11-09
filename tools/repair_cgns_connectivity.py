@@ -12,7 +12,7 @@ from cfl3d.mesh import repair_cgns_connectivity
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('input', type=Path, help='Original CGNS file (never modified)')
-    parser.add_argument('-o', '--output', type=Path, required=True, help='Repaired CGNS copy')
+    parser.add_argument('output', type=Path, help='Repaired CGNS copy')
     parser.add_argument('--overwrite', action='store_true', help='Replace an existing output file')
     args = parser.parse_args()
     try:

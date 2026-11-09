@@ -867,7 +867,7 @@ write back input grids during initialization.
 From the repository root, run once (not with `mpirun`):
 
 ```bash
-python tools/repair_cgns_connectivity.py input.cgns -o repaired.cgns
+python tools/repair_cgns_connectivity.py input.cgns repaired.cgns
 ```
 
 The equivalent Python script is:
