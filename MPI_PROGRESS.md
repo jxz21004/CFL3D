@@ -1787,3 +1787,86 @@ mpirun -np 3 python tests/python/validate_block_split_mpi.py --legacy
 mpirun -np 4 python tests/python/validate_idwarp_exchange.py
 Evidence: build/native-output-auto-split-8, build/native-output-auto-split-3,
 build/native-output-auto-split-3-legacy; logs under /tmp/cfl3d-split-*.log.
+
+## 2026-11-09: Explicit interface orientation repair
+
+Added mesh/repair_connectivity.py: repair_interface_orientations(mesh) explicitly
+repairs uniquely coordinate-matched donor face axis permutations/reversals on a
+complete local mesh. All changes are staged before application; ambiguous or
+nonmatching geometry fails without partial edits. Coordinates, donor face extents,
+source ranges and original files are unchanged. This is optional preprocessing,
+not a distributed repair or a relaxed solver validation policy. Root complete-mesh
+preprocessing uses the existing compatibility scatter and requires whole-mesh RAM.
+Five focused tests pass (reciprocity/idempotence, swaps/reversed source endpoints,
+atomic failure, ambiguity, missing coordinates).
+
+wing_test_L1p5.cgns has 12 blocks. The 16-rank run fails the split planner on
+ domain.00008 (3,2,49). The 8-rank unsplit run instead finds mismatched 00008/00009
+interface nodes. Reversing donor i (08->09) matches all 98 nodes exactly; reciprocal
+transforms become [2,-1,3] and [-2,1,3], with reversed donor endpoints. The repaired
+8-rank, SA, single-level, five-cycle attempt passes Python interface validation
+but exits 99 during native precfl3d sizing: "Neither JDIM nor KDIM can be 2"
+(two ghost BCs). No CFD iterations completed; no native check was bypassed.
+Evidence: case_test/l1p5-mpi8-check/{repairs.json,repaired.log,output-repaired/}.
+
+Local pyHyp writeCGNS calls cgnsutilities readGrid/connect/writeToCGNS when
+ autoConnect is enabled. A read-only in-memory rerun of local cgnsutilities
+Grid.connect on this mesh reproduces the incorrect positive [2,1,3] transforms
+and increasing donor ranges in both directions. This establishes reproduction in
+that local connectivity generator, not a diagnosis of all pyHyp versions or its
+volume extrusion algorithm. No upstream packages or input CGNS were modified.
+
+## 2026-11-09: ADflow check of original L1p5 CGNS
+
+Ran the original, unrepaired wing_test_L1p5.cgns through the installed ADflow with
+8 Intel MPI ranks, the existing rigid comparison options, single-grid and
+nCycles=5 (short budget, not convergence validation). Initialization and solve
+returned normally, exit 0, fatalFail=False; solveFailed=True at the short budget.
+The ANK history reports two nonlinear rows with accumulated iteration counts 3
+and 8, so nCycles=5 is not five completed nonlinear ANK steps. CL=0.0497781710,
+CD=0.2019320122 are startup readouts, not converged results.
+
+The actual runtime log explicitly warns of two noncoincident original interfaces:
+domain.00008/SF46 -> domain.00009 and domain.00009/SF55 -> domain.00008,
+maximum deviation 8.69735 in both directions; it says computation continues.
+Thus accepting this mesh and diagnosing interface mismatch are compatible here.
+Source trace: read1to1Conn -> checkTransform repairs normal components if needed,
+not coordinate-based tangential reversal. For this pair the normal component is
+already consistent. loadBalance copies the stored l1/l2/l3 into subblock metadata;
+pointMatchedCommPattern constructs donor indices from these transforms and donor
+range starts. No coordinate-based tangential orientation repair was found in
+this inspected chain. Do not generalize this to all ADflow configurations.
+Evidence: case_test/l1p5-adflow-check/{run.py,options.json,run.log,summary.json}.
+Input SHA256: 6efbad1efb5c507e1842304ae99c749f79c024c54f524f23b366193c833a35ff.
+No input file, installed package, or automatic repair policy changed.
+
+## 2026-11-09: ADflow original/repaired L1p5, nCycles=100 comparison
+
+Ran sequential 8-rank Intel MPI ADflow jobs with identical existing SA/ANK cruise
+settings (Mach .85, alpha 2 degrees, altitude 10000 m, single-grid). nCycles=100;
+both stopped after 24 nonlinear updates at accumulated count 101, fatalFail=False,
+solveFailed=True (short-budget unconverged results). No performance conclusion.
+Original CL=0.5365422705257514, CD=0.04592376400458625.
+Repaired CL=0.5365182173221359, CD=0.04592038459509665.
+Repaired-minus-original CL=-2.40532036155372e-5 (-0.0044830%);
+CD=-3.3794094895997495e-6 (-0.0073587%). Final density residuals 7.1692875807
+and 7.1649891362 respectively. The original prints the two interface warnings;
+the repaired copy does not. This supports a small effect on these early integrated
+loads, not a proof of converged-field equivalence or absence of local effects.
+
+Test-only prepare.py copies the original CGNS and overwrites only the two named
+1to1 entries using libcgns in modify mode. Readback verifies all coordinates and
+boundary data unchanged and all connection mappings against the repaired mesh;
+CGNS rewrites may reorder entries. Original SHA256 unchanged. No original-file
+writeback or automatic solver repair introduced. Artifacts, scripts, histories,
+options and comparison.json: case_test/l1p5-adflow-100/.
+
+Added serial file API repair_cgns_connectivity(input, output, overwrite=False)
+and tools/repair_cgns_connectivity.py, documented together in python-wrapper.md.
+No solver initialization hooks/options added. Both preserve the input and validate
+a temporary copy before publishing output. Real L1p5 CLI/Python checks passed:
+two repairs, exact coordinate/BC readback, unchanged input hash, empty second
+repair, existing-output/in-place refusal, explicit overwrite and injected native
+write failure preserving the previous output and cleaning the temporary file.
+Five orientation unit tests pass. File helper currently requires one base and
+complete local mesh memory, including a verification copy.

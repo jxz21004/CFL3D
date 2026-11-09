@@ -858,6 +858,65 @@ face cells. Shared edge lines are permitted. `GridConnectivity1to1_t` transforms
 may permute or reverse axes; paired coordinates are verified, and reciprocal
 connections with reversed endpoints are deduplicated.
 
+### Repairing interface directions before a solve
+
+Use this separate preprocessing step when declared one-to-one interface directions
+are inconsistent with coincident face coordinates. The solver does not repair or
+write back input grids during initialization.
+
+From the repository root, run once (not with `mpirun`):
+
+```bash
+python tools/repair_cgns_connectivity.py input.cgns -o repaired.cgns
+```
+
+The equivalent Python script is:
+
+```python
+from cfl3d.mesh import repair_cgns_connectivity
+
+repairs = repair_cgns_connectivity("input.cgns", "repaired.cgns")
+for change in repairs:
+    print(change["zone"], "->", change["donor"],
+          change["old_transform"], "->", change["new_transform"])
+```
+
+After preprocessing, use **the same `repaired.cgns` file** for CFL3D and IDWarp
+(and any other solver consuming this mesh). Create the solvers/warpers after
+writing the repaired file; existing objects do not reload it automatically.
+
+Both entry points use the same implementation. The input is never overwritten;
+input and output must be distinct files. An existing output is rejected unless
+`--overwrite` (Python: `overwrite=True`) is supplied. A temporary output is read
+back and checked before publication. The CLI prints JSON; the Python function
+returns a list of old/new donor ranges and transforms. An already correct mesh
+produces a copy and an empty repair list. No automatic backup or in-place mode is
+needed because the original input is retained.
+
+Only axis permutations/reversals inside the **declared donor face** are searched.
+Every paired vertex must match (`rtol=atol=1e-10`), and the repair must be unique.
+Coordinates, boundary conditions and face extents are not changed. An ambiguous
+or nonmatching face raises an error without publishing an output. This does not
+repair thin blocks, negative volumes, missing connections or wrong donor faces.
+
+The file helper requires one CGNS base and libcgns support for the file format
+(ADF, or HDF5 with an HDF5-enabled library). It loads a complete mesh and a
+verification copy locally; budget whole-mesh memory. This is a serial utility,
+not part of distributed solver loading. Run it before launching the MPI job.
+
+For advanced in-memory preprocessing, the lower-level function remains available:
+
+```python
+from cfl3d import CGNSMesh
+from cfl3d.mesh import repair_interface_orientations
+
+mesh = CGNSMesh.from_file("input.cgns")
+repairs = repair_interface_orientations(mesh)  # changes only this mesh object
+```
+
+This lower-level function stages all edits before applying them and does not write
+any file. Prefer the file helper when CFL3D and IDWarp must share the repaired grid.
+
 | CGNS boundary type | Native code / data |
 | --- | --- |
 | `BCFarfield` | 1003 |
