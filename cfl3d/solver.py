@@ -14,7 +14,6 @@ from time import perf_counter
 import warnings
 from numbers import Real
 import numpy as np
-from ._mpi_objects import large_objects
 from .cgns import CGNSMesh
 
 _NATIVE_LOCK = threading.Lock()
@@ -712,8 +711,10 @@ class CFL3D:
         return CGNSMesh(zones, mesh.source, deepcopy(mesh.split_sources))
 
     def _install_distributed_mesh(self, complete):
+        from ._mpi_objects import mesh_communicator
         metadata = self._checked(lambda: self._mesh_metadata(complete) if self.comm.rank == 0 else None)
         self.mesh = self.comm.bcast(metadata, root=0)
+        self.comm = mesh_communicator(self.comm, self.mesh)
         # Input placement is temporary. After the first native solve, coordinates
         # move to the actual load-balancer owners, without a global broadcast.
         owners = tuple(1+i % (self.comm.size-1) for i in range(len(self.mesh.zones)))
@@ -731,7 +732,7 @@ class CFL3D:
             pieces = self._checked(lambda: [
                 {z.name: z.coordinates for i,z in enumerate(complete.zones) if owners[i] == rank}
                 for rank in range(self.comm.size)] if self.comm.rank == 0 else None)
-            local = large_objects(self.comm).scatter(pieces, root=0)
+            local = self.comm.scatter(pieces, root=0)
         for zone in self.mesh.zones:
             zone.coordinates = local.get(zone.name)
         self._mesh_owners = owners
@@ -750,7 +751,7 @@ class CFL3D:
                     messages[owners[i]][zone.name] = zone.coordinates
             return messages
         messages = self._checked(send_buffers)
-        received = large_objects(self.comm).alltoall(messages)
+        received = self.comm.alltoall(messages)
         local = {name: xyz for part in received for name,xyz in part.items()}
         for zone in self.mesh.zones:
             zone.coordinates = local.get(zone.name)
@@ -760,7 +761,7 @@ class CFL3D:
         if self.comm is None:
             return mesh
         local = {z.name: z.coordinates for z in mesh.zones if z.coordinates is not None}
-        pieces = large_objects(self.comm).gather(local, root=0)
+        pieces = self.comm.gather(local, root=0)
         def assemble():
             if self.comm.rank != 0:
                 return None
@@ -788,7 +789,7 @@ class CFL3D:
             finally:
                 self.mesh = local_mesh
         prepared = self._checked(prepare)
-        arrays, keys = large_objects(self.comm).bcast((prepared[0], self._surface_keys) if self.comm.rank == 0 else None, root=0)
+        arrays, keys = self.comm.bcast((prepared[0], self._surface_keys) if self.comm.rank == 0 else None, root=0)
         self._surface_keys = keys
         self._progress("Native input ready")
         return arrays, prepared[1] if self.comm.rank == 0 else np.empty((0,3), order="F")
@@ -1083,7 +1084,7 @@ class CFL3D:
         owners = self._restart_owners(owners)
         pieces = self._checked(lambda: partition_state(state, self.mesh, owners, self.comm.size)
                                if self.comm.rank == 0 else None)
-        return large_objects(self.comm).scatter(pieces, root=0)
+        return self.comm.scatter(pieces, root=0)
 
     def _stage_flow_state(self, state, path):
         """Stream owned zone records to native host I/O, without a full root cache."""
@@ -1159,7 +1160,7 @@ class CFL3D:
             return {key: value.copy() for key, value in self._last_fields.items()}
         if len(set(self.comm.allgather(root))) != 1:
             raise RuntimeError("gatherFields root differs within comm")
-        gathered = large_objects(self.comm).gather(self._last_fields, root=root)
+        gathered = self.comm.gather(self._last_fields, root=root)
         if self.comm.rank == root:
             return {key: value for part in gathered for key, value in part.items()}
         return None
@@ -1616,7 +1617,7 @@ class CFL3D:
                         if z.coordinates is not None for b in z.boundaries if (z.name,b.name) in walls}
             return vertices, walls, forces
         payload = self._checked(local_payload)
-        gathered = large_objects(self.comm).gather(payload, root=0)
+        gathered = self.comm.gather(payload, root=0)
         def run():
             if self.comm.rank != 0:
                 return None
@@ -1633,7 +1634,7 @@ class CFL3D:
             finally:
                 self._surface_context = None
         result = self._checked(run)
-        return large_objects(self.comm).bcast(result, root=0) if broadcast else result
+        return self.comm.bcast(result, root=0) if broadcast else result
 
     def _analysis_surface(self, require_solution=False):
         from .surface_analysis import SurfaceMesh

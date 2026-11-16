@@ -682,21 +682,27 @@ regression evidence.
 
 ## MPI
 
-Python communication carrying coordinate, field or detailed surface arrays uses
-`mpi4py.util.pkl5` (mpi4py >= 4.0) to support payloads exceeding the traditional
-2 GiB MPI byte-count limit. This is internal: the public/native communicator and
-the communicators passed to IDWarp/MPhys are unchanged. Small control messages
-and existing streaming checkpoint transfers retain their original paths. Native
-initialization still gathers whole-case coordinates on root; pkl5 does not remove
-that memory requirement or change Fortran integer/workspace limits.
+After loading mesh metadata and before distributing coordinates, CFL3D selects
+object transport collectively. The estimate counts only three double-precision
+coordinates per global grid point (24 bytes), without serialization overhead.
+At an estimate of 2 GiB or more, CFL3D imports `mpi4py.util.pkl5` and wraps
+`solver.comm`; otherwise it keeps the ordinary communicator without importing
+pkl5. This enables pkl5 at 89,478,486 global grid points. Large meshes require
+pkl5 collective support (mpi4py >= 4.0); missing
+support is reported on all ranks before coordinate distribution.
 
-Transport is selected by call site, not by a rank-local payload-size test:
-array-object calls use pkl5 even for small meshes. Their overhead has not been
-benchmarked against ordinary object communication. This support does not extend
-to large-object transfers inside external coupling libraries. Small MPI and
-IDWarp/MPhys/TACS/FUNtoFEM coupling checks pass with Intel MPI; an end-to-end
-mesh exceeding 2 GiB and the production OpenMPI configuration have not been
-validated here. Large-memory cases are not part of the default regression suite.
+Subsequent communication uses `solver.comm` directly, with no per-message size
+checks. A file reload rechecks the mesh; an already enabled pkl5 communicator is
+retained. Standalone mesh adapters select transport at construction too. The
+caller’s original communicator is not mutated. Fortran still receives its native
+MPI handle, and external solvers retain their own communication paths.
+
+Below this coordinate threshold, field/surface payloads or serialization overhead
+can still exceed the ordinary transport limit. Metadata is initially exchanged using the incoming
+communicator. Native initialization still gathers whole-case coordinates on root;
+Fortran integer/workspace limits are unchanged. Small-message overhead has not
+been benchmarked. End-to-end meshes exceeding 2 GiB and production OpenMPI have
+not been validated here; large-memory tests are not in the default regression.
 
 ### Automatic block splitting at initialization
 
@@ -2026,7 +2032,7 @@ rejected. Only forward `run_model()` analysis is supported.
 ### Running the aeroelastic example
 
 `examples/python/mphys_aerostructural/run.py` is a single-condition forward
-static-aeroelastic example using IDWarp, MELD and TACS. Edit `aero_options` in
+static-aeroelastic example. Edit `aero_options` in
 `main()` for your flight condition and reference dimensions. The angle of attack
 is read from this same dictionary by the coupling input; there is no second
 scenario-specific value to update. `aero_options.update({...})` adds the runtime

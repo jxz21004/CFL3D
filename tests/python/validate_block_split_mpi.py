@@ -11,6 +11,11 @@ from cfl3d.solution_io import write_volume
 from cfl3d.mesh.volume_layout import VolumeMeshLayout
 
 comm=MPI.COMM_WORLD
+# Exercise large-object protocol selection with tiny arrays, never a 2 GiB mesh.
+force_pkl5 = '--pkl5' in sys.argv
+if force_pkl5:
+    from cfl3d import _mpi_objects
+    _mpi_objects._OBJECT_BYTE_BUDGET = 1
 legacy = '--legacy' in sys.argv
 root=Path('build/native-output-auto-split-'+str(comm.size)+('-legacy' if legacy else ''))
 mesh=box_mesh()
@@ -48,6 +53,12 @@ original=np.concatenate([z.coordinates.reshape(-1,3,order='F') for z in mesh.zon
 for mode in ('file','complete'):
     inp=str(root/'input.cgns') if mode=='file' else mesh
     with CFL3D(inp,opts,comm=comm) as solver:
+        if force_pkl5:
+            from mpi4py.util import pkl5
+            assert isinstance(solver.comm, pkl5.Intracomm)
+            assert solver.comm.py2f() == comm.py2f()
+        else:
+            assert solver.comm is comm
         assert len(solver.mesh.zones)==comm.size-1
         layout=VolumeMeshLayout(solver.mesh)
         np.testing.assert_array_equal(layout.coordinates(solver.mesh).ravel(), original[layout.component_indices()])

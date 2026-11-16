@@ -5,7 +5,6 @@ same CGNS zone order as the CFL3D mesh. This layer returns staged coordinates;
 install them with solver.setVolumeCoordinates() followed by solve().
 """
 import numpy as np
-from .._mpi_objects import large_objects
 from .volume_layout import VolumeMeshLayout
 
 
@@ -29,7 +28,7 @@ def local_surface(surface, comm=None):
         raise ValueError("Expected finite surface coordinates (N,3) and quad connectivity (M,4)")
     wanted = np.unique(faces)
     # IDs alone form the ownership directory; no global coordinate gather.
-    partitions = [ids] if comm is None else large_objects(comm).allgather(ids)
+    partitions = [ids] if comm is None else comm.allgather(ids)
     owners = {}
     for rank, part in enumerate(partitions):
         for node in part:
@@ -44,10 +43,10 @@ def local_surface(surface, comm=None):
     requests = [[] for _ in range(size)]
     for node in wanted:
         requests[owners[int(node)]].append(int(node))
-    incoming = requests if comm is None else large_objects(comm).alltoall(requests)
+    incoming = requests if comm is None else comm.alltoall(requests)
     local = dict(zip(map(int, ids), xyz))
     replies = [{node: local[node] for node in part} for part in incoming]
-    received = replies if comm is None else large_objects(comm).alltoall(replies)
+    received = replies if comm is None else comm.alltoall(replies)
     points = {node: value for part in received for node, value in part.items()}
     coordinates = np.array([points[int(node)] for node in wanted], dtype=float).reshape(-1, 3)
     connectivity = np.searchsorted(wanted, faces).astype(np.int32).ravel()
@@ -62,7 +61,8 @@ class IDWarpAdapter:
     """
 
     def __init__(self, warper, mesh, surface, comm=None):
-        self.comm = comm
+        from .._mpi_objects import mesh_communicator
+        self.comm = comm = mesh_communicator(comm, mesh)
         self._surface_ids = np.asarray(surface["node_ids"]).copy()
         self._faces = np.asarray(surface["connectivity"]).copy()
         self.warper = warper

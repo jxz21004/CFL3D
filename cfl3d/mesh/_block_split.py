@@ -7,7 +7,6 @@ from copy import deepcopy
 from dataclasses import replace
 from threading import Lock
 import numpy as np
-from .._mpi_objects import large_objects
 from ..cgns import CGNSMesh, Connection
 
 _LOCK = Lock()  # SPLITTER's COMMON state is separate from solver state.
@@ -206,7 +205,7 @@ def install_split(solver):
                 outgoing[owners[i]][z.name] = np.array(local[origin][selection], copy=True)
         return outgoing
     outgoing = solver._checked(slices)
-    received = large_objects(comm).alltoall(outgoing)
+    received = comm.alltoall(outgoing)
     local = {k:v for part in received for k,v in part.items()}
     for z in plan.zones:
         z.coordinates = local.get(z.name)

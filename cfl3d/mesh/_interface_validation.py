@@ -1,6 +1,5 @@
 """Update-only checks: no work is added to the native iteration loop."""
 import numpy as np
-from .._mpi_objects import large_objects
 
 
 def validate_interfaces(mesh, pending, owners, comm, checked):
@@ -25,7 +24,7 @@ def validate_interfaces(mesh, pending, owners, comm, checked):
         return messages
 
     messages = checked(requests)
-    received = messages if comm is None else large_objects(comm).alltoall(messages)
+    received = messages if comm is None else comm.alltoall(messages)
 
     def compare():
         for part in received:
