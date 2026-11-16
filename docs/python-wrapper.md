@@ -690,6 +690,14 @@ and existing streaming checkpoint transfers retain their original paths. Native
 initialization still gathers whole-case coordinates on root; pkl5 does not remove
 that memory requirement or change Fortran integer/workspace limits.
 
+Transport is selected by call site, not by a rank-local payload-size test:
+array-object calls use pkl5 even for small meshes. Their overhead has not been
+benchmarked against ordinary object communication. This support does not extend
+to large-object transfers inside external coupling libraries. Small MPI and
+IDWarp/MPhys/TACS/FUNtoFEM coupling checks pass with Intel MPI; an end-to-end
+mesh exceeding 2 GiB and the production OpenMPI configuration have not been
+validated here. Large-memory cases are not part of the default regression suite.
+
 ### Automatic block splitting at initialization
 
 When MPI workers (`comm.size - 1`, excluding the native host) outnumber input
