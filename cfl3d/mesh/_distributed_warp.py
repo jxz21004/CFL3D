@@ -5,10 +5,11 @@ nearest-boundary queries consume bounded source batches without retaining them.
 """
 
 import numpy as np
+from .._mpi_objects import large_objects
 
 
 def exchange(comm, values):
-    return values if comm is None else comm.alltoall(values)
+    return values if comm is None else large_objects(comm).alltoall(values)
 
 
 def scalar(comm, value, operation="sum"):
@@ -78,7 +79,7 @@ def nearest(adapter, queries, sources, source_values=None, source_keys=None):
                 if adapter.rank == rank
                 else None
             )
-            xyz, u, ids = payload if adapter.comm is None else adapter.comm.bcast(payload, root=rank)
+            xyz, u, ids = payload if adapter.comm is None else large_objects(adapter.comm).bcast(payload, root=rank)
             order = np.argsort(ids, kind="stable")
             xyz, u, ids = xyz[order], u[order], ids[order]
             for q in range(0, len(queries), batch):

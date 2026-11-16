@@ -8,6 +8,7 @@ from collections import Counter, deque
 import hashlib
 
 import numpy as np
+from ._mpi_objects import large_objects
 
 
 class SurfaceTopology:
@@ -183,7 +184,7 @@ def build_surface_mesh(mesh, members, wall_keys, coordinate_owners, comm, checke
         return outgoing
 
     outgoing = checked(registrations)
-    received = outgoing if comm is None else comm.alltoall(outgoing)
+    received = outgoing if comm is None else large_objects(comm).alltoall(outgoing)
 
     def merge():
         owned = {}
@@ -204,7 +205,7 @@ def build_surface_mesh(mesh, members, wall_keys, coordinate_owners, comm, checke
         return requests
 
     requests = checked(coordinate_requests)
-    incoming = requests if comm is None else comm.alltoall(requests)
+    incoming = requests if comm is None else large_objects(comm).alltoall(requests)
 
     def coordinate_replies():
         replies = [{} for _ in range(size)]
@@ -218,7 +219,7 @@ def build_surface_mesh(mesh, members, wall_keys, coordinate_owners, comm, checke
         return replies
 
     replies = checked(coordinate_replies)
-    received = replies if comm is None else comm.alltoall(replies)
+    received = replies if comm is None else large_objects(comm).alltoall(replies)
 
     def result():
         values = {node:xyz for part in received for node,xyz in part.items()}
@@ -276,7 +277,7 @@ def distribute_surface_forces(mesh, surface, wall_forces, scale, comm, checked):
     outgoing = checked(contributions)
     # Unlike ADflow's patch-local force copies, our interface exposes one unique
     # owner per shared node. ADD remote contributions on that owner, not root.
-    received = outgoing if comm is None else comm.alltoall(outgoing)
+    received = outgoing if comm is None else large_objects(comm).alltoall(outgoing)
 
     def assemble():
         ids = surface["node_ids"]

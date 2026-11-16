@@ -12,6 +12,7 @@ from collections.abc import Mapping
 from numbers import Integral
 from types import MappingProxyType
 import numpy as np
+from .._mpi_objects import large_objects
 from .volume_layout import VolumeMeshLayout
 from ._interface_validation import validate_interfaces
 from ..surface_mesh import SurfaceTopology
@@ -400,7 +401,7 @@ class CFL3DMeshAdapter:
             g: (points[idx], fixed[idx], prescribed[idx], self.canonical[idx], self.graphs[g])
             for g, idx in self.zone_nodes.items()
         }
-        parts = [local] if self.comm is None else self.comm.gather(local, root=0)
+        parts = [local] if self.comm is None else large_objects(self.comm).gather(local, root=0)
 
         def native():
             if self.rank != 0:
@@ -502,7 +503,7 @@ class CFL3DMeshAdapter:
             ]
 
         outgoing = self._checked(native)
-        return outgoing[0] if self.comm is None else self.comm.scatter(outgoing, root=0)
+        return outgoing[0] if self.comm is None else large_objects(self.comm).scatter(outgoing, root=0)
 
     def _controls(self, targets):
         from .. import _native

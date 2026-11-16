@@ -682,6 +682,14 @@ regression evidence.
 
 ## MPI
 
+Python communication carrying coordinate, field or detailed surface arrays uses
+`mpi4py.util.pkl5` (mpi4py >= 4.0) to support payloads exceeding the traditional
+2 GiB MPI byte-count limit. This is internal: the public/native communicator and
+the communicators passed to IDWarp/MPhys are unchanged. Small control messages
+and existing streaming checkpoint transfers retain their original paths. Native
+initialization still gathers whole-case coordinates on root; pkl5 does not remove
+that memory requirement or change Fortran integer/workspace limits.
+
 ### Automatic block splitting at initialization
 
 When MPI workers (`comm.size - 1`, excluding the native host) outnumber input

@@ -1870,3 +1870,20 @@ repair, existing-output/in-place refusal, explicit overwrite and injected native
 write failure preserving the previous output and cleaning the temporary file.
 Five orientation unit tests pass. File helper currently requires one base and
 complete local mesh memory, including a verification copy.
+
+## 2026-11-16: pkl5 large-object communication
+
+Added lazy _mpi_objects.large_objects wrapper borrowing the original communicator.
+Large array object transfers now use pkl5 collectives: setup gather/compatibility
+scatter, repartition and split alltoall, explicit field/wall collection, surface
+exchange, interface checks and mesh adapter payloads. Metadata/control collectives
+and bounded streaming checkpoint transfers remain unchanged. No native code,
+allocation layout, public communicator or external adapter communicator changed.
+Existing mpi4py>=4.0 dependency is retained; required pkl5 methods are checked.
+
+Validation: 14 unit tests (block split, mesh exchange, surface mesh) passed;
+3-rank validate_block_split_mpi.py --legacy and 4-rank
+validate_idwarp_exchange.py passed with local mpi4py 4.1.1 / Intel MPI.
+No >2 GiB test was run or added to the repository, per user request. Production
+OpenMPI 5.0.10 and the user's >2 GiB grid were not exercised locally. Root setup
+memory peaks and native integer/workspace limits are unchanged.
